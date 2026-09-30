@@ -1,0 +1,17 @@
+[package]
+name = "piuma"
+version = "0.1.0"
+edition = "2021"
+description = "Pannello di sistema leggero per Wayland (Hyprland)"
+license = "Apache-2.0"
+
+[dependencies]
+iced = { version = "0.14", features = ["smol"] }
+iced_exwlshell = { git = "https://github.com/waycrate/exwlshelleventloop.git", branch = "master" }
+log = "0.4"
+simple_logger = "5"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
