@@ -48,6 +48,7 @@ pub struct Sensor {
     pub border_width_hover: Option<u32>,
     pub border_radius: Option<u32>,
     pub padding: Option<u32>,
+    pub action: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -107,6 +108,7 @@ impl Default for Sensor {
             border_width_hover: None,
             border_radius: None,
             padding: None,
+            action: None,
         }
     }
 }
@@ -159,6 +161,7 @@ pub enum Message {
     SensorBorderWidthHoverChanged(usize, usize, u32),
     SensorBorderRadiusChanged(usize, usize, u32),
     SensorPaddingChanged(usize, usize, u32),
+    SensorActionChanged(usize, usize, String),
     SaveConfig,
     LoadConfig,
     ResetConfig,
@@ -280,6 +283,10 @@ impl PiumaSetup {
             if let Some(val) = opt {
                 map.insert(key.to_string(), JsonValue::String(val.clone()));
             }
+        }
+
+        if let Some(action) = &sensor.action {
+            map.insert("action".to_string(), JsonValue::String(action.clone()));
         }
 
         for (key, opt) in [
@@ -668,6 +675,14 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                 }
             }
         }
+        Message::SensorActionChanged(section_index, sensor_index, value) => {
+            if section_index < state.config.sections.len() {
+                let section = &mut state.config.sections[section_index];
+                if sensor_index < section.sensors.len() {
+                    section.sensors[sensor_index].action = if value.is_empty() { None } else { Some(value) };
+                }
+            }
+        }
         Message::SaveConfig => return state.save_config(),
         Message::LoadConfig => return state.load_config(),
         Message::ResetConfig => {
@@ -964,6 +979,11 @@ fn sensor_view(section_index: usize, sensor_index: usize, sensor: &Sensor) -> El
     let padding_slider = Slider::new(0u32..=20u32, sensor.padding.unwrap_or(0), move |value| Message::SensorPaddingChanged(section_index, sensor_index, value))
         .width(80);
 
+    let action_input = TextInput::new("Action (e.g. close_panel or command)",
+        sensor.action.as_deref().unwrap_or(""))
+        .on_input(move |value| Message::SensorActionChanged(section_index, sensor_index, value))
+        .width(220);
+
     let sensor_col = column![
         Row::new()
             .push(name_input)
@@ -992,6 +1012,10 @@ fn sensor_view(section_index: usize, sensor_index: usize, sensor: &Sensor) -> El
             .push(border_radius_slider)
             .push(text("Pad:").width(30))
             .push(padding_slider)
+            .spacing(5),
+        Row::new()
+            .push(text("Action:").width(55))
+            .push(action_input)
             .spacing(5),
         button("Remove Sensor").on_press(Message::SensorRemoved(section_index, sensor_index)).padding(5),
     ]
