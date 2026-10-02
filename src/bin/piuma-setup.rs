@@ -64,7 +64,7 @@ impl Default for PiumaConfig {
     fn default() -> Self {
         PiumaConfig {
             font: Some("Noto Sans".to_string()),
-            font_size: 14,
+            font_size: 12,
             section_layout: "horizontal".to_string(),
             default_section_weight: 1,
             default_bg_color: Some("#1a1b26".to_string()),
