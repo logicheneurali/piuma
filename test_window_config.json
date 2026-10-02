@@ -1,0 +1,58 @@
+{
+  "panel": {
+    "font": "Noto Sans",
+    "font_size": 12,
+    "section_layout": "horizontal",
+    "default_section_weight": 1,
+    "default_bg_color": "#1a1b26",
+    "default_text_color": "#e8e8e8",
+    "sections": [
+      {
+        "name": "System",
+        "layout": "horizontal",
+        "weight": null,
+        "bg_color": "#2d2d3a",
+        "text_color": "#ff6b6b",
+        "sensors": [
+          {
+            "name": "CPU",
+            "description": "CPU usage percentage",
+            "source": { "type": "ProcCpu" },
+            "text_color": "#ffaa00",
+            "bg_color": null
+          },
+          {
+            "name": "GPU",
+            "description": "NVIDIA GPU load",
+            "source": { "type": "NvidiaGpu" },
+            "text_color": null,
+            "bg_color": null
+          },
+          {
+            "name": "RAM",
+            "description": "Memory usage (used/total MB)",
+            "source": { "type": "ProcMem" },
+            "text_color": null,
+            "bg_color": null
+          }
+        ]
+      },
+      {
+        "name": "Window",
+        "layout": "horizontal",
+        "weight": null,
+        "bg_color": "#2a2a3e",
+        "text_color": "#4ecdc4",
+        "sensors": [
+          {
+            "name": "Focused",
+            "description": "Focused window title",
+            "source": { "type": "Window" },
+            "text_color": null,
+            "bg_color": null
+          }
+        ]
+      }
+    ]
+  }
+}

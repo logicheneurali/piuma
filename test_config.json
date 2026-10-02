@@ -1,0 +1,77 @@
+{
+  "panel": {
+    "font": "Noto Sans",
+    "font_size": 16,
+    "section_layout": "horizontal",
+    "default_section_weight": 1,
+    "default_bg_color": "#1a1b26",
+    "default_text_color": "#e8e8e8",
+    "sections": [
+      {
+        "name": "CPU",
+        "layout": "horizontal",
+        "bg_color": "#2d2d3a",
+        "text_color": "#ff6b6b",
+        "sensors": [
+          {
+            "name": "CPU Load",
+            "description": "System CPU usage",
+            "source": { "ProcCpu": {} },
+            "text_color": "#ffaa00",
+            "bg_color": null
+          },
+          {
+            "name": "GPU Load",
+            "description": "NVIDIA GPU",
+            "source": { "NvidiaGpu": {} },
+            "text_color": null,
+            "bg_color": null
+          }
+        ]
+      },
+      {
+        "name": "Memory",
+        "layout": "vertical",
+        "bg_color": null,
+        "text_color": null,
+        "sensors": [
+          {
+            "name": "RAM Usage",
+            "description": "Memory",
+            "source": { "ProcMem": {} },
+            "text_color": null,
+            "bg_color": "#2a2a3e"
+          },
+          {
+            "name": "Disk Usage",
+            "description": "/ partition",
+            "source": { "ProcDisk": {} },
+            "text_color": null,
+            "bg_color": null
+          },
+          {
+            "name": "Uptime",
+            "description": "System uptime",
+            "source": { "Uptime": {} },
+            "text_color": null,
+            "bg_color": null
+          },
+          {
+            "name": "Hostname",
+            "description": "System hostname",
+            "source": { "EnvVar": { "env_var": "HOSTNAME" } },
+            "text_color": "#00ff00",
+            "bg_color": null
+          },
+          {
+            "name": "Mode",
+            "description": "Static demo",
+            "source": { "StaticText": { "static_text": "Development" } },
+            "text_color": null,
+            "bg_color": null
+          }
+        ]
+      }
+    ]
+  }
+}

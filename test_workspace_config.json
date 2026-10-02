@@ -1,0 +1,47 @@
+{
+  "panel": {
+    "font": "Noto Sans",
+    "font_size": 12,
+    "section_layout": "horizontal",
+    "default_section_weight": 1,
+    "default_bg_color": "#1a1b26",
+    "default_text_color": "#e8e8e8",
+    "anchor": "top",
+    "align": "center",
+    "percentage": 1.0,
+    "sections": [
+      {
+        "name": "Workspace",
+        "layout": "horizontal",
+        "weight": null,
+        "bg_color": "#2d2d3a",
+        "text_color": "#4ecdc4",
+        "sensors": [
+          {
+            "name": "Workspace",
+            "description": "Current workspace",
+            "source": { "type": "Workspace" },
+            "text_color": "#ffffff",
+            "bg_color": "#333333"
+          }
+        ]
+      },
+      {
+        "name": "System",
+        "layout": "horizontal",
+        "weight": null,
+        "bg_color": "#2d2d3a",
+        "text_color": "#ff6b6b",
+        "sensors": [
+          {
+            "name": "CPU",
+            "description": "CPU usage percentage",
+            "source": { "type": "ProcCpu" },
+            "text_color": "#ffaa00",
+            "bg_color": "#333333"
+          }
+        ]
+      }
+    ]
+  }
+}

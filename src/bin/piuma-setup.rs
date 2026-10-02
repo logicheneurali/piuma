@@ -18,7 +18,6 @@ pub struct PiumaConfig {
     pub default_text_color: Option<String>,
     pub anchor: Option<String>,
     pub align: Option<String>,
-    pub percentage: f32,
     pub sections: Vec<Section>,
 }
 
@@ -72,7 +71,6 @@ impl Default for PiumaConfig {
             default_text_color: Some("#e8e8e8".to_string()),
             anchor: Some("top".to_string()),
             align: Some("center".to_string()),
-            percentage: 1.0,
             sections: vec![Section::default()],
         }
     }
@@ -137,7 +135,6 @@ pub enum Message {
     DefaultTextColorChanged(String),
     AnchorChanged(String),
     AlignChanged(String),
-    PercentageChanged(f32),
     SectionAdded,
     SectionRemoved(usize),
     SectionNameChanged(usize, String),
@@ -211,7 +208,6 @@ impl PiumaSetup {
         if let Some(align) = &self.config.align {
             panel.insert("align".to_string(), JsonValue::String(align.clone()));
         }
-        panel.insert("percentage".to_string(), JsonValue::Number(serde_json::Number::from_f64(self.config.percentage as f64).unwrap_or_else(|| serde_json::Number::from(1))));
 
         let sections_vec: Vec<JsonValue> = self.config.sections.iter().map(|s| self.section_to_json(s)).collect();
         panel.insert("sections".to_string(), JsonValue::Array(sections_vec));
@@ -398,9 +394,6 @@ impl PiumaSetup {
         if let Some(align) = panel.get("align").and_then(|v| v.as_str()) {
             self.config.align = Some(align.to_string());
         }
-        if let Some(p) = panel.get("percentage").and_then(|v| v.as_f64()) {
-            self.config.percentage = p as f32;
-        }
 
         if let Some(sections) = panel.get("sections").and_then(|v| v.as_array()) {
             self.config.sections = sections.iter().filter_map(|s| self.load_section(s)).collect();
@@ -507,7 +500,6 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
         Message::DefaultTextColorChanged(value) => state.config.default_text_color = if value.is_empty() { None } else { Some(value) },
         Message::AnchorChanged(value) => state.config.anchor = if value.is_empty() { None } else { Some(value) },
         Message::AlignChanged(value) => state.config.align = if value.is_empty() { None } else { Some(value) },
-        Message::PercentageChanged(value) => state.config.percentage = value,
         Message::SectionAdded => {
             state.config.sections.push(Section::default());
         }
@@ -783,18 +775,10 @@ fn panel_settings(state: &PiumaSetup) -> Element<Message> {
     let align_row = Row::new()
         .push(text("Align:").width(120))
         .push(PickList::new(
-            vec!["start".to_string(), "center".to_string(), "end".to_string()],
+            vec!["left".to_string(), "center".to_string(), "right".to_string()],
             Some(state.config.align.clone().unwrap_or_default()),
             Message::AlignChanged,
         ).width(120))
-        .spacing(10);
-
-    let percentage_row = Row::new()
-        .push(text("Percentage:").width(120))
-        .push(Slider::new(0.2f32..=1.0f32, state.config.percentage, Message::PercentageChanged)
-            .step(0.1_f32)
-            .width(150))
-        .push(text(format!("{:.1}", state.config.percentage)).width(40))
         .spacing(10);
 
     column![
@@ -806,7 +790,6 @@ fn panel_settings(state: &PiumaSetup) -> Element<Message> {
         default_text_color_row,
         anchor_row,
         align_row,
-        percentage_row,
     ]
     .spacing(8)
     .into()

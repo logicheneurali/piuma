@@ -444,9 +444,10 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
         .unwrap_or(DEFAULT_BG_COLOR);
 
     // Position the real panel within the surface according to `align`.
-    // The surface is already sized by `panel_size` (screen-wide on the cross
-    // axis, `percentage`-sized on the main axis), so we just align the inner
-    // container along the main axis.
+    // The surface is screen-sized on the cross axis and sized to the panel's
+    // own content on the main axis; the inner container is shrink-wrapped to
+    // the content (so the panel is as big as its sensors) and aligned on the
+    // main axis.
     let vertical = panel
         .config
         .panel
@@ -461,25 +462,34 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
         .as_deref()
         .unwrap_or("center");
 
-    let main_layout = container(main_layout).style(move |_theme: &iced::Theme| ContainerStyle {
-        background: Some(Background::Color(panel_bg)),
-        ..ContainerStyle::default()
-    });
+    let main_layout = container(main_layout)
+        .width(Length::Shrink)
+        .height(Length::Shrink)
+        .style(move |_theme: &iced::Theme| ContainerStyle {
+            background: Some(Background::Color(panel_bg)),
+            ..ContainerStyle::default()
+        });
 
     let main_layout = if vertical {
-        // Main axis is vertical: align along Y.
-        match align {
-            "top" => main_layout.align_y(Alignment::Start),
-            "bottom" => main_layout.align_y(Alignment::End),
-            _ => main_layout.align_y(Alignment::Center),
-        }
+        // Vertical panel: main axis is Y. Fill the cross axis (X) so the
+        // background spans the surface, then align along Y.
+        main_layout
+            .width(Length::Fill)
+            .align_y(match align {
+                "top" => Alignment::Start,
+                "bottom" => Alignment::End,
+                _ => Alignment::Center,
+            })
     } else {
-        // Main axis is horizontal: align along X.
-        match align {
-            "left" => main_layout.align_x(Alignment::Start),
-            "right" => main_layout.align_x(Alignment::End),
-            _ => main_layout.align_x(Alignment::Center),
-        }
+        // Horizontal panel: main axis is X. Fill the cross axis (Y) so the
+        // background spans the surface, then align along X.
+        main_layout
+            .height(Length::Fill)
+            .align_x(match align {
+                "left" => Alignment::Start,
+                "right" => Alignment::End,
+                _ => Alignment::Center,
+            })
     };
 
     main_layout.into()
@@ -489,12 +499,14 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
 
 /// Panel size (as the LayerSurface requests it).
 ///
-/// A transparent wrapper fills the whole screen on the axis perpendicular to
-/// the panel orientation, so the real panel can be positioned (and centered)
-/// freely inside it. `percentage` (0..=1) is the fraction of the *main* axis:
+/// The surface spans the whole screen on the axis *perpendicular* to the
+/// panel orientation, so the inner panel can be positioned freely inside it.
+/// The main axis (the direction the panel extends) is sized to the panel's
+/// own content — there is no `percentage` anymore; the panel is as big as its
+/// sensors.
 ///
-/// * horizontal panel  -> fraction of the screen width.
-/// * vertical panel    -> fraction of the screen height.
+/// * horizontal panel  -> `screen_width  x panel_thickness`
+/// * vertical panel    -> `panel_thickness x screen_height`
 fn panel_size(config: &config::Config, screen_width: u32, screen_height: u32) -> iced_exwlshell::settings::LayerSize {
     let vertical = config
         .panel
@@ -503,26 +515,19 @@ fn panel_size(config: &config::Config, screen_width: u32, screen_height: u32) ->
         .map(|s| s.as_str())
         .unwrap_or("horizontal") == "vertical";
 
-    // Main-axis extent: `percentage` of the screen on that axis.
-    let percentage = config.panel.percentage.unwrap_or(0.0).clamp(0.0, 1.0);
-    let main_axis = if percentage > 0.0 {
-        let screen = if vertical { screen_height } else { screen_width };
-        let px = (screen as f32 * percentage) as u32;
-        if px == 0 {
-            iced_exwlshell::settings::Extent::Fill
-        } else {
-            iced_exwlshell::settings::Extent::px(px)
-        }
+    // Cross-axis extent: the whole screen, so the surface reaches the edges
+    // along the perpendicular direction.
+    let cross = if vertical {
+        iced_exwlshell::settings::Extent::px(screen_width)
     } else {
-        iced_exwlshell::settings::Extent::Fill
+        iced_exwlshell::settings::Extent::px(screen_height)
     };
 
-    // Cross-axis extent: the panel's thickness on the screen (`DEFAULT_HEIGHT`).
-    // The main axis carries `percentage` of the screen.
-    let cross = iced_exwlshell::settings::Extent::px(DEFAULT_HEIGHT);
-
-    let (width, height) = if vertical { (cross, main_axis) } else { (main_axis, cross) };
-    iced_exwlshell::settings::LayerSize { width, height }
+    // Main axis is content-sized, so leave it to the compositor (Fill).
+    iced_exwlshell::settings::LayerSize {
+        width: if vertical { cross } else { iced_exwlshell::settings::Extent::Fill },
+        height: if vertical { iced_exwlshell::settings::Extent::Fill } else { cross },
+    }
 }
 
 /// Anchor set for the surface.
@@ -585,7 +590,7 @@ fn main() -> Result<(), iced_exwlshell::Error> {
 
     eprintln!("[piuma] Config loaded: {} section(s)", config.panel.sections.len());
 
-    // Best-effort primary monitor dimensions for percentage-based sizing.
+    // Best-effort primary monitor dimensions for screen-wide surface sizing.
     unsafe {
         SCREEN_WIDTH = active_screen_width().unwrap_or(1920);
         SCREEN_HEIGHT = active_screen_height().unwrap_or(1080);
