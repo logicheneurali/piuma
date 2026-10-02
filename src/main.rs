@@ -30,6 +30,7 @@ static mut CONFIG: Option<config::Config> = None;
 static mut CONFIG_PATH: Option<String> = None;
 static mut PANEL_SHOULD_CLOSE: bool = false;
 static mut SCREEN_WIDTH: u32 = 1920;
+static mut SCREEN_HEIGHT: u32 = 1080;
 
 // ── colours / defaults ────────────────────────────────────────────
 
@@ -441,33 +442,100 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
         .as_ref()
         .and_then(|s| config::parse_color(s).ok())
         .unwrap_or(DEFAULT_BG_COLOR);
-    container_with_bg(main_layout, panel_bg)
+
+    // Position the real panel within the surface according to `align`.
+    // The surface is already sized by `panel_size` (screen-wide on the cross
+    // axis, `percentage`-sized on the main axis), so we just align the inner
+    // container along the main axis.
+    let vertical = panel
+        .config
+        .panel
+        .section_layout
+        .as_ref()
+        .map(|s| s.as_str())
+        .unwrap_or("horizontal") == "vertical";
+    let align = panel
+        .config
+        .panel
+        .align
+        .as_deref()
+        .unwrap_or("center");
+
+    let main_layout = container(main_layout).style(move |_theme: &iced::Theme| ContainerStyle {
+        background: Some(Background::Color(panel_bg)),
+        ..ContainerStyle::default()
+    });
+
+    let main_layout = if vertical {
+        // Main axis is vertical: align along Y.
+        match align {
+            "top" => main_layout.align_y(Alignment::Start),
+            "bottom" => main_layout.align_y(Alignment::End),
+            _ => main_layout.align_y(Alignment::Center),
+        }
+    } else {
+        // Main axis is horizontal: align along X.
+        match align {
+            "left" => main_layout.align_x(Alignment::Start),
+            "right" => main_layout.align_x(Alignment::End),
+            _ => main_layout.align_x(Alignment::Center),
+        }
+    };
+
+    main_layout.into()
 }
 
 // ── positioning helpers ─────────────────────────────────────────────
 
-/// Panel width. `percentage` (0..=1) is the fraction of the available
-/// screen width; `None`/0 falls back to fitting the content.
-fn panel_width(config: &config::Config, screen_width: u32) -> iced_exwlshell::settings::LayerSize {
+/// Panel size (as the LayerSurface requests it).
+///
+/// A transparent wrapper fills the whole screen on the axis perpendicular to
+/// the panel orientation, so the real panel can be positioned (and centered)
+/// freely inside it. `percentage` (0..=1) is the fraction of the *main* axis:
+///
+/// * horizontal panel  -> fraction of the screen width.
+/// * vertical panel    -> fraction of the screen height.
+fn panel_size(config: &config::Config, screen_width: u32, screen_height: u32) -> iced_exwlshell::settings::LayerSize {
+    let vertical = config
+        .panel
+        .section_layout
+        .as_ref()
+        .map(|s| s.as_str())
+        .unwrap_or("horizontal") == "vertical";
+
+    // Main-axis extent: `percentage` of the screen on that axis.
     let percentage = config.panel.percentage.unwrap_or(0.0).clamp(0.0, 1.0);
-    if percentage > 0.0 {
-        let w = (screen_width as f32 * percentage) as u32;
-        if w == 0 {
-            return iced_exwlshell::settings::LayerSize::fill_width(DEFAULT_HEIGHT);
-        }
-        iced_exwlshell::settings::LayerSize {
-            width: iced_exwlshell::settings::Extent::px(w),
-            height: iced_exwlshell::settings::Extent::px(DEFAULT_HEIGHT),
+    let main_axis = if percentage > 0.0 {
+        let screen = if vertical { screen_height } else { screen_width };
+        let px = (screen as f32 * percentage) as u32;
+        if px == 0 {
+            iced_exwlshell::settings::Extent::Fill
+        } else {
+            iced_exwlshell::settings::Extent::px(px)
         }
     } else {
-        iced_exwlshell::settings::LayerSize::fill_width(DEFAULT_HEIGHT)
-    }
+        iced_exwlshell::settings::Extent::Fill
+    };
+
+    // Cross-axis extent: the panel's thickness on the screen (`DEFAULT_HEIGHT`).
+    // The main axis carries `percentage` of the screen.
+    let cross = iced_exwlshell::settings::Extent::px(DEFAULT_HEIGHT);
+
+    let (width, height) = if vertical { (cross, main_axis) } else { (main_axis, cross) };
+    iced_exwlshell::settings::LayerSize { width, height }
 }
 
-/// Anchor set derived from `align` + panel layout. Precision is best-effort.
+/// Anchor set for the surface.
 ///
-/// * horizontal panel -> Left / Center / Right along the X axis.
-/// * vertical panel   -> Top / Center / Bottom along the Y axis.
+/// The surface spans the screen on the axis *perpendicular* to the panel
+/// orientation (so the inner panel can be positioned freely), and is pinned to
+/// the screen edge on its own axis:
+///
+/// * horizontal, top   -> `Top  | Left  | Right`
+/// * horizontal, bottom-> `Bottom| Left  | Right`
+/// * vertical,   left  -> `Left  | Top   | Bottom`
+/// * vertical,   right -> `Right | Top   | Bottom`
+/// * center / anything -> pinned to the nearest edge (top / left).
 fn panel_anchor(config: &config::Config) -> Anchor {
     let vertical = config
         .panel
@@ -475,19 +543,18 @@ fn panel_anchor(config: &config::Config) -> Anchor {
         .as_ref()
         .map(|s| s.as_str())
         .unwrap_or("horizontal") == "vertical";
-    let align = config
-        .panel
-        .align
-        .as_deref()
-        .unwrap_or("center");
 
-    match (vertical, align) {
-        (true, "top") => Anchor::Top | Anchor::Left | Anchor::Right,
-        (true, "bottom") => Anchor::Bottom | Anchor::Left | Anchor::Right,
-        (true, _) => Anchor::Top | Anchor::Bottom, // center: vertical centering
-        (false, "left") => Anchor::Left | Anchor::Top | Anchor::Bottom,
-        (false, "right") => Anchor::Right | Anchor::Top | Anchor::Bottom,
-        (false, _) => Anchor::Top | Anchor::Bottom, // center: horizontal centering
+    if vertical {
+        match config.panel.align.as_deref().unwrap_or("center") {
+            "bottom" => Anchor::Bottom | Anchor::Left | Anchor::Right,
+            "right" => Anchor::Right | Anchor::Top | Anchor::Bottom,
+            _ => Anchor::Top | Anchor::Left | Anchor::Bottom,
+        }
+    } else {
+        match config.panel.align.as_deref().unwrap_or("center") {
+            "right" => Anchor::Right | Anchor::Top | Anchor::Bottom,
+            _ => Anchor::Top | Anchor::Left | Anchor::Right,
+        }
     }
 }
 
@@ -518,9 +585,10 @@ fn main() -> Result<(), iced_exwlshell::Error> {
 
     eprintln!("[piuma] Config loaded: {} section(s)", config.panel.sections.len());
 
-    // Best-effort primary monitor width for percentage-based panel sizing.
+    // Best-effort primary monitor dimensions for percentage-based sizing.
     unsafe {
         SCREEN_WIDTH = active_screen_width().unwrap_or(1920);
+        SCREEN_HEIGHT = active_screen_height().unwrap_or(1080);
     }
 
     unsafe { CONFIG = Some(config.clone()); }
@@ -550,7 +618,7 @@ fn main() -> Result<(), iced_exwlshell::Error> {
             .style(style)
             .wl_settings(ExWlSettings {
                 layer_settings: LayerShellSettings {
-                    size: panel_width(&panel_config, unsafe { SCREEN_WIDTH }),
+                    size: panel_size(&panel_config, unsafe { SCREEN_WIDTH }, unsafe { SCREEN_HEIGHT }),
                     exclusive_zone: DEFAULT_EXCLUSIVE_ZONE,
                     anchor: panel_anchor(&panel_config),
                     layer: Layer::Top,
@@ -583,6 +651,21 @@ fn active_screen_width() -> Option<u32> {
     let text = String::from_utf8_lossy(&output.stdout);
     // Take the first monitor's width field.
     let key = "\"width\"";
+    let mut parts = text.rsplitn(2, key);
+    let after = parts.next()?;
+    let num_part = after.split(':').next()?;
+    num_part.trim().trim_matches(|c: char| c == ',' || c.is_whitespace()).parse::<u32>().ok()
+}
+
+/// Best-effort primary monitor height, via `hyprctl`.
+fn active_screen_height() -> Option<u32> {
+    let output = std::process::Command::new("hyprctl")
+        .args(["monitors", "-j"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    // Take the first monitor's height field.
+    let key = "\"height\"";
     let mut parts = text.rsplitn(2, key);
     let after = parts.next()?;
     let num_part = after.split(':').next()?;
