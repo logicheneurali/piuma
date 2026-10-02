@@ -887,25 +887,47 @@ fn sensor_view(section_index: usize, sensor_index: usize, sensor: &Sensor) -> El
         move |value| Message::SensorSourceTypeChanged(section_index, sensor_index, value),
     ).width(110);
 
-    let source_config = match sensor.source_type.as_str() {
+    let source_config: Element<Message> = match sensor.source_type.as_str() {
+        "ProcCpu" | "ProcMem" | "ProcDisk" | "Uptime" | "NvidiaGpu" | "Window" | "Workspace" => {
+            let label = match sensor.source_type.as_str() {
+                "ProcCpu" => "CPU usage",
+                "ProcMem" => "Memory",
+                "ProcDisk" => "Disk",
+                "Uptime" => "Uptime",
+                "NvidiaGpu" => "Nvidia GPU",
+                "Window" => "Focused window",
+                "Workspace" => "Workspace",
+                _ => "Sensor",
+            };
+            Row::new()
+                .push(text(format!("{} (no extra config)", label)))
+                .spacing(5)
+                .into()
+        }
         "Network" => TextInput::new("Interface", sensor.source_config.interface.as_deref().unwrap_or(""))
             .on_input(move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "interface".to_string(), value))
-            .width(100),
+            .width(100)
+            .into(),
         "Audio" => TextInput::new("Device", sensor.source_config.device.as_deref().unwrap_or(""))
             .on_input(move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "device".to_string(), value))
-            .width(100),
+            .width(100)
+            .into(),
         "Clock" => TextInput::new("Format", sensor.source_config.format.as_deref().unwrap_or(""))
             .on_input(move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "format".to_string(), value))
-            .width(100),
+            .width(100)
+            .into(),
         "Command" => TextInput::new("Command", sensor.source_config.command.as_deref().unwrap_or(""))
             .on_input(move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "command".to_string(), value))
-            .width(160),
+            .width(160)
+            .into(),
         "EnvVar" => TextInput::new("Env Var", sensor.source_config.env_var.as_deref().unwrap_or(""))
             .on_input(move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "env_var".to_string(), value))
-            .width(100),
+            .width(100)
+            .into(),
         "StaticText" => TextInput::new("Text", sensor.source_config.static_text.as_deref().unwrap_or(""))
             .on_input(move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "text".to_string(), value))
-            .width(100),
+            .width(100)
+            .into(),
         _ => return Row::new().spacing(5).into(),
     };
 
