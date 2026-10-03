@@ -37,7 +37,6 @@ static mut SCREEN_HEIGHT: u32 = 1080;
 const DEFAULT_FONT: &str = "Noto Sans";
 const DEFAULT_FONT_SIZE: u32 = 14;
 const DEFAULT_HEIGHT: u32 = 32;
-const DEFAULT_EXCLUSIVE_ZONE: i32 = 32;
 const DEFAULT_BG_COLOR: Color = Color::from_rgba(0.06, 0.06, 0.08, 0.85);
 const DEFAULT_TEXT_COLOR: Color = Color::from_rgb(0.88, 0.88, 0.94);
 
@@ -90,6 +89,9 @@ struct Panel {
     /// reload to decide whether a runtime `LayoutChange` is needed.
     last_size: LayerSize,
     last_anchor: Anchor,
+    /// Exclusive zone currently applied (equals the panel thickness, the
+    /// space hyprland subtracts for windows); re-sent when it changes.
+    last_exclusive_zone: i32,
 }
 
 // ── messages ────────────────────────────────────────────────────────
@@ -326,14 +328,20 @@ fn update(panel: &mut Panel, message: Message, _time: Instant) -> Command<Messag
             // Hot reload: pick up config file changes (content and, when
             // layout/align differ from what is applied, surface geometry).
             let mut geometry_changed = false;
+            let mut zone_changed = false;
             if let Some(reloaded) = maybe_reload(panel) {
                 panel.config = reloaded;
                 let size = panel_size(&panel.config, unsafe { SCREEN_WIDTH }, unsafe { SCREEN_HEIGHT });
                 let anchor = panel_anchor(&panel.config);
+                let zone = panel_thickness(&panel.config) as i32;
                 if size != panel.last_size || anchor != panel.last_anchor {
                     panel.last_size = size;
                     panel.last_anchor = anchor;
                     geometry_changed = true;
+                }
+                if zone != panel.last_exclusive_zone {
+                    panel.last_exclusive_zone = zone;
+                    zone_changed = true;
                 }
             }
 
@@ -449,16 +457,20 @@ fn update(panel: &mut Panel, message: Message, _time: Instant) -> Command<Messag
                 });
             }
             panel.sections = sections;
+            let mut cmds: Vec<Command<Message>> = Vec::new();
             if geometry_changed {
                 // Resize/re-anchor the layer surface at runtime; the view
                 // already uses the new config for content and alignment.
-                Command::done(Message::LayoutChange {
+                cmds.push(Command::done(Message::LayoutChange {
                     anchor: panel.last_anchor,
                     size: panel.last_size,
-                })
-            } else {
-                Command::none()
+                }));
             }
+            if zone_changed {
+                // Keep hyprland's reserved space in step with the thickness.
+                cmds.push(Command::done(Message::ExclusiveZoneChange(panel.last_exclusive_zone)));
+            }
+            if cmds.is_empty() { Command::none() } else { Command::batch(cmds) }
         }
         Message::IcedEvent(e) => {
             // Mouse enter/leave/press are handled per-sensor by MouseArea,
@@ -742,6 +754,13 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
 
 // ── positioning helpers ─────────────────────────────────────────────
 
+/// Panel thickness on the cross axis, in pixels: `panel.thickness` from the
+/// config (default 32px, minimum 1px). Single source of truth for the surface
+/// size and for the exclusive zone hyprland reserves.
+fn panel_thickness(config: &config::Config) -> u32 {
+    config.panel.thickness.unwrap_or(DEFAULT_HEIGHT).max(1)
+}
+
 /// Panel size (as the LayerSurface requests it).
 ///
 /// The surface matches the screen on the axis *perpendicular* to the panel
@@ -760,7 +779,7 @@ fn panel_size(config: &config::Config, screen_width: u32, screen_height: u32) ->
         .map(|s| s.as_str())
         .unwrap_or("horizontal");
     let vertical = layout == "vertical";
-    let thickness = config.panel.thickness.unwrap_or(DEFAULT_HEIGHT).max(1);
+    let thickness = panel_thickness(config);
 
     let (width, height) = if vertical {
         (iced_exwlshell::settings::Extent::px(thickness), iced_exwlshell::settings::Extent::px(screen_height))
@@ -860,10 +879,12 @@ fn main() -> Result<(), iced_exwlshell::Error> {
             timed(
                 || {
                     let cfg = unsafe { CONFIG.as_ref().map(|c| c.clone()).unwrap_or_else(|| config::default_config()) };
-                    // Initial geometry must match what wl_settings applies at
-                    // startup, so reloads only emit LayoutChange on change.
+                    // Initial geometry (size, anchor, exclusive zone) must
+                    // match what wl_settings applies at startup, so reloads
+                    // only emit LayoutChange/ExclusiveZoneChange on change.
                     let size = panel_size(&cfg, unsafe { SCREEN_WIDTH }, unsafe { SCREEN_HEIGHT });
                     let anchor = panel_anchor(&cfg);
+                    let zone = panel_thickness(&cfg) as i32;
                     Panel {
                         config: cfg,
                         sections: Vec::new(),
@@ -871,6 +892,7 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         last_reload: config_file_state(),
                         last_size: size,
                         last_anchor: anchor,
+                        last_exclusive_zone: zone,
                     }
                 },
                 namespace,
@@ -882,7 +904,9 @@ fn main() -> Result<(), iced_exwlshell::Error> {
             .wl_settings(ExWlSettings {
                 layer_settings: LayerShellSettings {
                     size: panel_size(&panel_config, unsafe { SCREEN_WIDTH }, unsafe { SCREEN_HEIGHT }),
-                    exclusive_zone: DEFAULT_EXCLUSIVE_ZONE,
+                    // Reserve exactly the configured thickness: a constant
+                    // here would leave dead space whenever thickness != 32.
+                    exclusive_zone: panel_thickness(&panel_config) as i32,
                     anchor: panel_anchor(&panel_config),
                     layer: Layer::Top,
                     start_mode: StartMode::Active,
