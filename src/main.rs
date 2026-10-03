@@ -566,11 +566,12 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
                 .size(font_size)
                 .font(font_obj);
 
+            // Name and value side by side, separated by a small gap (the
+            // colon separator was removed on request).
             let row = Row::new()
                 .push(label_widget)
-                .push(text(": ").color(text_color).size(font_size).font(font_obj))
                 .push(value_widget)
-                .spacing(2);
+                .spacing(6);
 
             let desc_str: String = s.description.clone();
             let has_desc = !desc_str.is_empty();

@@ -1,7 +1,7 @@
 //! Piuma Setup - GUI Configuration Tool
 //! A visual tool to configure Piuma panel settings using iced 0.14
 
-use iced::widget::{button, column, container, scrollable, stack, text, Column, Container, Row, TextInput, Slider, PickList};
+use iced::widget::{button, column, container, scrollable, stack, text, Button, Column, Container, Row, TextInput, Slider, PickList};
 use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Task, Theme};
 use iced::widget::text::Style as TextStyle;
 use serde_json::{Map, Value as JsonValue};
@@ -168,6 +168,9 @@ pub enum Message {
     AlignChanged(String),
     SectionAdded,
     SectionRemoved(usize),
+    /// Moves a section one position up/down in the panel order.
+    SectionMoveUp(usize),
+    SectionMoveDown(usize),
     SectionNameChanged(usize, String),
     SectionLayoutChangedIndex(usize, String),
     SectionWeightChanged(usize, u32),
@@ -175,6 +178,9 @@ pub enum Message {
     SectionTextColorChanged(usize, String),
     SensorAdded(usize),
     SensorRemoved(usize, usize),
+    /// Moves a sensor one position up/down inside its section.
+    SensorMoveUp(usize, usize),
+    SensorMoveDown(usize, usize),
     SensorNameChanged(usize, usize, String),
     SensorDescriptionChanged(usize, usize, String),
     SensorSourceTypeChanged(usize, usize, String),
@@ -543,6 +549,29 @@ impl PiumaSetup {
         outcome
     }
 
+    /// Swaps sensors `i` and `i+1` of a section, carrying their
+    /// style-block-open flags so an expanded block follows its sensor.
+    fn swap_sensors(&mut self, section_index: usize, sensor_index: usize) {
+        let (a, b) = (sensor_index, sensor_index + 1);
+        let flags = &mut self.sensor_style_open;
+        let open_a = flags.contains(&(section_index, a));
+        let open_b = flags.contains(&(section_index, b));
+        if open_a { flags.insert((section_index, b)); } else { flags.remove(&(section_index, b)); }
+        if open_b { flags.insert((section_index, a)); } else { flags.remove(&(section_index, a)); }
+        self.config.sections[section_index].sensors.swap(a, b);
+    }
+
+    /// Swaps two sections, remapping the sensors' style flags of both so
+    /// the expanded blocks stay attached to their sensors.
+    fn swap_sections(&mut self, a: usize, b: usize) {
+        self.config.sections.swap(a, b);
+        self.sensor_style_open = self
+            .sensor_style_open
+            .iter()
+            .map(|&(s, i)| if s == a { (b, i) } else if s == b { (a, i) } else { (s, i) })
+            .collect();
+    }
+
     fn load_from_json(&mut self, content: &str) -> Result<(), String> {
         let json: JsonValue = serde_json::from_str(content).map_err(|e| e.to_string())?;
         let panel = json.get("panel").ok_or("Missing panel")?;
@@ -742,6 +771,16 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                 state.config.sections.remove(index);
             }
         }
+        Message::SectionMoveUp(index) => {
+            if index > 0 {
+                state.swap_sections(index - 1, index);
+            }
+        }
+        Message::SectionMoveDown(index) => {
+            if index + 1 < state.config.sections.len() {
+                state.swap_sections(index, index + 1);
+            }
+        }
         Message::SectionNameChanged(index, value) => {
             if index < state.config.sections.len() {
                 state.config.sections[index].name = if value.is_empty() { None } else { Some(value) };
@@ -778,6 +817,18 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                 if sensor_index < section.sensors.len() {
                     section.sensors.remove(sensor_index);
                 }
+            }
+        }
+        Message::SensorMoveUp(section_index, sensor_index) => {
+            if section_index < state.config.sections.len() && sensor_index > 0 {
+                state.swap_sensors(section_index, sensor_index - 1);
+            }
+        }
+        Message::SensorMoveDown(section_index, sensor_index) => {
+            if section_index < state.config.sections.len()
+                && sensor_index + 1 < state.config.sections[section_index].sensors.len()
+            {
+                state.swap_sensors(section_index, sensor_index);
             }
         }
         Message::SensorNameChanged(section_index, sensor_index, value) => {
@@ -1092,6 +1143,13 @@ where
     V: Borrow<T> + 'a,
 {
     PickList::new(options, selected, on_select).text_size(BODY)
+}
+
+/// Small arrow button reordering a list item; without `enabled` it carries no
+/// action, which iced renders as disabled (used at the list boundaries).
+fn move_btn<'a>(label: &'a str, enabled: bool, on_press: Message) -> Button<'a, Message> {
+    let b = button(text(label).size(BODY)).padding(5).style(button::secondary);
+    if enabled { b.on_press(on_press) } else { b }
 }
 
 /// Two-column form grid: fields alternate left/right, one per cell, so long
@@ -1441,6 +1499,8 @@ fn section_view<'a>(state: &'a PiumaSetup, index: usize, section: &'a Section) -
             .style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.5, 0.5, 0.55)), ..TextStyle::default() }))
         .push(input("Section name", section.name.as_deref().unwrap_or(""), move |value| Message::SectionNameChanged(index, value))
             .width(Length::Fill))
+        .push(move_btn("▲", index > 0, Message::SectionMoveUp(index)))
+        .push(move_btn("▼", index + 1 < state.config.sections.len(), Message::SectionMoveDown(index)))
         .push(button(text("Remove").size(BODY)).on_press(Message::SectionRemoved(index)).padding(5))
         .spacing(8)
         .align_y(Alignment::Center)
@@ -1459,7 +1519,7 @@ fn section_view<'a>(state: &'a PiumaSetup, index: usize, section: &'a Section) -
     let mut sensor_list = Column::new().spacing(8).width(Length::Fill);
     for (j, sensor) in section.sensors.iter().enumerate() {
         let style_open = state.sensor_style_open.contains(&(index, j));
-        sensor_list = sensor_list.push(sensor_view(index, j, sensor, style_open));
+        sensor_list = sensor_list.push(sensor_view(index, j, section.sensors.len(), sensor, style_open));
     }
     sensor_list = sensor_list.push(
         button(text("+ Add Sensor").size(BODY)).on_press(Message::SensorAdded(index)).padding(6),
@@ -1471,12 +1531,15 @@ fn section_view<'a>(state: &'a PiumaSetup, index: usize, section: &'a Section) -
 
 /// Sensor card: identity header, source, action, then the collapsible
 /// "Style overrides" block (closed by default: overrides are optional).
-fn sensor_view(section_index: usize, sensor_index: usize, sensor: &Sensor, style_open: bool) -> Element<Message> {
+/// `sensor_count` bounds the ▼ arrow (disabled on the last sensor).
+fn sensor_view(section_index: usize, sensor_index: usize, sensor_count: usize, sensor: &Sensor, style_open: bool) -> Element<Message> {
     let header = Row::new()
         .push(input("Name", sensor.name.as_deref().unwrap_or(""), move |value| Message::SensorNameChanged(section_index, sensor_index, value))
             .width(Length::Fill))
         .push(input("Description", sensor.description.as_deref().unwrap_or(""), move |value| Message::SensorDescriptionChanged(section_index, sensor_index, value))
             .width(Length::Fill))
+        .push(move_btn("▲", sensor_index > 0, Message::SensorMoveUp(section_index, sensor_index)))
+        .push(move_btn("▼", sensor_index + 1 < sensor_count, Message::SensorMoveDown(section_index, sensor_index)))
         .push(button(text("Remove").size(BODY)).on_press(Message::SensorRemoved(section_index, sensor_index)).padding(5))
         .spacing(8)
         .align_y(Alignment::Center)

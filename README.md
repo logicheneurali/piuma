@@ -130,6 +130,9 @@ offers:
   file already exists;
 - **Reset** – restores the default configuration.
 
+Each section and sensor header also shows **▲/▼** buttons that move it
+up/down in the panel order (the arrow is disabled on the first/last item).
+
 ## Example Configurations
 
 - `test_window_config.json` - Tests window title sensor
