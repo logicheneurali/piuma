@@ -431,10 +431,12 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
     {
         Column::new()
             .extend(section_elements)
+            .width(Length::Shrink)
             .into()
     } else {
         Row::new()
             .extend(section_elements)
+            .width(Length::Shrink)
             .into()
     };
 
@@ -445,8 +447,9 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
 
     // Position the real panel within the surface according to `align`.
     // The surface is screen-sized on the cross axis and sized to the panel's
-    // own thickness on the main axis; the inner panel is aligned on its main
-    // axis (left/center/right for horizontal, top/center/bottom for vertical).
+    // own thickness on the main axis. The `align` must be applied on a
+    // container that fills the main axis of the surface; applied on the
+    // shrink-wrapped panel it would be a no-op (centering within itself).
     let vertical = panel
         .config
         .panel
@@ -461,37 +464,36 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
         .as_deref()
         .unwrap_or("center");
 
-    let main_layout = container(main_layout)
-        .width(Length::Shrink)
-        .height(Length::Shrink)
+    let panel_container = container(main_layout)
+        .width(if vertical { Length::Fill } else { Length::Shrink })
+        .height(if vertical { Length::Shrink } else { Length::Fill })
         .style(move |_theme: &iced::Theme| ContainerStyle {
             background: Some(Background::Color(panel_bg)),
             ..ContainerStyle::default()
         });
 
-    let main_layout = if vertical {
-        // Vertical panel: main axis is Y. Fill the cross axis (X) so the
-        // background spans the surface, then align along Y.
-        main_layout
-            .width(Length::Fill)
-            .align_y(match align {
-                "top" => Alignment::Start,
-                "bottom" => Alignment::End,
-                _ => Alignment::Center,
-            })
+    // Outer container fills the surface on BOTH axes, so `align` has room to
+    // move the (shrink) panel on its main axis: left / center / right
+    // (horizontal) or top / center / bottom (vertical).
+    let surface_container = container(panel_container)
+        .width(Length::Fill)
+        .height(Length::Fill);
+
+    let surface_container = if vertical {
+        surface_container.align_y(match align {
+            "top" => Alignment::Start,
+            "bottom" => Alignment::End,
+            _ => Alignment::Center,
+        })
     } else {
-        // Horizontal panel: main axis is X. Fill the cross axis (Y) so the
-        // background spans the surface, then align along X.
-        main_layout
-            .height(Length::Fill)
-            .align_x(match align {
-                "left" => Alignment::Start,
-                "right" => Alignment::End,
-                _ => Alignment::Center,
-            })
+        surface_container.align_x(match align {
+            "left" => Alignment::Start,
+            "right" => Alignment::End,
+            _ => Alignment::Center,
+        })
     };
 
-    main_layout.into()
+    surface_container.into()
 }
 
 // ── positioning helpers ─────────────────────────────────────────────
