@@ -1,11 +1,13 @@
 //! Piuma Setup - GUI Configuration Tool
 //! A visual tool to configure Piuma panel settings using iced 0.14
 
-use iced::widget::{button, column, container, scrollable, text, Column, Row, TextInput, Slider, PickList};
-use iced::{Alignment, Background, Color, Element, Length, Task, Theme};
+use iced::widget::{button, column, container, scrollable, text, Column, Container, Row, TextInput, Slider, PickList};
+use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Task, Theme};
 use iced::widget::text::Style as TextStyle;
 use serde_json::{Map, Value as JsonValue};
+use std::collections::HashSet;
 use std::fs;
+use std::ops::RangeInclusive;
 
 // Configuration structure for GUI - mirrors src/config.rs
 #[derive(Debug, Clone)]
@@ -187,6 +189,10 @@ pub enum Message {
     SensorBorderTypeChanged(usize, usize, String),
     SensorPaddingChanged(usize, usize, i32),
     SensorActionChanged(usize, usize, String),
+    /// Toggles the collapsible "Sensor Defaults" card.
+    ToggleDefaults,
+    /// Toggles the collapsible style block of one sensor: (section, sensor).
+    ToggleSensorStyle(usize, usize),
     SaveConfig,
     LoadConfig,
     ResetConfig,
@@ -198,6 +204,10 @@ pub struct PiumaSetup {
     config: PiumaConfig,
     status_message: Option<String>,
     status_is_error: bool,
+    /// Whether the collapsible "Sensor Defaults" card is open.
+    defaults_expanded: bool,
+    /// Indices of the sensors whose "Style overrides" block is open.
+    sensor_style_open: HashSet<(usize, usize)>,
 }
 
 impl PiumaSetup {
@@ -206,6 +216,8 @@ impl PiumaSetup {
             config: PiumaConfig::default(),
             status_message: None,
             status_is_error: false,
+            defaults_expanded: false,
+            sensor_style_open: HashSet::new(),
         }
     }
 
@@ -808,6 +820,13 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
         }
         Message::SaveConfig => return state.save_config(),
         Message::LoadConfig => return state.load_config(),
+        Message::ToggleDefaults => state.defaults_expanded = !state.defaults_expanded,
+        Message::ToggleSensorStyle(section, sensor) => {
+            // Insert-or-remove keeps the set as the single source of truth.
+            if !state.sensor_style_open.remove(&(section, sensor)) {
+                state.sensor_style_open.insert((section, sensor));
+            }
+        }
         Message::ResetConfig => {
             state.config = PiumaConfig::default();
             state.set_status("Configuration reset to defaults".to_string(), false);
@@ -821,26 +840,199 @@ fn theme(_state: &PiumaSetup) -> Theme {
     Theme::Dark
 }
 
+// ---------------------------------------------------------------------------
+// View helpers: cards, aligned form rows and collapsible blocks
+// ---------------------------------------------------------------------------
+
+/// Fixed label column width so every form row lines up and labels never
+/// overlap their controls (`Length` only accepts u32).
+const LABEL_WIDTH: u32 = 110;
+
+/// Parses "#rgb"/"#rrggbb" into a preview color; invalid or empty = neutral gray.
+fn hex_color(value: &str) -> Color {
+    let v = value.trim().trim_start_matches('#');
+    // Guard against multi-byte input: the slice indexes below are byte based.
+    if !v.is_ascii() {
+        return Color::from_rgb(0.35, 0.35, 0.35);
+    }
+    let byte = |s: &str| u8::from_str_radix(s, 16).ok();
+    let rgb = match v.len() {
+        6 => (byte(&v[0..2]), byte(&v[2..4]), byte(&v[4..6])),
+        // Shorthand "#rgb": each digit is duplicated.
+        3 => (byte(&v[0..1]).map(|b| b * 17), byte(&v[1..2]).map(|b| b * 17), byte(&v[2..3]).map(|b| b * 17)),
+        _ => (None, None, None),
+    };
+    match rgb {
+        (Some(r), Some(g), Some(b)) => Color { r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a: 1.0 },
+        _ => Color::from_rgb(0.35, 0.35, 0.35),
+    }
+}
+
+/// Shared card style: subtle background, thin border, rounded corners.
+fn card_style(bg: Color, radius: f32) -> impl Fn(&Theme) -> container::Style {
+    move |_t: &Theme| container::Style {
+        background: Some(Background::Color(bg)),
+        border: Border { width: 1.0, color: Color::from_rgb8(0x38, 0x38, 0x3e), radius: radius.into() },
+        ..container::Style::default()
+    }
+}
+
+/// The visual unit of the nested layout (panel > section > sensor).
+fn card<'a>(content: impl Into<Element<'a, Message>>) -> Container<'a, Message> {
+    container(content.into())
+        .padding(12)
+        .width(Length::Fill)
+        .style(card_style(Color::from_rgb8(0x26, 0x26, 0x2b), 6.0))
+}
+
+/// Inset background marking content as a child of the surrounding card.
+fn inset_style(_t: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color::from_rgb8(0x1e, 0x1e, 0x22))),
+        border: Border { width: 1.0, color: Color::from_rgb8(0x33, 0x33, 0x39), radius: 4.0.into() },
+        ..container::Style::default()
+    }
+}
+
+/// One label + control pair filling half of a form row.
+fn form_cell<'a>(label: &'a str, control: Element<'a, Message>) -> Row<'a, Message> {
+    Row::new()
+        .push(text(label).width(LABEL_WIDTH))
+        .push(control)
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .width(Length::Fill)
+}
+
+/// Two-column form grid: fields alternate left/right, one per cell, so long
+/// forms stay compact and their labels line up in fixed columns.
+fn form_grid<'a>(fields: Vec<(&'a str, Element<'a, Message>)>) -> Element<'a, Message> {
+    let mut rows = Column::new().spacing(8).width(Length::Fill);
+    let mut iter = fields.into_iter();
+    while let Some(first) = iter.next() {
+        let mut row = Row::new().spacing(20).width(Length::Fill)
+            .push(form_cell(first.0, first.1));
+        if let Some(second) = iter.next() {
+            row = row.push(form_cell(second.0, second.1));
+        }
+        rows = rows.push(row);
+    }
+    rows.into()
+}
+
+/// Color input filling its cell: text field plus a live 16x16 preview swatch.
+fn color_control<'a>(value: &'a str, on_input: impl Fn(String) -> Message + 'a) -> Element<'a, Message> {
+    let swatch_color = hex_color(value);
+    let swatch = container(text(""))
+        .width(16)
+        .height(16)
+        .style(move |_t: &Theme| container::Style {
+            background: Some(Background::Color(swatch_color)),
+            border: Border { width: 1.0, color: Color::from_rgb(0.45, 0.45, 0.45), radius: 3.0.into() },
+            ..container::Style::default()
+        });
+    Row::new()
+        .push(TextInput::new("#rrggbb", value).on_input(on_input).width(Length::Fill))
+        .push(swatch)
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .width(Length::Fill)
+        .into()
+}
+
+/// Slider control filling its cell: slider takes the space, value on the
+/// right (style numbers: -1 = disabled, 0..=N = enabled).
+fn slider_control<'a>(range: RangeInclusive<i32>, value: i32, on_input: impl Fn(i32) -> Message + 'a) -> Element<'a, Message> {
+    Row::new()
+        .push(Slider::new(range, value, on_input).width(Length::Fill))
+        .push(text(value.to_string()).width(40))
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .width(Length::Fill)
+        .into()
+}
+
+/// Collapsible header: chevron + title + summary; pressing toggles the block.
+fn collapsible_header<'a>(title: &'a str, summary: String, expanded: bool, on_toggle: Message) -> Element<'a, Message> {
+    button(
+        Row::new()
+            .push(text(if expanded { "▾" } else { "▸" }).width(14))
+            .push(text(title).size(15))
+            .push(text(summary).size(12)
+                .style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.55, 0.55, 0.6)), ..TextStyle::default() }))
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .width(Length::Fill),
+    )
+    .width(Length::Fill)
+    .padding(6)
+    .style(button::secondary)
+    .on_press(on_toggle)
+    .into()
+}
+
+/// One-line summary of the active style overrides for collapsed headers:
+/// colors by field name, numbers with value, "none" when all is inherited.
+fn style_summary(colors: &[(&str, &Option<String>)], numbers: &[(&str, &Option<i32>)]) -> String {
+    let mut parts = Vec::new();
+    let set_colors: Vec<&str> = colors.iter().filter(|(_, v)| v.is_some()).map(|(k, _)| *k).collect();
+    if !set_colors.is_empty() {
+        parts.push(set_colors.join(" "));
+    }
+    let set_numbers: Vec<String> = numbers.iter().filter_map(|(k, v)| v.map(|n| format!("{} {}", k, n))).collect();
+    if !set_numbers.is_empty() {
+        parts.push(set_numbers.join(" "));
+    }
+    if parts.is_empty() { "none".to_string() } else { parts.join(" · ") }
+}
+
+/// Root view: the scrollable column of nested cards with the action bar
+/// rendered underneath, so Save/Load/Reset stay reachable at any scroll position.
 fn view(state: &PiumaSetup) -> Element<Message> {
     let content = column![
         config_header(state),
         panel_settings(state),
         sensor_defaults_view(state),
         sections_list(state),
-        action_buttons(),
-        status_bar(state),
     ]
     .padding(20)
     .spacing(15)
     .width(Length::Fill);
 
-    container(scrollable(content)
+    container(
+        column![
+            container(scrollable(content).width(Length::Fill).height(Length::Fill))
+                .width(Length::Fill)
+                .height(Length::Fill),
+            footer(state),
+        ]
         .width(Length::Fill)
-        .height(Length::Fill))
+        .height(Length::Fill),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style(|_state| container::Style {
+        background: Some(Background::Color(Color::from_rgb(0.12, 0.12, 0.12))),
+        ..container::Style::default()
+    })
+    .into()
+}
+
+/// Fixed bottom bar: status message on the left, actions on the right.
+fn footer(state: &PiumaSetup) -> Element<Message> {
+    let bar = Row::new()
+        .push(container(status_bar(state)).width(Length::Fill))
+        .push(action_buttons())
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .width(Length::Fill);
+
+    container(bar)
+        .padding(Padding { top: 10.0, right: 20.0, bottom: 10.0, left: 20.0 })
         .width(Length::Fill)
-        .height(Length::Fill)
-        .style(|_state| container::Style {
-            background: Some(Background::Color(Color::from_rgb(0.12, 0.12, 0.12))),
+        .style(|_t: &Theme| container::Style {
+            background: Some(Background::Color(Color::from_rgb8(0x1a, 0x1a, 0x1d))),
+            border: Border { width: 1.0, color: Color::from_rgb8(0x38, 0x38, 0x3e), radius: 0.0.into() },
             ..container::Style::default()
         })
         .into()
@@ -856,89 +1048,68 @@ fn config_header(_state: &PiumaSetup) -> Element<Message> {
         .into()
 }
 
+/// Panel-wide settings as a two-column form grid inside a card.
 fn panel_settings(state: &PiumaSetup) -> Element<Message> {
-    let font_row = Row::new()
-        .push(text("Font:").width(120))
-        .push(TextInput::new("Font name", state.config.font.as_deref().unwrap_or(""))
+    let font_size = state.config.font_size;
+    let thickness = state.config.thickness;
+    let anchor = state.config.anchor.clone().unwrap_or_default();
+    let align = state.config.align.clone().unwrap_or_default();
+
+    // Font Size / Thickness keep their u32 sliders inline: a shared generic
+    // slider helper would need `num_traits` bounds, which this binary doesn't depend on.
+    let fields = vec![
+        ("Font", TextInput::new("Font name", state.config.font.as_deref().unwrap_or(""))
             .on_input(Message::FontChanged)
-            .width(200))
-        .spacing(10);
-
-    let font_size_row = Row::new()
-        .push(text("Font Size:").width(120))
-        .push(Slider::new(8..=32, state.config.font_size, Message::FontSizeChanged)
-            .width(150))
-        .push(text(format!("{}pt", state.config.font_size)).width(50))
-        .spacing(10);
-
-    let thickness_row = Row::new()
-        .push(text("Thickness:").width(120))
-        .push(Slider::new(8..=64, state.config.thickness, Message::ThicknessChanged)
-            .width(150))
-        .push(text(format!("{}px", state.config.thickness)).width(50))
-        .spacing(10);
-
-    let section_layout_row = Row::new()
-        .push(text("Section Layout:").width(120))
-        .push(PickList::new(
+            .width(Length::Fill)
+            .into()),
+        ("Font Size", Row::new()
+            .push(Slider::new(8..=32, font_size, Message::FontSizeChanged).width(Length::Fill))
+            .push(text(format!("{}pt", font_size)).width(40))
+            .spacing(8)
+            .width(Length::Fill)
+            .into()),
+        ("Thickness", Row::new()
+            .push(Slider::new(8..=64, thickness, Message::ThicknessChanged).width(Length::Fill))
+            .push(text(format!("{}px", thickness)).width(40))
+            .spacing(8)
+            .width(Length::Fill)
+            .into()),
+        ("Section Layout", PickList::new(
             vec!["horizontal".to_string(), "vertical".to_string()],
             Some(state.config.section_layout.clone()),
             Message::SectionLayoutChanged,
-        ).width(120))
-        .spacing(10);
-
-    let default_bg_color_row = Row::new()
-        .push(text("Default BG Color:").width(120))
-        .push(TextInput::new("BG Color", state.config.default_bg_color.as_deref().unwrap_or(""))
-            .on_input(Message::DefaultBgColorChanged)
-            .width(100))
-        .spacing(10);
-
-    let default_text_color_row = Row::new()
-        .push(text("Default Text Color:").width(120))
-        .push(TextInput::new("Text Color", state.config.default_text_color.as_deref().unwrap_or(""))
-            .on_input(Message::DefaultTextColorChanged)
-            .width(100))
-        .spacing(10);
-
-    let anchor_row = Row::new()
-        .push(text("Anchor:").width(120))
-        .push(PickList::new(
+        ).width(Length::Fill).into()),
+        ("Default BG", color_control(state.config.default_bg_color.as_deref().unwrap_or(""), Message::DefaultBgColorChanged)),
+        ("Default Text", color_control(state.config.default_text_color.as_deref().unwrap_or(""), Message::DefaultTextColorChanged)),
+        ("Anchor", PickList::new(
             vec!["top".to_string(), "bottom".to_string(), "left".to_string(), "right".to_string(),
                  "top-left".to_string(), "top-right".to_string(), "bottom-left".to_string(), "bottom-right".to_string()],
-            Some(state.config.anchor.clone().unwrap_or_default()),
+            Some(anchor),
             Message::AnchorChanged,
-        ).width(140))
-        .spacing(10);
-
-    let align_row = Row::new()
-        .push(text("Align:").width(120))
-        .push(PickList::new(
+        ).width(Length::Fill).into()),
+        ("Align", PickList::new(
             vec!["left".to_string(), "center".to_string(), "right".to_string()],
-            Some(state.config.align.clone().unwrap_or_default()),
+            Some(align),
             Message::AlignChanged,
-        ).width(120))
-        .spacing(10);
+        ).width(Length::Fill).into()),
+    ];
 
-    column![
-        text("Panel Settings").size(18).style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.8, 0.8, 0.8)), ..TextStyle::default() }),
-        font_row,
-        font_size_row,
-        thickness_row,
-        section_layout_row,
-        default_bg_color_row,
-        default_text_color_row,
-        anchor_row,
-        align_row,
-    ]
-    .spacing(8)
+    card(
+        column![
+            text("Panel Settings").size(18).style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.8, 0.8, 0.8)), ..TextStyle::default() }),
+            form_grid(fields),
+        ]
+        .spacing(10)
+        .width(Length::Fill),
+    )
     .into()
 }
 
+/// The "Sections" block: one card per section, plus the add button.
 fn sections_list(state: &PiumaSetup) -> Element<Message> {
     let mut section_list = Column::new().spacing(15);
     for (i, section) in state.config.sections.iter().enumerate() {
-        section_list = section_list.push(section_view(i, section));
+        section_list = section_list.push(section_view(state, i, section));
     }
 
     let add_section = button("+ Add Section")
@@ -954,68 +1125,57 @@ fn sections_list(state: &PiumaSetup) -> Element<Message> {
     .into()
 }
 
-fn section_view(index: usize, section: &Section) -> Element<Message> {
-    let name_input = TextInput::new("Section Name", section.name.as_deref().unwrap_or(""))
-        .on_input(move |value| Message::SectionNameChanged(index, value))
-        .width(150);
+/// Section card: header with name + remove, settings grid, then the sensor
+/// cards nested on an inset background to mark the hierarchy.
+fn section_view<'a>(state: &'a PiumaSetup, index: usize, section: &'a Section) -> Element<'a, Message> {
+    let header = Row::new()
+        .push(text("SECTION").size(11)
+            .style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.5, 0.5, 0.55)), ..TextStyle::default() }))
+        .push(TextInput::new("Section name", section.name.as_deref().unwrap_or(""))
+            .on_input(move |value| Message::SectionNameChanged(index, value))
+            .width(Length::Fill))
+        .push(button("Remove").on_press(Message::SectionRemoved(index)).padding(5))
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .width(Length::Fill);
 
-    let layout_picklist = PickList::new(
-        vec!["horizontal".to_string(), "vertical".to_string()],
-        Some(&section.layout),
-        move |value| Message::SectionLayoutChangedIndex(index, value),
-    ).width(100);
+    let settings = form_grid(vec![
+        ("Layout", PickList::new(
+            vec!["horizontal".to_string(), "vertical".to_string()],
+            Some(&section.layout),
+            move |value| Message::SectionLayoutChangedIndex(index, value),
+        ).width(Length::Fill).into()),
+        ("BG", color_control(section.bg_color.as_deref().unwrap_or(""), move |value| Message::SectionBgColorChanged(index, value))),
+        ("Text", color_control(section.text_color.as_deref().unwrap_or(""), move |value| Message::SectionTextColorChanged(index, value))),
+    ]);
 
-    let bg_color_input = TextInput::new("BG Color", section.bg_color.as_deref().unwrap_or(""))
-        .on_input(move |value| Message::SectionBgColorChanged(index, value))
-        .width(100);
-
-    let text_color_input = TextInput::new("Text Color", section.text_color.as_deref().unwrap_or(""))
-        .on_input(move |value| Message::SectionTextColorChanged(index, value))
-        .width(100);
-
-    let section_header = Row::new()
-        .push(text("Section:").size(16).style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.7, 0.7, 0.7)), ..TextStyle::default() }))
-        .push(name_input)
-        .push(text("Layout:").width(45))
-        .push(layout_picklist)
-        .push(text("BG:").width(25))
-        .push(bg_color_input)
-        .push(text("Text:").width(30))
-        .push(text_color_input)
-        .push(button("Remove").on_press(Message::SectionRemoved(index))
-            .padding(5))
-        .spacing(8);
-
-    let add_sensor = button("+ Add Sensor")
-        .on_press(Message::SensorAdded(index))
-        .padding(5);
-
-    let mut sensor_list = Column::new().spacing(8);
+    let mut sensor_list = Column::new().spacing(8).width(Length::Fill);
     for (j, sensor) in section.sensors.iter().enumerate() {
-        sensor_list = sensor_list.push(sensor_view(index, j, sensor));
+        let style_open = state.sensor_style_open.contains(&(index, j));
+        sensor_list = sensor_list.push(sensor_view(index, j, sensor, style_open));
     }
+    sensor_list = sensor_list.push(
+        button("+ Add Sensor").on_press(Message::SensorAdded(index)).padding(6),
+    );
+    let sensors = container(sensor_list).padding(10).width(Length::Fill).style(inset_style);
 
-    let sensor_list_container = container(sensor_list)
-        .id(iced::widget::Id::from(format!("sensor-list-{}", index)));
-
-    column![
-        section_header,
-        sensor_list_container,
-        add_sensor,
-    ]
-    .spacing(8)
-    .padding(10)
-    .into()
+    card(column![header, settings, sensors].spacing(10).width(Length::Fill)).into()
 }
 
-fn sensor_view(section_index: usize, sensor_index: usize, sensor: &Sensor) -> Element<Message> {
-    let name_input = TextInput::new("Sensor Name", sensor.name.as_deref().unwrap_or(""))
-        .on_input(move |value| Message::SensorNameChanged(section_index, sensor_index, value))
-        .width(120);
-
-    let description_input = TextInput::new("Description", sensor.description.as_deref().unwrap_or(""))
-        .on_input(move |value| Message::SensorDescriptionChanged(section_index, sensor_index, value))
-        .width(160);
+/// Sensor card: identity header, source, action, then the collapsible
+/// "Style overrides" block (closed by default: overrides are optional).
+fn sensor_view(section_index: usize, sensor_index: usize, sensor: &Sensor, style_open: bool) -> Element<Message> {
+    let header = Row::new()
+        .push(TextInput::new("Name", sensor.name.as_deref().unwrap_or(""))
+            .on_input(move |value| Message::SensorNameChanged(section_index, sensor_index, value))
+            .width(Length::Fill))
+        .push(TextInput::new("Description", sensor.description.as_deref().unwrap_or(""))
+            .on_input(move |value| Message::SensorDescriptionChanged(section_index, sensor_index, value))
+            .width(Length::Fill))
+        .push(button("Remove").on_press(Message::SensorRemoved(section_index, sensor_index)).padding(5))
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .width(Length::Fill);
 
     let source_type_picklist = PickList::new(
         vec!["ProcCpu", "ProcMem", "ProcDisk", "Uptime", "NvidiaGpu",
@@ -1023,7 +1183,7 @@ fn sensor_view(section_index: usize, sensor_index: usize, sensor: &Sensor) -> El
              "Command", "EnvVar", "StaticText"].into_iter().map(|s| s.to_string()).collect::<Vec<_>>(),
         Some(&sensor.source_type),
         move |value| Message::SensorSourceTypeChanged(section_index, sensor_index, value),
-    ).width(110);
+    ).width(130);
 
     let source_config: Element<Message> = match sensor.source_type.as_str() {
         "ProcCpu" | "ProcMem" | "ProcDisk" | "Uptime" | "NvidiaGpu" | "Window" | "Workspace" => {
@@ -1044,226 +1204,153 @@ fn sensor_view(section_index: usize, sensor_index: usize, sensor: &Sensor) -> El
         }
         "Network" => TextInput::new("Interface", sensor.source_config.interface.as_deref().unwrap_or(""))
             .on_input(move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "interface".to_string(), value))
-            .width(100)
+            .width(Length::Fill)
             .into(),
         "Audio" => TextInput::new("Device", sensor.source_config.device.as_deref().unwrap_or(""))
             .on_input(move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "device".to_string(), value))
-            .width(100)
+            .width(Length::Fill)
             .into(),
         "Clock" => TextInput::new("Format", sensor.source_config.format.as_deref().unwrap_or(""))
             .on_input(move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "format".to_string(), value))
-            .width(100)
+            .width(Length::Fill)
             .into(),
         "Command" => TextInput::new("Command", sensor.source_config.command.as_deref().unwrap_or(""))
             .on_input(move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "command".to_string(), value))
-            .width(160)
+            .width(Length::Fill)
             .into(),
         "EnvVar" => TextInput::new("Env Var", sensor.source_config.env_var.as_deref().unwrap_or(""))
             .on_input(move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "env_var".to_string(), value))
-            .width(100)
+            .width(Length::Fill)
             .into(),
         "StaticText" => TextInput::new("Text", sensor.source_config.static_text.as_deref().unwrap_or(""))
             .on_input(move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "text".to_string(), value))
-            .width(100)
+            .width(Length::Fill)
             .into(),
-        _ => return Row::new().spacing(5).into(),
+        _ => Row::new().spacing(5).into(),
     };
 
-    let text_color_input = TextInput::new("Text", sensor.text_color.as_deref().unwrap_or(""))
-        .on_input(move |value| Message::SensorTextColorChanged(section_index, sensor_index, value))
-        .width(80);
+    let source = form_cell("Source", Row::new()
+        .push(source_type_picklist)
+        .push(source_config)
+        .spacing(8)
+        .width(Length::Fill)
+        .into());
 
-    let bg_color_input = TextInput::new("BG", sensor.bg_color.as_deref().unwrap_or(""))
-        .on_input(move |value| Message::SensorBgColorChanged(section_index, sensor_index, value))
-        .width(70);
+    let action = form_cell("Action", TextInput::new("close_panel / command / ...", sensor.action.as_deref().unwrap_or(""))
+        .on_input(move |value| Message::SensorActionChanged(section_index, sensor_index, value))
+        .width(Length::Fill)
+        .into());
 
-    let hover_text_input = TextInput::new("Hover Text", sensor.text_color_hover.as_deref().unwrap_or(""))
-        .on_input(move |value| Message::SensorTextColorHoverChanged(section_index, sensor_index, value))
-        .width(80);
+    // Collapsed header shows which overrides are actually set.
+    let summary = style_summary(
+        &[
+            ("text", &sensor.text_color), ("hover-text", &sensor.text_color_hover),
+            ("bg", &sensor.bg_color), ("hover-bg", &sensor.bg_color_hover),
+            ("border", &sensor.border_color), ("border-hover", &sensor.border_color_hover),
+            ("border-type", &sensor.border_type),
+        ],
+        &[
+            ("brd", &sensor.border_width), ("rad", &sensor.border_radius), ("pad", &sensor.padding),
+        ],
+    );
+    let style_header = collapsible_header(
+        "Style overrides", summary, style_open,
+        Message::ToggleSensorStyle(section_index, sensor_index),
+    );
 
-    let hover_bg_input = TextInput::new("Hover BG", sensor.bg_color_hover.as_deref().unwrap_or(""))
-        .on_input(move |value| Message::SensorBgColorHoverChanged(section_index, sensor_index, value))
-        .width(70);
-
-    let border_color_input = TextInput::new("Border", sensor.border_color.as_deref().unwrap_or(""))
-        .on_input(move |value| Message::SensorBorderColorChanged(section_index, sensor_index, value))
-        .width(80);
-
-    let border_color_hover_input = TextInput::<Message, Theme>::new("Border Hover", sensor.border_color_hover.as_deref().unwrap_or(""))
-        .on_input(move |value| Message::SensorBorderColorHoverChanged(section_index, sensor_index, value))
-        .width(90);
+    let mut root = column![header, source, action, style_header]
+        .spacing(6)
+        .width(Length::Fill);
 
     // Style numbers: -1 = disabled (the defaults apply), 0..=N = enabled.
-    let bw_v = sensor.border_width.unwrap_or(-1);
-    let br_v = sensor.border_radius.unwrap_or(-1);
-    let pad_v = sensor.padding.unwrap_or(-1);
-    let border_width_slider = Slider::new(-1i32..=10, bw_v, move |value| Message::SensorBorderWidthChanged(section_index, sensor_index, value))
-        .width(80);
+    if style_open {
+        let fields = vec![
+            ("Text", color_control(sensor.text_color.as_deref().unwrap_or(""), move |value| Message::SensorTextColorChanged(section_index, sensor_index, value))),
+            ("Hover Text", color_control(sensor.text_color_hover.as_deref().unwrap_or(""), move |value| Message::SensorTextColorHoverChanged(section_index, sensor_index, value))),
+            ("BG", color_control(sensor.bg_color.as_deref().unwrap_or(""), move |value| Message::SensorBgColorChanged(section_index, sensor_index, value))),
+            ("Hover BG", color_control(sensor.bg_color_hover.as_deref().unwrap_or(""), move |value| Message::SensorBgColorHoverChanged(section_index, sensor_index, value))),
+            ("Border", color_control(sensor.border_color.as_deref().unwrap_or(""), move |value| Message::SensorBorderColorChanged(section_index, sensor_index, value))),
+            ("Border Hover", color_control(sensor.border_color_hover.as_deref().unwrap_or(""), move |value| Message::SensorBorderColorHoverChanged(section_index, sensor_index, value))),
+            ("Border Width", slider_control(-1i32..=10, sensor.border_width.unwrap_or(-1), move |value| Message::SensorBorderWidthChanged(section_index, sensor_index, value))),
+            ("Border Radius", slider_control(-1i32..=20, sensor.border_radius.unwrap_or(-1), move |value| Message::SensorBorderRadiusChanged(section_index, sensor_index, value))),
+            ("Padding", slider_control(-1i32..=20, sensor.padding.unwrap_or(-1), move |value| Message::SensorPaddingChanged(section_index, sensor_index, value))),
+            ("Border Type", PickList::new(
+                vec![
+                    "full".to_string(),
+                    "corners".to_string(),
+                    "underline".to_string(),
+                    "upperline".to_string(),
+                    "left".to_string(),
+                    "right".to_string(),
+                ],
+                Some(sensor.border_type.clone().unwrap_or_else(|| "full".to_string())),
+                move |value| Message::SensorBorderTypeChanged(section_index, sensor_index, value),
+            ).width(Length::Fill).into()),
+        ];
+        root = root.push(container(form_grid(fields)).padding(10).width(Length::Fill).style(inset_style));
+    }
 
-    let border_radius_slider = Slider::new(-1i32..=20, br_v, move |value| Message::SensorBorderRadiusChanged(section_index, sensor_index, value))
-        .width(80);
-
-    let padding_slider = Slider::new(-1i32..=20, pad_v, move |value| Message::SensorPaddingChanged(section_index, sensor_index, value))
-        .width(80);
-
-    let action_input = TextInput::new("Action (e.g. close_panel or command)",
-        sensor.action.as_deref().unwrap_or(""))
-        .on_input(move |value| Message::SensorActionChanged(section_index, sensor_index, value))
-        .width(220);
-
-    let border_type_picklist = PickList::new(
-        vec![
-            "full".to_string(),
-            "corners".to_string(),
-            "underline".to_string(),
-            "upperline".to_string(),
-            "left".to_string(),
-            "right".to_string(),
-        ],
-        Some(sensor.border_type.clone().unwrap_or_else(|| "full".to_string())),
-        move |value| Message::SensorBorderTypeChanged(section_index, sensor_index, value),
-    )
-    .width(110);
-
-    let sensor_col = column![
-        Row::new()
-            .push(name_input)
-            .push(description_input)
-            .push(source_type_picklist)
-            .push(source_config)
-            .spacing(5),
-        Row::new()
-            .push(text("Text:").width(35))
-            .push(text_color_input)
-            .push(text("Hover:").width(35))
-            .push(hover_text_input)
-            .push(text("Border:").width(50))
-            .push(border_color_input)
-            .push(text("BrdW:").width(30))
-            .push(border_width_slider)
-            .push(text(bw_v.to_string()).width(30))
-            .spacing(5),
-        Row::new()
-            .push(text("BrdH:").width(50))
-            .push(border_color_hover_input)
-            .push(text("BG:").width(35))
-            .push(bg_color_input)
-            .push(text("Hover:").width(35))
-            .push(hover_bg_input)
-            .push(text("BrdR:").width(50))
-            .push(border_radius_slider)
-            .push(text(br_v.to_string()).width(30))
-            .push(text("Pad:").width(30))
-            .push(padding_slider)
-            .push(text(pad_v.to_string()).width(30))
-            .spacing(5),
-        Row::new()
-            .push(text("BrdT:").width(45))
-            .push(border_type_picklist)
-            .spacing(5),
-        Row::new()
-            .push(text("Action:").width(55))
-            .push(action_input)
-            .spacing(5),
-        button("Remove Sensor").on_press(Message::SensorRemoved(section_index, sensor_index)).padding(5),
-    ]
-    .spacing(4)
-    .padding(8);
-
-    container(sensor_col).id(iced::widget::Id::unique()).into()
+    card(root).into()
 }
 
-/// The "Sensor Defaults" card: global style applied to every sensor, with
-/// the same controls as a sensor card minus name/description/source/action.
+/// The "Sensor Defaults" card: global style applied to every sensor,
+/// collapsed by default because it only overrides group-wide values.
 fn sensor_defaults_view(state: &PiumaSetup) -> Element<Message> {
     let d = &state.config.sensor_defaults;
 
-    let text_color_input = TextInput::new("Text", d.text_color.as_deref().unwrap_or(""))
-        .on_input(|value| Message::DefaultsStyleChanged("text_color".to_string(), value))
-        .width(80);
-    let hover_text_input = TextInput::new("Hover Text", d.text_color_hover.as_deref().unwrap_or(""))
-        .on_input(|value| Message::DefaultsStyleChanged("text_color_hover".to_string(), value))
-        .width(80);
-    let bg_color_input = TextInput::new("BG", d.bg_color.as_deref().unwrap_or(""))
-        .on_input(|value| Message::DefaultsStyleChanged("bg_color".to_string(), value))
-        .width(70);
-    let hover_bg_input = TextInput::new("Hover BG", d.bg_color_hover.as_deref().unwrap_or(""))
-        .on_input(|value| Message::DefaultsStyleChanged("bg_color_hover".to_string(), value))
-        .width(70);
-    let border_color_input = TextInput::new("Border", d.border_color.as_deref().unwrap_or(""))
-        .on_input(|value| Message::DefaultsStyleChanged("border_color".to_string(), value))
-        .width(80);
-    let border_color_hover_input = TextInput::new("Border Hover", d.border_color_hover.as_deref().unwrap_or(""))
-        .on_input(|value| Message::DefaultsStyleChanged("border_color_hover".to_string(), value))
-        .width(90);
-
-    // Style numbers: -1 = disabled (the defaults apply), 0..=N = enabled.
-    let bw_v = d.border_width.unwrap_or(-1);
-    let br_v = d.border_radius.unwrap_or(-1);
-    let pad_v = d.padding.unwrap_or(-1);
-    let border_width_slider = Slider::new(-1i32..=10, bw_v, |value| Message::DefaultsNumberChanged("border_width".to_string(), value))
-        .width(80);
-    let border_radius_slider = Slider::new(-1i32..=20, br_v, |value| Message::DefaultsNumberChanged("border_radius".to_string(), value))
-        .width(80);
-    let padding_slider = Slider::new(-1i32..=20, pad_v, |value| Message::DefaultsNumberChanged("padding".to_string(), value))
-        .width(80);
-
-    let border_type_picklist = PickList::new(
-        vec![
-            "full".to_string(),
-            "corners".to_string(),
-            "underline".to_string(),
-            "upperline".to_string(),
-            "left".to_string(),
-            "right".to_string(),
+    let summary = style_summary(
+        &[
+            ("text", &d.text_color), ("hover-text", &d.text_color_hover),
+            ("bg", &d.bg_color), ("hover-bg", &d.bg_color_hover),
+            ("border", &d.border_color), ("border-hover", &d.border_color_hover),
+            ("border-type", &d.border_type),
         ],
-        Some(d.border_type.clone().unwrap_or_else(|| "full".to_string())),
-        |value| Message::DefaultsStyleChanged("border_type".to_string(), value),
-    )
-    .width(110);
+        &[
+            ("brd", &d.border_width), ("rad", &d.border_radius), ("pad", &d.padding),
+        ],
+    );
+    let header = collapsible_header("Sensor Defaults", summary, state.defaults_expanded, Message::ToggleDefaults);
 
-    let defaults_col = column![
-        text("Sensor Defaults (style for all sensors)").size(16)
-            .style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.8, 0.8, 0.8)), ..TextStyle::default() }),
-        Row::new()
-            .push(text("Text:").width(35))
-            .push(text_color_input)
-            .push(text("Hover:").width(35))
-            .push(hover_text_input)
-            .push(text("Border:").width(50))
-            .push(border_color_input)
-            .push(text("BrdW:").width(30))
-            .push(border_width_slider)
-            .push(text(bw_v.to_string()).width(30))
-            .spacing(5),
-        Row::new()
-            .push(text("BrdH:").width(50))
-            .push(border_color_hover_input)
-            .push(text("BG:").width(35))
-            .push(bg_color_input)
-            .push(text("Hover:").width(35))
-            .push(hover_bg_input)
-            .push(text("BrdR:").width(50))
-            .push(border_radius_slider)
-            .push(text(br_v.to_string()).width(30))
-            .push(text("Pad:").width(30))
-            .push(padding_slider)
-            .push(text(pad_v.to_string()).width(30))
-            .spacing(5),
-        Row::new()
-            .push(text("BrdT:").width(45))
-            .push(border_type_picklist)
-            .spacing(5),
-    ]
-    .spacing(4)
-    .padding(8);
+    let mut root = column![header].spacing(10).width(Length::Fill);
+    if state.defaults_expanded {
+        root = root.push(text("Style applied to every sensor; single sensors override these values.")
+            .size(12)
+            .style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.55, 0.55, 0.6)), ..TextStyle::default() }));
 
-    container(defaults_col).into()
+        // Style numbers: -1 = disabled (the defaults apply), 0..=N = enabled.
+        let fields = vec![
+            ("Text", color_control(d.text_color.as_deref().unwrap_or(""), |value| Message::DefaultsStyleChanged("text_color".to_string(), value))),
+            ("Hover Text", color_control(d.text_color_hover.as_deref().unwrap_or(""), |value| Message::DefaultsStyleChanged("text_color_hover".to_string(), value))),
+            ("BG", color_control(d.bg_color.as_deref().unwrap_or(""), |value| Message::DefaultsStyleChanged("bg_color".to_string(), value))),
+            ("Hover BG", color_control(d.bg_color_hover.as_deref().unwrap_or(""), |value| Message::DefaultsStyleChanged("bg_color_hover".to_string(), value))),
+            ("Border", color_control(d.border_color.as_deref().unwrap_or(""), |value| Message::DefaultsStyleChanged("border_color".to_string(), value))),
+            ("Border Hover", color_control(d.border_color_hover.as_deref().unwrap_or(""), |value| Message::DefaultsStyleChanged("border_color_hover".to_string(), value))),
+            ("Border Width", slider_control(-1i32..=10, d.border_width.unwrap_or(-1), |value| Message::DefaultsNumberChanged("border_width".to_string(), value))),
+            ("Border Radius", slider_control(-1i32..=20, d.border_radius.unwrap_or(-1), |value| Message::DefaultsNumberChanged("border_radius".to_string(), value))),
+            ("Padding", slider_control(-1i32..=20, d.padding.unwrap_or(-1), |value| Message::DefaultsNumberChanged("padding".to_string(), value))),
+            ("Border Type", PickList::new(
+                vec![
+                    "full".to_string(),
+                    "corners".to_string(),
+                    "underline".to_string(),
+                    "upperline".to_string(),
+                    "left".to_string(),
+                    "right".to_string(),
+                ],
+                Some(d.border_type.clone().unwrap_or_else(|| "full".to_string())),
+                |value| Message::DefaultsStyleChanged("border_type".to_string(), value),
+            ).width(Length::Fill).into()),
+        ];
+        root = root.push(form_grid(fields));
+    }
+
+    card(root).into()
 }
 
+/// Save/Load/Reset actions for the fixed bottom bar.
 fn action_buttons() -> Element<'static, Message> {
-    let save_btn = button("Save Configuration").on_press(Message::SaveConfig).padding(10);
-    let load_btn = button("Load Configuration").on_press(Message::LoadConfig).padding(10);
+    let save_btn = button("Save Configuration").on_press(Message::SaveConfig).padding(10).style(button::primary);
+    let load_btn = button("Load Configuration").on_press(Message::LoadConfig).padding(10).style(button::secondary);
     let reset_btn = button("Reset to Defaults").on_press(Message::ResetConfig).padding(10);
 
     Row::new()
