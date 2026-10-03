@@ -8,11 +8,17 @@
 use std::time::{Instant, SystemTime};
 
 use iced::widget::{container, text, Column, Row, MouseArea, Space, Stack};
-use iced::{Alignment, Background, Color, Element, Event, Length, Subscription, Task as Command};
+use iced::{
+    Alignment, Background, Color, Element, Event, Length, Rectangle, Size,
+    Subscription, Task as Command, Vector,
+};
 use iced::event;
 use iced::time;
 use iced::font::Font;
 use iced::widget::container::Style as ContainerStyle;
+use iced::advanced::layout::{Limits, Node};
+use iced::advanced::widget::{Operation, Tree, Widget};
+use iced::advanced::{mouse, overlay, renderer, Clipboard, Layout, Shell};
 
 use iced_exwlshell::ExWlSettings;
 use iced_exwlshell::layershell::timed;
@@ -686,11 +692,24 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
         section_elements.push(section_element);
     }
 
+    // `align` decides how the sections are spread inside the surface; read
+    // it before building the layout so `fill` can pick its own container.
+    let align = panel
+        .config
+        .panel
+        .align
+        .as_deref()
+        .unwrap_or("center");
+    let fill = align == "fill";
+
     // Build the full panel layout. The main axis shrinks to the content (so
     // `align` can place the panel within the surface); the cross axis fills
     // the surface thickness, which is what makes `thickness` reach the
-    // sections and the sensor boxes.
-    let main_layout: Element<'a, Message> = if vertical {
+    // sections and the sensor boxes. With `align: "fill"` the sections are
+    // spread along the whole main axis by `FillSections` instead.
+    let main_layout: Element<'a, Message> = if fill {
+        FillSections::new(vertical, section_elements).into()
+    } else if vertical {
         Column::new()
             .extend(section_elements)
             .width(Length::Fill)
@@ -712,17 +731,11 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
     // own thickness on the main axis. The `align` must be applied on a
     // container that fills the main axis of the surface; applied on the
     // shrink-wrapped panel it would be a no-op (centering within itself).
-    // (`vertical` is computed at the top of the function.)
-    let align = panel
-        .config
-        .panel
-        .align
-        .as_deref()
-        .unwrap_or("center");
-
+    // With `align: "fill"` the panel fills the main axis by itself, so the
+    // container alignment below becomes a no-op too.
     let panel_container = container(main_layout)
-        .width(if vertical { Length::Fill } else { Length::Shrink })
-        .height(if vertical { Length::Shrink } else { Length::Fill })
+        .width(if fill || vertical { Length::Fill } else { Length::Shrink })
+        .height(if fill || !vertical { Length::Fill } else { Length::Shrink })
         .style(move |_theme: &iced::Theme| ContainerStyle {
             background: Some(Background::Color(panel_bg)),
             ..ContainerStyle::default()
@@ -730,7 +743,9 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
 
     // Outer container fills the surface on BOTH axes, so `align` has room to
     // move the (shrink) panel on its main axis: left / center / right
-    // (horizontal) or top / center / bottom (vertical).
+    // (horizontal) or top / center / bottom (vertical). "fill" lands on the
+    // `_` arm on both axes, where there is nothing to move: the panel
+    // already spans the surface.
     let surface_container = container(panel_container)
         .width(Length::Fill)
         .height(Length::Fill);
@@ -750,6 +765,253 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
     };
 
     surface_container.into()
+}
+
+// ── fill sections widget ───────────────────────────────────────────
+
+/// Sections container used by `align: "fill"`: it fills the whole main axis
+/// of the panel and distributes the sections along it, so the panel always
+/// spans 100% of the available screen space (width for a horizontal panel,
+/// height for a vertical one). Sections keep their intrinsic size; only the
+/// gaps between them move.
+///
+/// The offsets are recomputed on every layout pass from the measured
+/// section sizes:
+///
+/// * **exactly 3 sections** and enough room for both side gaps → the middle
+///   section is centred on the panel: `x1 = avail/2 - w1/2`, which implies
+///   `gap_left = avail/2 - w0 - w1/2` and `gap_right = avail/2 - w2 - w1/2`;
+/// * any other section count, or not enough room (a gap would be negative)
+///   → fallback to the standard distribution: equal spacers between the
+///   sections (space-between: the `n-1` gaps share the free space, clamped
+///   to 0 when the content overflows the panel).
+struct FillSections<'a> {
+    /// Main axis of the panel: `true` for a vertical panel (y axis).
+    vertical: bool,
+    children: Vec<Element<'a, Message>>,
+}
+
+impl<'a> FillSections<'a> {
+    fn new(vertical: bool, children: Vec<Element<'a, Message>>) -> Self {
+        Self { vertical, children }
+    }
+
+    /// Main-axis offset of each section for the given measured sizes; the
+    /// two distribution rules are documented on [`FillSections`].
+    fn distribute(mains: &[f32], avail: f32) -> Vec<f32> {
+        let n = mains.len();
+
+        // 3 sections: centre the middle one if both side gaps stay >= 0
+        // (which also guarantees the sections fit the panel).
+        if n == 3 {
+            let gap_left = avail / 2.0 - mains[0] - mains[1] / 2.0;
+            let gap_right = avail / 2.0 - mains[2] - mains[1] / 2.0;
+            if gap_left >= 0.0 && gap_right >= 0.0 {
+                return vec![0.0, avail / 2.0 - mains[1] / 2.0, avail - mains[2]];
+            }
+        }
+
+        // Standard: equal spacers, first section flush at the start edge,
+        // last one at the end edge (0 gap when the content overflows).
+        let content: f32 = mains.iter().sum();
+        let gap = if n > 1 {
+            (avail - content).max(0.0) / (n as f32 - 1.0)
+        } else {
+            0.0
+        };
+        let mut x = 0.0;
+        mains
+            .iter()
+            .map(|&m| {
+                let at = x;
+                x += m + gap;
+                at
+            })
+            .collect()
+    }
+}
+
+impl Widget<Message, iced::Theme, iced::Renderer> for FillSections<'_> {
+    fn children(&self) -> Vec<Tree> {
+        self.children.iter().map(Tree::new).collect()
+    }
+
+    fn diff(&self, tree: &mut Tree) {
+        tree.diff_children(&self.children);
+    }
+
+    fn size(&self) -> Size<Length> {
+        Size { width: Length::Fill, height: Length::Fill }
+    }
+
+    /// Measures every section unbounded on the main axis (its intrinsic size
+    /// decides the positions) and capped to the panel thickness on the cross
+    /// axis (`Fill` children resolve to `max_cross`), then places each node
+    /// at the offset given by [`FillSections::distribute`].
+    fn layout(
+        &mut self,
+        tree: &mut Tree,
+        renderer: &iced::Renderer,
+        limits: &Limits,
+    ) -> Node {
+        // Main axis = width (horizontal panel) / height (vertical); the
+        // cross axis carries the thickness and every section spans it fully.
+        let (max_main, max_cross) = if self.vertical {
+            (limits.max().height, limits.max().width)
+        } else {
+            (limits.max().width, limits.max().height)
+        };
+
+        let mut nodes = Vec::with_capacity(self.children.len());
+        let mut mains: Vec<f32> = Vec::with_capacity(self.children.len());
+
+        for (child, subtree) in self
+            .children
+            .iter_mut()
+            .zip(tree.children.iter_mut())
+        {
+            let child_limits = Limits::new(
+                Size::ZERO,
+                if self.vertical {
+                    Size::new(max_cross, f32::INFINITY)
+                } else {
+                    Size::new(f32::INFINITY, max_cross)
+                },
+            );
+            let node = child
+                .as_widget_mut()
+                .layout(subtree, renderer, &child_limits);
+            mains.push(if self.vertical {
+                node.size().height
+            } else {
+                node.size().width
+            });
+            nodes.push(node);
+        }
+
+        let positions = Self::distribute(&mains, max_main);
+        for (node, &at) in nodes.iter_mut().zip(&positions) {
+            node.move_to_mut(if self.vertical { (0.0, at) } else { (at, 0.0) });
+        }
+
+        // Fill on both axes: the panel node spans the whole surface.
+        let size = limits.resolve(Length::Fill, Length::Fill, Size::ZERO);
+        Node::with_children(size, nodes)
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &iced::Renderer,
+        operation: &mut dyn Operation,
+    ) {
+        operation.container(None, layout.bounds());
+        operation.traverse(&mut |operation| {
+            self.children
+                .iter_mut()
+                .zip(&mut tree.children)
+                .zip(layout.children())
+                .for_each(|((child, state), layout)| {
+                    child
+                        .as_widget_mut()
+                        .operate(state, layout, renderer, operation);
+                });
+        });
+    }
+
+    /// Forwards the events to the sections (hover/click on the sensors).
+    fn update(
+        &mut self,
+        tree: &mut Tree,
+        event: &Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &iced::Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        viewport: &Rectangle,
+    ) {
+        for ((child, tree), layout) in self
+            .children
+            .iter_mut()
+            .zip(&mut tree.children)
+            .zip(layout.children())
+        {
+            child.as_widget_mut().update(
+                tree, event, layout, cursor, renderer, clipboard, shell,
+                viewport,
+            );
+        }
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &iced::Renderer,
+    ) -> mouse::Interaction {
+        self.children
+            .iter()
+            .zip(&tree.children)
+            .zip(layout.children())
+            .map(|((child, tree), layout)| {
+                child
+                    .as_widget()
+                    .mouse_interaction(tree, layout, cursor, viewport, renderer)
+            })
+            .max()
+            .unwrap_or_default()
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut iced::Renderer,
+        theme: &iced::Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        for ((child, tree), layout) in self
+            .children
+            .iter()
+            .zip(&tree.children)
+            .zip(layout.children())
+            .filter(|(_, layout)| layout.bounds().intersects(viewport))
+        {
+            child.as_widget().draw(
+                tree, renderer, theme, style, layout, cursor, viewport,
+            );
+        }
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut Tree,
+        layout: Layout<'b>,
+        renderer: &iced::Renderer,
+        viewport: &Rectangle,
+        translation: Vector,
+    ) -> Option<overlay::Element<'b, Message, iced::Theme, iced::Renderer>> {
+        overlay::from_children(
+            &mut self.children,
+            tree,
+            layout,
+            renderer,
+            viewport,
+            translation,
+        )
+    }
+}
+
+impl<'a> From<FillSections<'a>> for Element<'a, Message> {
+    fn from(fill: FillSections<'a>) -> Self {
+        Element::new(fill)
+    }
 }
 
 // ── positioning helpers ─────────────────────────────────────────────

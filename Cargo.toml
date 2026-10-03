@@ -6,7 +6,7 @@ description = "Pannello di sistema leggero per Wayland (Hyprland)"
 license = "Apache-2.0"
 
 [dependencies]
-iced = { version = "0.14", features = ["smol"] }
+iced = { version = "0.14", features = ["smol", "advanced"] }
 iced_exwlshell = { git = "https://github.com/waycrate/exwlshelleventloop.git", branch = "master" }
 log = "0.4"
 simple_logger = "5"

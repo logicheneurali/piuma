@@ -20,7 +20,11 @@ Piuma is a lightweight system information panel for Hyprland/Wayland, designed a
 
 ### Panel Positioning
 - **Anchor Points**: top, bottom, left, right (supports combinations)
-- **Alignment Options**: start, center, end
+- **Alignment Options**: left, center, right (top/bottom on vertical panels)
+- **Fill Mode**: `align: "fill"` spreads the sections across the whole panel
+  with equal spacers, so the panel always spans 100% of the screen; with
+  exactly 3 sections the middle one is kept centered when there is enough
+  room (otherwise it falls back to the equal-spacer distribution)
 - **Percentage-based filling**: Configure percentage of available space
 
 ## Installation

@@ -1456,7 +1456,7 @@ fn panel_settings(state: &PiumaSetup) -> Element<Message> {
             Message::AnchorChanged,
         ).width(Length::Fill).into()),
         ("Align", picklist(
-            vec!["left".to_string(), "center".to_string(), "right".to_string()],
+            vec!["left".to_string(), "center".to_string(), "right".to_string(), "fill".to_string()],
             Some(align),
             Message::AlignChanged,
         ).width(Length::Fill).into()),
