@@ -46,6 +46,7 @@ pub struct Sensor {
     pub border_width: Option<u32>,
     pub border_width_hover: Option<u32>,
     pub border_radius: Option<u32>,
+    pub border_type: Option<String>,
     pub padding: Option<u32>,
     pub action: Option<String>,
 }
@@ -105,6 +106,7 @@ impl Default for Sensor {
             border_width: None,
             border_width_hover: None,
             border_radius: None,
+            border_type: None,
             padding: None,
             action: None,
         }
@@ -157,6 +159,7 @@ pub enum Message {
     SensorBorderWidthChanged(usize, usize, u32),
     SensorBorderWidthHoverChanged(usize, usize, u32),
     SensorBorderRadiusChanged(usize, usize, u32),
+    SensorBorderTypeChanged(usize, usize, String),
     SensorPaddingChanged(usize, usize, u32),
     SensorActionChanged(usize, usize, String),
     SaveConfig,
@@ -275,6 +278,7 @@ impl PiumaSetup {
             ("bg_color_hover", &sensor.bg_color_hover),
             ("border_color", &sensor.border_color),
             ("border_color_hover", &sensor.border_color_hover),
+            ("border_type", &sensor.border_type),
         ] {
             if let Some(val) = opt {
                 map.insert(key.to_string(), JsonValue::String(val.clone()));
@@ -475,6 +479,7 @@ impl PiumaSetup {
             ("bg_color_hover", &mut sensor.bg_color_hover),
             ("border_color", &mut sensor.border_color),
             ("border_color_hover", &mut sensor.border_color_hover),
+            ("border_type", &mut sensor.border_type),
         ] {
             if let Some(val) = obj.get(key).and_then(|v| v.as_str()) {
                 *field = Some(val.to_string());
@@ -662,6 +667,14 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                 let section = &mut state.config.sections[section_index];
                 if sensor_index < section.sensors.len() {
                     section.sensors[sensor_index].border_radius = Some(value);
+                }
+            }
+        }
+        Message::SensorBorderTypeChanged(section_index, sensor_index, value) => {
+            if section_index < state.config.sections.len() {
+                let section = &mut state.config.sections[section_index];
+                if sensor_index < section.sensors.len() {
+                    section.sensors[sensor_index].border_type = if value.is_empty() { None } else { Some(value) };
                 }
             }
         }
@@ -973,6 +986,20 @@ fn sensor_view(section_index: usize, sensor_index: usize, sensor: &Sensor) -> El
         .on_input(move |value| Message::SensorActionChanged(section_index, sensor_index, value))
         .width(220);
 
+    let border_type_picklist = PickList::new(
+        vec![
+            "full".to_string(),
+            "corners".to_string(),
+            "underline".to_string(),
+            "upperline".to_string(),
+            "left".to_string(),
+            "right".to_string(),
+        ],
+        Some(sensor.border_type.clone().unwrap_or_else(|| "full".to_string())),
+        move |value| Message::SensorBorderTypeChanged(section_index, sensor_index, value),
+    )
+    .width(110);
+
     let sensor_col = column![
         Row::new()
             .push(name_input)
@@ -1001,6 +1028,10 @@ fn sensor_view(section_index: usize, sensor_index: usize, sensor: &Sensor) -> El
             .push(border_radius_slider)
             .push(text("Pad:").width(30))
             .push(padding_slider)
+            .spacing(5),
+        Row::new()
+            .push(text("BrdT:").width(45))
+            .push(border_type_picklist)
             .spacing(5),
         Row::new()
             .push(text("Action:").width(55))

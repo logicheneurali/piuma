@@ -7,7 +7,7 @@
 
 use std::time::{Instant, SystemTime};
 
-use iced::widget::{container, text, Column, Row, MouseArea};
+use iced::widget::{container, text, Column, Row, MouseArea, Space, Stack};
 use iced::{Alignment, Background, Color, Element, Event, Length, Subscription, Task as Command};
 use iced::event;
 use iced::time;
@@ -58,6 +58,9 @@ struct SensorValue {
     border_color: Option<Color>,
     border_width: u16,
     border_radius: u16,
+    /// Border drawing style: `full`, `corners`, `underline`, `upperline`,
+    /// `left` or `right`.
+    border_type: String,
     padding: u16,
     action: Option<String>,
 }
@@ -132,6 +135,142 @@ fn container_with_bg<'a>(
             background: Some(Background::Color(bg_color)),
             ..ContainerStyle::default()
         })
+        .into()
+}
+
+/// A solid bar widget used to compose partial sensor borders.
+fn border_bar(color: Color, width: Length, height: Length) -> Element<'static, Message> {
+    container(Space::new().width(width).height(height))
+        .style(move |_theme: &iced::Theme| ContainerStyle {
+            background: Some(Background::Color(color)),
+            ..ContainerStyle::default()
+        })
+        .into()
+}
+
+/// Build the sensor box: background plus its border, drawn according to
+/// `border_type`:
+///
+/// * `full` (or any unknown value) -> native container border, which also
+///   honors `border_radius`;
+/// * `underline` / `upperline` / `left` / `right` -> a single colored bar on
+///   that side, overlaid through a `Stack` so the sensor keeps exactly the
+///   size it would have without a border;
+/// * `corners` -> four L-shaped brackets (each arm covers one quarter of
+///   its side, so every side keeps a visible middle gap).
+///
+/// The border is drawn only when both a color and a positive width are set,
+/// which is the rule the native border always applied.
+fn sensor_box<'a>(
+    content: Element<'a, Message>,
+    bg_color: Option<Color>,
+    border_color: Option<Color>,
+    border_width: u16,
+    border_radius: u16,
+    border_type: &str,
+    padding: u16,
+) -> Element<'a, Message> {
+    // Only these types bypass the native uniform border.
+    let partial = matches!(
+        border_type,
+        "underline" | "upperline" | "left" | "right" | "corners"
+    );
+
+    let base = container(content)
+        .padding(padding)
+        .style(move |_theme: &iced::Theme| {
+            let mut style = ContainerStyle::default();
+            if let Some(bg) = bg_color {
+                style.background = Some(Background::Color(bg));
+            }
+            if !partial {
+                if let Some(c) = border_color {
+                    style.border.color = c;
+                    style.border.width = border_width as f32;
+                    style.border.radius = (border_radius as f32).into();
+                }
+            }
+            style
+        });
+
+    if !partial {
+        return base.into();
+    }
+    // Partial borders need a color and a positive width.
+    let (Some(color), bw) = (border_color, border_width) else {
+        return base.into();
+    };
+    if bw == 0 {
+        return base.into();
+    }
+
+    let bw_px = Length::Fixed(bw as f32);
+
+    // Positions a border bar anywhere inside the box bounds.
+    let place = |bar: Element<'a, Message>, x: Alignment, y: Alignment| -> Element<'a, Message> {
+        container(bar)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(x)
+            .align_y(y)
+            .into()
+    };
+
+    let mut layers: Vec<Element<'a, Message>> = vec![base.into()];
+    match border_type {
+        "underline" => layers.push(place(
+            border_bar(color, Length::Fill, bw_px),
+            Alignment::Center,
+            Alignment::End,
+        )),
+        "upperline" => layers.push(place(
+            border_bar(color, Length::Fill, bw_px),
+            Alignment::Center,
+            Alignment::Start,
+        )),
+        "left" => layers.push(place(
+            border_bar(color, bw_px, Length::Fill),
+            Alignment::Start,
+            Alignment::Center,
+        )),
+        "right" => layers.push(place(
+            border_bar(color, bw_px, Length::Fill),
+            Alignment::End,
+            Alignment::Center,
+        )),
+        "corners" => {
+            // Each corner is an L of two bars, each arm covering one quarter
+            // of its side (FillPortion 1 vs spacer 3), so the middle of every
+            // side keeps a gap whatever the sensor size is.
+            let arm_h = |bar_first: bool, y: Alignment| -> Element<'a, Message> {
+                let bar = border_bar(color, Length::FillPortion(1), bw_px);
+                let spacer = Space::new().width(Length::FillPortion(3)).height(bw_px);
+                let row = Row::new().width(Length::Fill).spacing(0);
+                let row = if bar_first { row.push(bar).push(spacer) } else { row.push(spacer).push(bar) };
+                container(row).width(Length::Fill).height(Length::Fill).align_y(y).into()
+            };
+            let arm_v = |bar_first: bool, x: Alignment| -> Element<'a, Message> {
+                let bar = border_bar(color, bw_px, Length::FillPortion(1));
+                let spacer = Space::new().width(bw_px).height(Length::FillPortion(3));
+                let col = Column::new().height(Length::Fill).spacing(0);
+                let col = if bar_first { col.push(bar).push(spacer) } else { col.push(spacer).push(bar) };
+                container(col).width(Length::Fill).height(Length::Fill).align_x(x).into()
+            };
+            layers.push(arm_h(true, Alignment::Start));  // top edge, left quarter
+            layers.push(arm_v(true, Alignment::Start));  // left edge, top quarter
+            layers.push(arm_h(false, Alignment::Start)); // top edge, right quarter
+            layers.push(arm_v(true, Alignment::End));    // right edge, top quarter
+            layers.push(arm_h(true, Alignment::End));    // bottom edge, left quarter
+            layers.push(arm_v(false, Alignment::Start)); // left edge, bottom quarter
+            layers.push(arm_h(false, Alignment::End));   // bottom edge, right quarter
+            layers.push(arm_v(false, Alignment::End));   // right edge, bottom quarter
+        }
+        _ => {}
+    }
+
+    Stack::with_children(layers)
+        .width(Length::Shrink)
+        .height(Length::Shrink)
         .into()
 }
 
@@ -242,6 +381,7 @@ fn update(panel: &mut Panel, message: Message, _time: Instant) -> Command<Messag
                             border_color: sensor_border,
                             border_width: s.border_width.unwrap_or(0) as u16,
                             border_radius: s.border_radius.unwrap_or(0) as u16,
+                            border_type: s.border_type.as_deref().unwrap_or("full").to_string(),
                             padding: s.padding.unwrap_or(0) as u16,
                             action: s.action.clone(),
                         }
@@ -407,20 +547,15 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
             let border_color = s.border_color;
             let pad = s.padding;
 
-            let styled_container = container(content)
-                .padding(pad)
-                .style(move |_theme: &iced::Theme| {
-                    let mut style = ContainerStyle::default();
-                    if let Some(bg) = bg_color {
-                        style.background = Some(Background::Color(bg));
-                    }
-                    if let Some(border) = border_color {
-                        style.border.color = border;
-                        style.border.width = s.border_width as f32;
-                        style.border.radius = (s.border_radius as f32).into();
-                    }
-                    style
-                });
+            let styled_container = sensor_box(
+                content,
+                bg_color,
+                border_color,
+                s.border_width,
+                s.border_radius,
+                &s.border_type,
+                pad,
+            );
 
             // Wrap in MouseArea to deliver hover + click for this specific sensor.
             MouseArea::new(styled_container)

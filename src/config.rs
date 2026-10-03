@@ -100,6 +100,9 @@ pub struct SensorConfig {
     pub border_width: Option<u32>,
     pub border_width_hover: Option<u32>,
     pub border_radius: Option<u32>,
+    /// Border drawing style: `full` (default), `corners`, `underline`,
+    /// `upperline`, `left` or `right`. `None` = `full`.
+    pub border_type: Option<String>,
     pub padding: Option<u32>,
     /// Action executed when the sensor is clicked. `None` = no action.
     /// A `command:` prefix runs a shell command in the background; any other
@@ -137,11 +140,11 @@ pub fn default_config() -> Config {
         bg_color: None,
         text_color: None,
         sensors: vec![
-            SensorConfig { name: "CPU".to_string(), description: None, source: SensorSource::ProcCpu {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, padding: None, action: None },
-            SensorConfig { name: "GPU".to_string(), description: None, source: SensorSource::NvidiaGpu {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, padding: None, action: None },
-            SensorConfig { name: "MEM".to_string(), description: None, source: SensorSource::ProcMem {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, padding: None, action: None },
-            SensorConfig { name: "DISK".to_string(), description: None, source: SensorSource::ProcDisk {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, padding: None, action: None },
-            SensorConfig { name: "UPTIME".to_string(), description: None, source: SensorSource::Uptime {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, padding: None, action: None },
+            SensorConfig { name: "CPU".to_string(), description: None, source: SensorSource::ProcCpu {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None },
+            SensorConfig { name: "GPU".to_string(), description: None, source: SensorSource::NvidiaGpu {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None },
+            SensorConfig { name: "MEM".to_string(), description: None, source: SensorSource::ProcMem {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None },
+            SensorConfig { name: "DISK".to_string(), description: None, source: SensorSource::ProcDisk {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None },
+            SensorConfig { name: "UPTIME".to_string(), description: None, source: SensorSource::Uptime {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None },
         ],
     };
 
