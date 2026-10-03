@@ -1070,7 +1070,8 @@ const LABEL_WIDTH: u32 = 110;
 /// Body text size: the iced default (16 pt) reduced by 2 pt as requested.
 const BODY: u32 = 14;
 
-/// Parses "#rgb"/"#rrggbb" into a preview color; invalid or empty = neutral gray.
+/// Parses "#rgb"/"#rrggbb"/"#rrggbbaa" (alpha last, as piuma reads it) into a
+/// preview color; invalid or empty = neutral gray.
 fn hex_color(value: &str) -> Color {
     let v = value.trim().trim_start_matches('#');
     // Guard against multi-byte input: the slice indexes below are byte based.
@@ -1078,14 +1079,15 @@ fn hex_color(value: &str) -> Color {
         return Color::from_rgb(0.35, 0.35, 0.35);
     }
     let byte = |s: &str| u8::from_str_radix(s, 16).ok();
-    let rgb = match v.len() {
-        6 => (byte(&v[0..2]), byte(&v[2..4]), byte(&v[4..6])),
-        // Shorthand "#rgb": each digit is duplicated.
-        3 => (byte(&v[0..1]).map(|b| b * 17), byte(&v[1..2]).map(|b| b * 17), byte(&v[2..3]).map(|b| b * 17)),
-        _ => (None, None, None),
+    let rgba = match v.len() {
+        8 => (byte(&v[0..2]), byte(&v[2..4]), byte(&v[4..6]), byte(&v[6..8])),
+        6 => (byte(&v[0..2]), byte(&v[2..4]), byte(&v[4..6]), Some(255)),
+        // Shorthand "#rgb": each digit is duplicated, alpha opaque.
+        3 => (byte(&v[0..1]).map(|b| b * 17), byte(&v[1..2]).map(|b| b * 17), byte(&v[2..3]).map(|b| b * 17), Some(255)),
+        _ => (None, None, None, None),
     };
-    match rgb {
-        (Some(r), Some(g), Some(b)) => Color { r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a: 1.0 },
+    match rgba {
+        (Some(r), Some(g), Some(b), Some(a)) => Color { r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a: a as f32 / 255.0 },
         _ => Color::from_rgb(0.35, 0.35, 0.35),
     }
 }

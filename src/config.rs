@@ -10,16 +10,28 @@ use std::path::PathBuf;
 
 // ── colour helpers ─────────────────────────────────────────────────
 
-/// Parse an ARGB f32 colour string like `"0.1 0.1 0.1 0.9"` or hex `"#ff0000ff"`.
+/// Parse a float colour string like `"0.1 0.1 0.1 0.9"` or hex
+/// `"#abc"`, `"#ff0000"` / `"#ff0000ff"` (alpha last, as piuma-setup previews).
 pub fn parse_color(value: &str) -> Result<Color, ()> {
     let value = value.trim();
-    // Hex format: #RRGGBB or #RRGGBBAA
+    // Hex format: #RGB, #RRGGBB or #RRGGBBAA
     if value.starts_with('#') {
         let hex = &value[1..];
+        // Slices below are byte based: reject non-ASCII instead of panicking
+        // on a multi-byte boundary (same guard as piuma-setup's hex_color).
+        if !hex.is_ascii() {
+            return Err(());
+        }
         let parse_hex = |s: &str, offset: usize| -> Option<u8> {
             u8::from_str_radix(&s[offset..offset + 2], 16).ok()
         };
         match hex.len() {
+            3 => {
+                // Shorthand "#rgb": each digit is duplicated, alpha opaque.
+                let nibble = |i: usize| u8::from_str_radix(&hex[i..i + 1], 16).unwrap_or(0);
+                let (r, g, b) = (nibble(0) * 17, nibble(1) * 17, nibble(2) * 17);
+                Ok(Color::from_rgba(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0))
+            }
             6 => {
                 let r = parse_hex(hex, 0).unwrap_or(0);
                 let g = parse_hex(hex, 2).unwrap_or(0);
