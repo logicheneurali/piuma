@@ -242,13 +242,19 @@ pub fn load_config(path: Option<String>) -> (Config, PathBuf) {
         }
     }
 
-    // Generate default config file
-    let config_dir = default_path.parent();
-    if let Some(dir) = config_dir {
-        let _ = std::fs::create_dir_all(dir);
-        if let Ok(default_cfg) = serde_json::to_string_pretty(&default_config()) {
-            let _ = std::fs::write(&default_path, default_cfg);
+    // Generate the default config file only when none exists: an existing
+    // file that fails to parse must stay untouched (the user can fix it),
+    // otherwise a broken read would silently wipe the configuration.
+    if !default_path.exists() {
+        let config_dir = default_path.parent();
+        if let Some(dir) = config_dir {
+            let _ = std::fs::create_dir_all(dir);
+            if let Ok(default_cfg) = serde_json::to_string_pretty(&default_config()) {
+                let _ = std::fs::write(&default_path, default_cfg);
+            }
         }
+    } else {
+        eprintln!("[piuma] Keeping the existing config untouched; running with defaults until it parses");
     }
 
     (default_config(), default_path)
