@@ -5,7 +5,7 @@
 //! Configuration is loaded from a JSON file (CLI arg or default path).
 //! See `src/config.rs` for the config schema.
 
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use iced::widget::{container, text, Column, Row, MouseArea};
 use iced::{Alignment, Background, Color, Element, Event, Length, Subscription, Task as Command};
@@ -17,7 +17,7 @@ use iced::widget::container::Style as ContainerStyle;
 use iced_exwlshell::ExWlSettings;
 use iced_exwlshell::layershell::timed;
 use iced_exwlshell::reexport::{Anchor, Layer};
-use iced_exwlshell::settings::{LayerShellSettings, StartMode};
+use iced_exwlshell::settings::{LayerShellSettings, LayerSize, StartMode};
 use iced_exwlshell::to_layer_message;
 
 mod config;
@@ -80,6 +80,13 @@ struct Panel {
     sections: Vec<SectionData>,
     /// Index into `sections[s]` and `sections[s].sensors[sensor]` under the cursor.
     hovered: Option<(usize, usize)>,
+    /// State (mtime, len) of the last config read attempt: unchanged files
+    /// are skipped on the next tick instead of being re-read and parsed.
+    last_reload: Option<(SystemTime, u64)>,
+    /// Geometry currently applied to the layer surface; compared after a
+    /// reload to decide whether a runtime `LayoutChange` is needed.
+    last_size: LayerSize,
+    last_anchor: Anchor,
 }
 
 // ── messages ────────────────────────────────────────────────────────
@@ -128,20 +135,57 @@ fn container_with_bg<'a>(
         .into()
 }
 
+/// State of the watched config file: `(modified time, length)`.
+/// `None` when no path is set or the file is missing/unreadable.
+fn config_file_state() -> Option<(SystemTime, u64)> {
+    let path = unsafe { CONFIG_PATH.clone()? };
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
+/// Hot reload of the config file: returns the parsed config only when the
+/// file changed on disk since the last attempt (mtime + length check, so an
+/// unchanged file is not re-read every tick). The attempt is recorded
+/// regardless of the outcome; a parse failure (e.g. a half-written file)
+/// logs once per change and keeps the previous config, retrying when the
+/// file changes again.
+fn maybe_reload(panel: &mut Panel) -> Option<config::Config> {
+    let state = config_file_state()?;
+    if panel.last_reload == Some(state) {
+        return None;
+    }
+    let path = unsafe { CONFIG_PATH.clone()? };
+    panel.last_reload = Some(state);
+
+    let contents = std::fs::read_to_string(&path).ok()?;
+    match serde_json::from_str::<config::Config>(&contents) {
+        Ok(cfg) => {
+            eprintln!("[piuma] config reloaded: {}", path);
+            Some(cfg)
+        }
+        Err(e) => {
+            eprintln!("[piuma] config changed but failed to parse ({}), keeping previous", e);
+            None
+        }
+    }
+}
+
 // ── update ──────────────────────────────────────────────────────────
 
 fn update(panel: &mut Panel, message: Message, _time: Instant) -> Command<Message> {
     match message {
         Message::Tick(_) => {
-            // Reload config from file so runtime edits take effect.
-            unsafe {
-                let cfg_opt = CONFIG_PATH.as_ref();
-                if let Some(cfg_path) = cfg_opt {
-                    if let Ok(contents) = std::fs::read_to_string(cfg_path) {
-                        if let Ok(reloaded) = serde_json::from_str::<config::Config>(&contents) {
-                            panel.config = reloaded;
-                        }
-                    }
+            // Hot reload: pick up config file changes (content and, when
+            // layout/align differ from what is applied, surface geometry).
+            let mut geometry_changed = false;
+            if let Some(reloaded) = maybe_reload(panel) {
+                panel.config = reloaded;
+                let size = panel_size(&panel.config, unsafe { SCREEN_WIDTH }, unsafe { SCREEN_HEIGHT });
+                let anchor = panel_anchor(&panel.config);
+                if size != panel.last_size || anchor != panel.last_anchor {
+                    panel.last_size = size;
+                    panel.last_anchor = anchor;
+                    geometry_changed = true;
                 }
             }
 
@@ -237,7 +281,16 @@ fn update(panel: &mut Panel, message: Message, _time: Instant) -> Command<Messag
                 });
             }
             panel.sections = sections;
-            Command::none()
+            if geometry_changed {
+                // Resize/re-anchor the layer surface at runtime; the view
+                // already uses the new config for content and alignment.
+                Command::done(Message::LayoutChange {
+                    anchor: panel.last_anchor,
+                    size: panel.last_size,
+                })
+            } else {
+                Command::none()
+            }
         }
         Message::IcedEvent(e) => {
             // Mouse enter/leave/press are handled per-sensor by MouseArea,
@@ -584,10 +637,15 @@ fn main() -> Result<(), iced_exwlshell::Error> {
 
     eprintln!("[piuma] Starting …");
 
-    // Load configuration once at startup.
-    let config = config::load_config(config_path.clone());
+    // Load configuration once at startup; remember the file it came from so
+    // it can be watched for hot reload.
+    let (config, resolved_config_path) = config::load_config(config_path.clone());
 
-    eprintln!("[piuma] Config loaded: {} section(s)", config.panel.sections.len());
+    eprintln!(
+        "[piuma] Config loaded: {} section(s) from {}",
+        config.panel.sections.len(),
+        resolved_config_path.display()
+    );
 
     // Best-effort primary monitor dimensions for screen-wide surface sizing.
     unsafe {
@@ -596,7 +654,7 @@ fn main() -> Result<(), iced_exwlshell::Error> {
     }
 
     unsafe { CONFIG = Some(config.clone()); }
-    unsafe { CONFIG_PATH = config_path.clone(); }
+    unsafe { CONFIG_PATH = Some(resolved_config_path.to_string_lossy().into_owned()); }
 
     let panel_config = unsafe { CONFIG.as_ref().cloned().unwrap_or_else(|| config::default_config()) };
 
@@ -608,10 +666,17 @@ fn main() -> Result<(), iced_exwlshell::Error> {
             timed(
                 || {
                     let cfg = unsafe { CONFIG.as_ref().map(|c| c.clone()).unwrap_or_else(|| config::default_config()) };
+                    // Initial geometry must match what wl_settings applies at
+                    // startup, so reloads only emit LayoutChange on change.
+                    let size = panel_size(&cfg, unsafe { SCREEN_WIDTH }, unsafe { SCREEN_HEIGHT });
+                    let anchor = panel_anchor(&cfg);
                     Panel {
                         config: cfg,
                         sections: Vec::new(),
                         hovered: None,
+                        last_reload: config_file_state(),
+                        last_size: size,
+                        last_anchor: anchor,
                     }
                 },
                 namespace,

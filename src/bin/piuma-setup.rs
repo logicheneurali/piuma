@@ -326,16 +326,22 @@ impl PiumaSetup {
             .unwrap_or_else(|| std::path::PathBuf::from("./piuma.json"));
 
         match fs::create_dir_all(path.parent().unwrap()) {
-            Ok(_) => match fs::write(&path, serde_json::to_string_pretty(&json).unwrap()) {
-                Ok(_) => {
-                    self.set_status(format!("Configuration saved to {:?}", path), false);
-                    Task::none()
+            Ok(_) => {
+                // Atomic save: write to a temp file, then rename over the
+                // target so a running piuma never reads a half-written config.
+                let tmp_path = path.with_file_name("piuma.json.tmp");
+                let write_result = fs::write(&tmp_path, serde_json::to_string_pretty(&json).unwrap())
+                    .and_then(|_| fs::rename(&tmp_path, &path));
+                match write_result {
+                    Ok(_) => {
+                        self.set_status(format!("Configuration saved to {:?}", path), false);
+                    }
+                    Err(e) => {
+                        self.set_status(format!("Error saving: {}", e), true);
+                    }
                 }
-                Err(e) => {
-                    self.set_status(format!("Error saving: {}", e), true);
-                    Task::none()
-                }
-            },
+                Task::none()
+            }
             Err(e) => {
                 self.set_status(format!("Error creating directory: {}", e), true);
                 Task::none()

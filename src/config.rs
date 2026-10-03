@@ -174,13 +174,16 @@ fn default_config_path() -> PathBuf {
 }
 
 /// Load configuration from an explicit path or the default location.
-pub fn load_config(path: Option<String>) -> Config {
+///
+/// Returns the config together with the path it was actually loaded from,
+/// so the caller can watch that file for hot reload.
+pub fn load_config(path: Option<String>) -> (Config, PathBuf) {
     if let Some(path) = path {
         let p = PathBuf::from(path);
         if p.exists() {
             if let Ok(contents) = std::fs::read_to_string(&p) {
                 if let Ok(config) = serde_json::from_str::<Config>(&contents) {
-                    return config;
+                    return (config, p);
                 } else {
                     eprintln!("[piuma] Failed to parse config at {}", p.display());
                 }
@@ -197,7 +200,7 @@ pub fn load_config(path: Option<String>) -> Config {
     if default_path.exists() {
         if let Ok(contents) = std::fs::read_to_string(&default_path) {
             if let Ok(config) = serde_json::from_str::<Config>(&contents) {
-                return config;
+                return (config, default_path);
             } else {
                 eprintln!("[piuma] Failed to parse config at {}", default_path.display());
             }
@@ -213,5 +216,5 @@ pub fn load_config(path: Option<String>) -> Config {
         }
     }
 
-    default_config()
+    (default_config(), default_path)
 }
