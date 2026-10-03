@@ -90,6 +90,16 @@ Example configuration:
 }
 ```
 
+Numeric style fields — `border_width`, `border_width_hover`, `border_radius`
+and `padding` (on sensors and on `panel.sensor_defaults`) use the range
+`-1..=N`:
+
+- `-1` = **disabled**: the sensor does not override that field; the value
+  comes from `panel.sensor_defaults` (built-in fallback if absent there too);
+- `0..=N` = **enabled**: a valid value that activates the padding / border /
+  radius with that amount;
+- a field missing from the config behaves like `-1`.
+
 ## Usage
 
 1. Run with default config:

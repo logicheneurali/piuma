@@ -32,11 +32,11 @@ pub struct SensorDefaults {
     pub bg_color_hover: Option<String>,
     pub border_color: Option<String>,
     pub border_color_hover: Option<String>,
-    pub border_width: Option<u32>,
-    pub border_width_hover: Option<u32>,
-    pub border_radius: Option<u32>,
+    pub border_width: Option<i32>,
+    pub border_width_hover: Option<i32>,
+    pub border_radius: Option<i32>,
     pub border_type: Option<String>,
-    pub padding: Option<u32>,
+    pub padding: Option<i32>,
 }
 
 #[derive(Debug, Clone)]
@@ -61,11 +61,11 @@ pub struct Sensor {
     pub bg_color_hover: Option<String>,
     pub border_color: Option<String>,
     pub border_color_hover: Option<String>,
-    pub border_width: Option<u32>,
-    pub border_width_hover: Option<u32>,
-    pub border_radius: Option<u32>,
+    pub border_width: Option<i32>,
+    pub border_width_hover: Option<i32>,
+    pub border_radius: Option<i32>,
     pub border_type: Option<String>,
-    pub padding: Option<u32>,
+    pub padding: Option<i32>,
     pub action: Option<String>,
 }
 
@@ -155,7 +155,7 @@ pub enum Message {
     /// Sensor style defaults: (field name, value) and (field name, number)
     /// for the fields of `panel.sensor_defaults`.
     DefaultsStyleChanged(String, String),
-    DefaultsNumberChanged(String, u32),
+    DefaultsNumberChanged(String, i32),
     SectionLayoutChanged(String),
     DefaultSectionWeightChanged(u32),
     DefaultBgColorChanged(String),
@@ -181,11 +181,11 @@ pub enum Message {
     SensorBgColorHoverChanged(usize, usize, String),
     SensorBorderColorChanged(usize, usize, String),
     SensorBorderColorHoverChanged(usize, usize, String),
-    SensorBorderWidthChanged(usize, usize, u32),
-    SensorBorderWidthHoverChanged(usize, usize, u32),
-    SensorBorderRadiusChanged(usize, usize, u32),
+    SensorBorderWidthChanged(usize, usize, i32),
+    SensorBorderWidthHoverChanged(usize, usize, i32),
+    SensorBorderRadiusChanged(usize, usize, i32),
     SensorBorderTypeChanged(usize, usize, String),
-    SensorPaddingChanged(usize, usize, u32),
+    SensorPaddingChanged(usize, usize, i32),
     SensorActionChanged(usize, usize, String),
     SaveConfig,
     LoadConfig,
@@ -484,8 +484,9 @@ impl PiumaSetup {
                 ("border_radius", &mut d.border_radius),
                 ("padding", &mut d.padding),
             ] {
-                if let Some(v) = obj.get(key).and_then(|v| v.as_u64()) {
-                    *field = Some(v as u32);
+                // as_i64: -1 (disabled) must load too, as_u64 would drop it
+                if let Some(v) = obj.get(key).and_then(|v| v.as_i64()) {
+                    *field = Some(v as i32);
                 }
             }
         }
@@ -577,8 +578,9 @@ impl PiumaSetup {
             ("border_radius", &mut sensor.border_radius),
             ("padding", &mut sensor.padding),
         ] {
-            if let Some(val) = obj.get(key).and_then(|v| v.as_u64()) {
-                *field = Some(val as u32);
+            // as_i64: -1 (disabled) must load too, as_u64 would drop it
+            if let Some(val) = obj.get(key).and_then(|v| v.as_i64()) {
+                *field = Some(val as i32);
             }
         }
 
@@ -1091,13 +1093,17 @@ fn sensor_view(section_index: usize, sensor_index: usize, sensor: &Sensor) -> El
         .on_input(move |value| Message::SensorBorderColorHoverChanged(section_index, sensor_index, value))
         .width(90);
 
-    let border_width_slider = Slider::new(0u32..=10u32, sensor.border_width.unwrap_or(0), move |value| Message::SensorBorderWidthChanged(section_index, sensor_index, value))
+    // Style numbers: -1 = disabled (the defaults apply), 0..=N = enabled.
+    let bw_v = sensor.border_width.unwrap_or(-1);
+    let br_v = sensor.border_radius.unwrap_or(-1);
+    let pad_v = sensor.padding.unwrap_or(-1);
+    let border_width_slider = Slider::new(-1i32..=10, bw_v, move |value| Message::SensorBorderWidthChanged(section_index, sensor_index, value))
         .width(80);
 
-    let border_radius_slider = Slider::new(0u32..=20u32, sensor.border_radius.unwrap_or(0), move |value| Message::SensorBorderRadiusChanged(section_index, sensor_index, value))
+    let border_radius_slider = Slider::new(-1i32..=20, br_v, move |value| Message::SensorBorderRadiusChanged(section_index, sensor_index, value))
         .width(80);
 
-    let padding_slider = Slider::new(0u32..=20u32, sensor.padding.unwrap_or(0), move |value| Message::SensorPaddingChanged(section_index, sensor_index, value))
+    let padding_slider = Slider::new(-1i32..=20, pad_v, move |value| Message::SensorPaddingChanged(section_index, sensor_index, value))
         .width(80);
 
     let action_input = TextInput::new("Action (e.g. close_panel or command)",
@@ -1135,6 +1141,7 @@ fn sensor_view(section_index: usize, sensor_index: usize, sensor: &Sensor) -> El
             .push(border_color_input)
             .push(text("BrdW:").width(30))
             .push(border_width_slider)
+            .push(text(bw_v.to_string()).width(30))
             .spacing(5),
         Row::new()
             .push(text("BrdH:").width(50))
@@ -1145,8 +1152,10 @@ fn sensor_view(section_index: usize, sensor_index: usize, sensor: &Sensor) -> El
             .push(hover_bg_input)
             .push(text("BrdR:").width(50))
             .push(border_radius_slider)
+            .push(text(br_v.to_string()).width(30))
             .push(text("Pad:").width(30))
             .push(padding_slider)
+            .push(text(pad_v.to_string()).width(30))
             .spacing(5),
         Row::new()
             .push(text("BrdT:").width(45))
@@ -1188,11 +1197,15 @@ fn sensor_defaults_view(state: &PiumaSetup) -> Element<Message> {
         .on_input(|value| Message::DefaultsStyleChanged("border_color_hover".to_string(), value))
         .width(90);
 
-    let border_width_slider = Slider::new(0u32..=10u32, d.border_width.unwrap_or(0), |value| Message::DefaultsNumberChanged("border_width".to_string(), value))
+    // Style numbers: -1 = disabled (the defaults apply), 0..=N = enabled.
+    let bw_v = d.border_width.unwrap_or(-1);
+    let br_v = d.border_radius.unwrap_or(-1);
+    let pad_v = d.padding.unwrap_or(-1);
+    let border_width_slider = Slider::new(-1i32..=10, bw_v, |value| Message::DefaultsNumberChanged("border_width".to_string(), value))
         .width(80);
-    let border_radius_slider = Slider::new(0u32..=20u32, d.border_radius.unwrap_or(0), |value| Message::DefaultsNumberChanged("border_radius".to_string(), value))
+    let border_radius_slider = Slider::new(-1i32..=20, br_v, |value| Message::DefaultsNumberChanged("border_radius".to_string(), value))
         .width(80);
-    let padding_slider = Slider::new(0u32..=20u32, d.padding.unwrap_or(0), |value| Message::DefaultsNumberChanged("padding".to_string(), value))
+    let padding_slider = Slider::new(-1i32..=20, pad_v, |value| Message::DefaultsNumberChanged("padding".to_string(), value))
         .width(80);
 
     let border_type_picklist = PickList::new(
@@ -1221,6 +1234,7 @@ fn sensor_defaults_view(state: &PiumaSetup) -> Element<Message> {
             .push(border_color_input)
             .push(text("BrdW:").width(30))
             .push(border_width_slider)
+            .push(text(bw_v.to_string()).width(30))
             .spacing(5),
         Row::new()
             .push(text("BrdH:").width(50))
@@ -1231,8 +1245,10 @@ fn sensor_defaults_view(state: &PiumaSetup) -> Element<Message> {
             .push(hover_bg_input)
             .push(text("BrdR:").width(50))
             .push(border_radius_slider)
+            .push(text(br_v.to_string()).width(30))
             .push(text("Pad:").width(30))
             .push(padding_slider)
+            .push(text(pad_v.to_string()).width(30))
             .spacing(5),
         Row::new()
             .push(text("BrdT:").width(45))

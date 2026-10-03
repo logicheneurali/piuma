@@ -377,11 +377,13 @@ fn update(panel: &mut Panel, message: Message, _time: Instant) -> Command<Messag
                             .or(defaults.and_then(|sd| sd.bg_color_hover.as_deref()));
                         let tc_h_str = (if own_text { s.text_color_hover.as_deref() } else { None })
                             .or(defaults.and_then(|sd| sd.text_color_hover.as_deref()));
-                        let bw_val = (if own_border { s.border_width } else { None })
-                            .or(defaults.and_then(|sd| sd.border_width))
+                        // Numeric style fields follow the -1 = disabled rule:
+                        // only an enabled value (>= 0) overrides the defaults.
+                        let bw_val = (if own_border { config::style_num(s.border_width) } else { None })
+                            .or(defaults.and_then(|sd| config::style_num(sd.border_width)))
                             .unwrap_or(0);
-                        let br_val = (if own_border { s.border_radius } else { None })
-                            .or(defaults.and_then(|sd| sd.border_radius))
+                        let br_val = (if own_border { config::style_num(s.border_radius) } else { None })
+                            .or(defaults.and_then(|sd| config::style_num(sd.border_radius)))
                             .unwrap_or(0);
                         let bt_str = (if own_border { s.border_type.as_deref() } else { None })
                             .or(defaults.and_then(|sd| sd.border_type.as_deref()))
@@ -406,7 +408,9 @@ fn update(panel: &mut Panel, message: Message, _time: Instant) -> Command<Messag
                             border_width: bw_val as u16,
                             border_radius: br_val as u16,
                             border_type: bt_str.to_string(),
-                            padding: s.padding.or(defaults.and_then(|sd| sd.padding)).unwrap_or(0) as u16,
+                            padding: config::style_num(s.padding)
+                                .or(defaults.and_then(|sd| config::style_num(sd.padding)))
+                                .unwrap_or(0) as u16,
                             action: s.action.clone(),
                         }
                     })

@@ -50,6 +50,14 @@ pub fn parse_color(value: &str) -> Result<Color, ()> {
     }
 }
 
+/// Numeric style field with the **-1 = disabled** rule: `None` (field missing
+/// from the config) or a negative value does not activate the field (it does
+/// not override `panel.sensor_defaults`); `0..=N` is a valid value that
+/// activates padding / border / radius with that amount.
+pub fn style_num(value: Option<i32>) -> Option<u32> {
+    value.and_then(|v| u32::try_from(v).ok())
+}
+
 // ── config structs ──────────────────────────────────────────────────
 
 use serde::Deserialize;
@@ -89,11 +97,11 @@ pub struct SensorDefaults {
     pub bg_color_hover: Option<String>,
     pub border_color: Option<String>,
     pub border_color_hover: Option<String>,
-    pub border_width: Option<u32>,
-    pub border_width_hover: Option<u32>,
-    pub border_radius: Option<u32>,
+    pub border_width: Option<i32>,
+    pub border_width_hover: Option<i32>,
+    pub border_radius: Option<i32>,
     pub border_type: Option<String>,
-    pub padding: Option<u32>,
+    pub padding: Option<i32>,
 }
 
 #[derive(Deserialize, serde::Serialize, Clone)]
@@ -119,13 +127,13 @@ pub struct SensorConfig {
     pub bg_color_hover: Option<String>,
     pub border_color: Option<String>,
     pub border_color_hover: Option<String>,
-    pub border_width: Option<u32>,
-    pub border_width_hover: Option<u32>,
-    pub border_radius: Option<u32>,
+    pub border_width: Option<i32>,
+    pub border_width_hover: Option<i32>,
+    pub border_radius: Option<i32>,
     /// Border drawing style: `full` (default), `corners`, `underline`,
     /// `upperline`, `left` or `right`. `None` = `full`.
     pub border_type: Option<String>,
-    pub padding: Option<u32>,
+    pub padding: Option<i32>,
     /// Action executed when the sensor is clicked. `None` = no action.
     /// A `command:` prefix runs a shell command in the background; any other
     /// value is treated as an internal action (e.g. `close_panel`).
