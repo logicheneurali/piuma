@@ -169,6 +169,8 @@ fn sensor_box<'a>(
     border_radius: u16,
     border_type: &str,
     padding: u16,
+    width: Length,
+    height: Length,
 ) -> Element<'a, Message> {
     // Only these types bypass the native uniform border.
     let partial = matches!(
@@ -176,8 +178,15 @@ fn sensor_box<'a>(
         "underline" | "upperline" | "left" | "right" | "corners"
     );
 
+    // `width`/`height` carry the panel's thickness axis (Fill when the boxes
+    // stretch, Shrink otherwise); the content stays content-sized and is
+    // centred inside (a no-op on the Shrink axes).
     let base = container(content)
         .padding(padding)
+        .width(width)
+        .height(height)
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center)
         .style(move |_theme: &iced::Theme| {
             let mut style = ContainerStyle::default();
             if let Some(bg) = bg_color {
@@ -269,8 +278,8 @@ fn sensor_box<'a>(
     }
 
     Stack::with_children(layers)
-        .width(Length::Shrink)
-        .height(Length::Shrink)
+        .width(width)
+        .height(height)
         .into()
 }
 
@@ -345,14 +354,38 @@ fn update(panel: &mut Panel, message: Message, _time: Instant) -> Command<Messag
                     .iter()
                     .map(|s| {
                         let value = sensor_runner::run(&s.source);
-                        // Style precedence: per-sensor value, then the global
-                        // `panel.sensor_defaults`, then section/built-in value.
+                        // Style precedence, per style GROUP: a sensor takes a
+                        // group over only when it defines the group's key
+                        // colour (`border_color`, `bg_color`, `text_color`).
+                        // When that key is null on the sensor, every override
+                        // of that group on the sensor is ignored and
+                        // `panel.sensor_defaults` applies as a whole. When the
+                        // key is set, the sensor's own fields win and the
+                        // remaining ones fall back to the defaults.
+                        // `padding` is a single value: sensor when set,
+                        // otherwise the default.
                         let defaults = panel.config.panel.sensor_defaults.as_ref();
+                        let own_border = s.border_color.is_some();
+                        let own_bg = s.bg_color.is_some();
+                        let own_text = s.text_color.is_some();
+                        // Key fields: per-sensor, then defaults, then section/built-in.
                         let tc_str = s.text_color.as_deref().or(defaults.and_then(|sd| sd.text_color.as_deref()));
                         let bg_str = s.bg_color.as_deref().or(defaults.and_then(|sd| sd.bg_color.as_deref()));
-                        let bg_h_str = s.bg_color_hover.as_deref().or(defaults.and_then(|sd| sd.bg_color_hover.as_deref()));
-                        let tc_h_str = s.text_color_hover.as_deref().or(defaults.and_then(|sd| sd.text_color_hover.as_deref()));
                         let bc_str = s.border_color.as_deref().or(defaults.and_then(|sd| sd.border_color.as_deref()));
+                        // Secondary fields only count when the sensor owns the group.
+                        let bg_h_str = (if own_bg { s.bg_color_hover.as_deref() } else { None })
+                            .or(defaults.and_then(|sd| sd.bg_color_hover.as_deref()));
+                        let tc_h_str = (if own_text { s.text_color_hover.as_deref() } else { None })
+                            .or(defaults.and_then(|sd| sd.text_color_hover.as_deref()));
+                        let bw_val = (if own_border { s.border_width } else { None })
+                            .or(defaults.and_then(|sd| sd.border_width))
+                            .unwrap_or(0);
+                        let br_val = (if own_border { s.border_radius } else { None })
+                            .or(defaults.and_then(|sd| sd.border_radius))
+                            .unwrap_or(0);
+                        let bt_str = (if own_border { s.border_type.as_deref() } else { None })
+                            .or(defaults.and_then(|sd| sd.border_type.as_deref()))
+                            .unwrap_or("full");
 
                         let sensor_tc = tc_str
                             .and_then(|sc| config::parse_color(sc).ok())
@@ -370,9 +403,9 @@ fn update(panel: &mut Panel, message: Message, _time: Instant) -> Command<Messag
                             text_color_hover: sensor_tc_hover,
                             bg_color_hover: sensor_bg_hover,
                             border_color: sensor_border,
-                            border_width: s.border_width.or(defaults.and_then(|sd| sd.border_width)).unwrap_or(0) as u16,
-                            border_radius: s.border_radius.or(defaults.and_then(|sd| sd.border_radius)).unwrap_or(0) as u16,
-                            border_type: s.border_type.as_deref().or(defaults.and_then(|sd| sd.border_type.as_deref())).unwrap_or("full").to_string(),
+                            border_width: bw_val as u16,
+                            border_radius: br_val as u16,
+                            border_type: bt_str.to_string(),
                             padding: s.padding.or(defaults.and_then(|sd| sd.padding)).unwrap_or(0) as u16,
                             action: s.action.clone(),
                         }
@@ -477,6 +510,16 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
     let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
     let _ = &font_name;
 
+    // Panel orientation: the `thickness` axis (the "cross" axis of the panel)
+    // is the height for a horizontal panel and the width for a vertical one.
+    let vertical = panel
+        .config
+        .panel
+        .section_layout
+        .as_ref()
+        .map(|s| s.as_str())
+        .unwrap_or("horizontal") == "vertical";
+
     // Build sections.
     let mut section_elements: Vec<Element<'a, Message>> = Vec::new();
 
@@ -486,6 +529,17 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
         let has_title = !section.name.is_empty();
         let title_color = section.title_color;
         let font_obj = Font::with_name(DEFAULT_FONT);
+
+        // Sensor boxes fill the `thickness` axis only when the section arranges
+        // them *across* it (section cross axis == panel cross axis); stacked
+        // along the thickness they stay content-sized (filling would split the
+        // thickness between them) and the group is centred by the container.
+        let stretch = vertical == (section.layout == "vertical");
+        let (box_w, box_h) = match (vertical, stretch) {
+            (false, true) => (Length::Shrink, Length::Fill),
+            (true, true) => (Length::Fill, Length::Shrink),
+            _ => (Length::Shrink, Length::Shrink),
+        };
 
         // Build sensor widgets with optional per-sensor background.
         let sensor_widgets: Vec<Element<'a, Message>> = section.sensors.iter().enumerate().map(|(sensor_idx, s)| {
@@ -546,6 +600,8 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
                 s.border_radius,
                 &s.border_type,
                 pad,
+                box_w,
+                box_h,
             );
 
             // Wrap in MouseArea to deliver hover + click for this specific sensor.
@@ -573,24 +629,37 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
             let sensor_col = Column::new()
                 .extend(sensor_widgets)
                 .padding(4);
-            if has_title {
-                Column::new()
-                    .push(title_el)
-                    .push(sensor_col)
-                    .into()
+            // `stretch` here means: vertical section in a vertical panel ->
+            // fill the thickness (width) so the boxes stretch; the title stays
+            // content-sized and is centred above them.
+            let sensor_col = if stretch { sensor_col.width(Length::Fill) } else { sensor_col };
+            let col = if has_title {
+                let col = Column::new().push(title_el).push(sensor_col);
+                if stretch { col.width(Length::Fill).align_x(Alignment::Center) } else { col }
             } else {
-                sensor_col.into()
-            }
+                sensor_col
+            };
+            col.into()
         } else {
-            Row::new()
+            let row = Row::new()
                 .extend(sensor_widgets)
                 .spacing(8)
-                .padding(4)
-                .into()
+                .padding(4);
+            // `stretch` here means: horizontal section in a horizontal panel ->
+            // fill the thickness (height) so the boxes stretch.
+            let row = if stretch { row.height(Length::Fill) } else { row };
+            row.into()
         };
 
-        // Wrap in container with section background.
+        // Wrap in container with section background. It fills the panel's cross
+        // (thickness) axis and centres the section content on that axis, so
+        // `thickness` reaches the sections: stretched boxes fill it, stacked
+        // groups are centred within it.
         let section_element: Element<'a, Message> = container(sensors_inner)
+            .width(if vertical { Length::Fill } else { Length::Shrink })
+            .height(if vertical { Length::Shrink } else { Length::Fill })
+            .align_x(if vertical { Alignment::Center } else { Alignment::Start })
+            .align_y(if vertical { Alignment::Start } else { Alignment::Center })
             .style(move |_theme: &iced::Theme| ContainerStyle {
                 background: Some(Background::Color(section_bg)),
                 ..ContainerStyle::default()
@@ -600,22 +669,19 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
         section_elements.push(section_element);
     }
 
-    // Build the full panel layout. Shrink so the panel is as big as its
-    // sensors; the outer container (below) provides the background and spans
-    // the surface on the cross axis.
-    let main_layout: Element<'a, Message> = if panel.config.panel.section_layout
-        .as_ref()
-        .map(|s| s.as_str())
-        .unwrap_or("horizontal") == "vertical"
-    {
+    // Build the full panel layout. The main axis shrinks to the content (so
+    // `align` can place the panel within the surface); the cross axis fills
+    // the surface thickness, which is what makes `thickness` reach the
+    // sections and the sensor boxes.
+    let main_layout: Element<'a, Message> = if vertical {
         Column::new()
             .extend(section_elements)
-            .width(Length::Shrink)
+            .width(Length::Fill)
             .into()
     } else {
         Row::new()
             .extend(section_elements)
-            .width(Length::Shrink)
+            .height(Length::Fill)
             .into()
     };
 
@@ -629,13 +695,7 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
     // own thickness on the main axis. The `align` must be applied on a
     // container that fills the main axis of the surface; applied on the
     // shrink-wrapped panel it would be a no-op (centering within itself).
-    let vertical = panel
-        .config
-        .panel
-        .section_layout
-        .as_ref()
-        .map(|s| s.as_str())
-        .unwrap_or("horizontal") == "vertical";
+    // (`vertical` is computed at the top of the function.)
     let align = panel
         .config
         .panel
