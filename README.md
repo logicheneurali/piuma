@@ -119,6 +119,17 @@ For a visual configuration tool, you can use:
 2. Or use the command-line configuration wizard
 3. Or manually edit the configuration file
 
+`piuma-setup` loads `~/.config/piuma/piuma.json` on startup. The bottom bar
+offers:
+
+- **Load…** – edit any `*.json` file from `~/.config/piuma/` (different styles
+  can live side by side);
+- **Save** – writes the file being edited, asking for confirmation when there
+  are unsaved changes;
+- **Save As…** – saves under a new name, with an extra confirmation if the
+  file already exists;
+- **Reset** – restores the default configuration.
+
 ## Example Configurations
 
 - `test_window_config.json` - Tests window title sensor

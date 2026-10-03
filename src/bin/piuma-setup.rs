@@ -1,13 +1,15 @@
 //! Piuma Setup - GUI Configuration Tool
 //! A visual tool to configure Piuma panel settings using iced 0.14
 
-use iced::widget::{button, column, container, scrollable, text, Column, Container, Row, TextInput, Slider, PickList};
+use iced::widget::{button, column, container, scrollable, stack, text, Column, Container, Row, TextInput, Slider, PickList};
 use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Task, Theme};
 use iced::widget::text::Style as TextStyle;
 use serde_json::{Map, Value as JsonValue};
+use std::borrow::Borrow;
 use std::collections::HashSet;
 use std::fs;
 use std::ops::RangeInclusive;
+use std::path::PathBuf;
 
 // Configuration structure for GUI - mirrors src/config.rs
 #[derive(Debug, Clone)]
@@ -193,10 +195,78 @@ pub enum Message {
     ToggleDefaults,
     /// Toggles the collapsible style block of one sensor: (section, sensor).
     ToggleSensorStyle(usize, usize),
+    /// Save: asks confirmation when the config was modified, then writes.
     SaveConfig,
+    /// Opens the "save as" modal (write the config under a new name).
+    SaveAs,
+    /// Opens the modal to pick and load any *.json config of the directory.
     LoadConfig,
+    /// Text typed in the active modal (file name / picked file).
+    ModalTextChanged(String),
+    /// Confirms the primary action of the active modal.
+    ModalConfirm,
+    /// Closes the active modal discarding its action.
+    ModalCancel,
     ResetConfig,
     Status(String),
+}
+
+/// Modal dialogs stacked over the main view (see `view`).
+#[derive(Debug, Clone)]
+pub enum Modal {
+    /// Overwrite `current_file` with the modified configuration.
+    ConfirmSave,
+    /// Save-as form: typed file name and whether it already exists.
+    SaveAs { name: String, exists: bool },
+    /// Extra confirmation: the save-as target file already exists.
+    ConfirmSaveAs(String),
+    /// Load picker: selected file among the *.json of the config directory.
+    LoadFile { selected: String, files: Vec<String> },
+}
+
+/// Default config file: the one the running piuma reads.
+const DEFAULT_FILE: &str = "piuma.json";
+
+/// Directory holding the piuma configs (~/.config/piuma).
+fn config_dir() -> PathBuf {
+    dirs::config_dir().map(|d| d.join("piuma")).unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Full path of a config file name inside the piuma config directory.
+fn file_path(name: &str) -> PathBuf {
+    config_dir().join(name)
+}
+
+/// Sorted *.json file names of the piuma config directory (load picker).
+fn list_config_files() -> Vec<String> {
+    let mut files: Vec<String> = match fs::read_dir(config_dir()) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let path = e.path();
+                if path.extension().and_then(|x| x.to_str()) == Some("json") {
+                    path.file_name().and_then(|n| n.to_str()).map(|n| n.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    files.sort();
+    files
+}
+
+/// Validates a typed config name: plain file name, ".json" appended when missing.
+fn sanitize_file_name(raw: &str) -> Result<String, String> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err("File name is empty".to_string());
+    }
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err("File name must not contain a path".to_string());
+    }
+    if name.ends_with(".json") { Ok(name.to_string()) } else { Ok(format!("{}.json", name)) }
 }
 
 // Application state
@@ -208,17 +278,44 @@ pub struct PiumaSetup {
     defaults_expanded: bool,
     /// Indices of the sensors whose "Style overrides" block is open.
     sensor_style_open: HashSet<(usize, usize)>,
+    /// Config file currently edited (name inside the piuma config directory).
+    current_file: String,
+    /// Serialized config at the last load/save: differs = unsaved changes.
+    snapshot: String,
+    /// Modal dialog stacked over the view, when one is open.
+    modal: Option<Modal>,
 }
 
 impl PiumaSetup {
+    /// Builds the initial state, loading the config in use (piuma.json) when
+    /// present so the user starts from the real configuration, not from defaults.
     fn new() -> Self {
-        PiumaSetup {
+        let mut state = PiumaSetup {
             config: PiumaConfig::default(),
             status_message: None,
             status_is_error: false,
             defaults_expanded: false,
             sensor_style_open: HashSet::new(),
+            current_file: DEFAULT_FILE.to_string(),
+            snapshot: String::new(),
+            modal: None,
+        };
+        match fs::read_to_string(file_path(&state.current_file)) {
+            Ok(content) => match state.load_from_json(&content) {
+                Ok(()) => {
+                    state.snapshot = state.serialize();
+                    state.set_status(format!("Loaded {}", state.current_file), false);
+                }
+                // Parse errors leave `snapshot` empty, so the first save always
+                // asks for confirmation instead of silently overwriting.
+                Err(e) => state.set_status(format!("Error parsing {}: {}", state.current_file, e), true),
+            },
+            Err(_) => {
+                state.snapshot = state.serialize();
+                state.set_status("No config file found; starting from defaults".to_string(), false);
+            }
         }
+        state
     }
 
     fn set_status(&mut self, msg: String, is_error: bool) {
@@ -391,57 +488,59 @@ impl PiumaSetup {
         JsonValue::Object(map)
     }
 
-    fn save_config(&mut self) -> Task<Message> {
-        let json = self.config_to_json();
-        let path = dirs::config_dir()
-            .map(|d| d.join("piuma").join("piuma.json"))
-            .unwrap_or_else(|| std::path::PathBuf::from("./piuma.json"));
-
-        match fs::create_dir_all(path.parent().unwrap()) {
-            Ok(_) => {
-                // Atomic save: write to a temp file, then rename over the
-                // target so a running piuma never reads a half-written config.
-                let tmp_path = path.with_file_name("piuma.json.tmp");
-                let write_result = fs::write(&tmp_path, serde_json::to_string_pretty(&json).unwrap())
-                    .and_then(|_| fs::rename(&tmp_path, &path));
-                match write_result {
-                    Ok(_) => {
-                        self.set_status(format!("Configuration saved to {:?}", path), false);
-                    }
-                    Err(e) => {
-                        self.set_status(format!("Error saving: {}", e), true);
-                    }
-                }
-                Task::none()
-            }
-            Err(e) => {
-                self.set_status(format!("Error creating directory: {}", e), true);
-                Task::none()
-            }
-        }
+    /// Pretty-printed JSON of the current config: exactly what Save would write.
+    fn serialize(&self) -> String {
+        serde_json::to_string_pretty(&self.config_to_json()).unwrap_or_default()
     }
 
-    fn load_config(&mut self) -> Task<Message> {
-        let path = dirs::config_dir()
-            .map(|d| d.join("piuma").join("piuma.json"))
-            .unwrap_or_else(|| std::path::PathBuf::from("./piuma.json"));
-
-        match fs::read_to_string(&path) {
-            Ok(content) => match self.load_from_json(&content) {
-                Ok(_) => {
-                    self.set_status(format!("Configuration loaded from {:?}", path), false);
-                    Task::none()
-                }
-                Err(e) => {
-                    self.set_status(format!("Error parsing config: {}", e), true);
-                    Task::none()
-                }
-            },
-            Err(_) => {
-                self.set_status(format!("No config file found at {:?}", path), true);
-                Task::none()
-            }
+    /// Writes the config to `name` (atomic tmp+rename) and refreshes
+    /// `current_file`/`snapshot` so the modification check restarts clean.
+    fn save_config(&mut self, name: &str) -> Result<(), String> {
+        let path = file_path(name);
+        let json = self.serialize();
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir).map_err(|e| format!("Error creating directory: {}", e))?;
         }
+        // Atomic save: write to a temp file, then rename over the target so a
+        // running piuma never reads a half-written config.
+        let tmp_path = path.with_extension("json.tmp");
+        fs::write(&tmp_path, &json)
+            .and_then(|_| fs::rename(&tmp_path, &path))
+            .map_err(|e| format!("Error saving: {}", e))?;
+        self.snapshot = json;
+        self.current_file = name.to_string();
+        Ok(())
+    }
+
+    /// Reads and applies the config file `name`, refreshing current_file/snapshot.
+    fn load_config(&mut self, name: &str) -> Result<(), String> {
+        let content = fs::read_to_string(file_path(name))
+            .map_err(|_| format!("No config file found: {}", name))?;
+        self.load_from_json(&content)?;
+        self.current_file = name.to_string();
+        self.snapshot = self.serialize();
+        Ok(())
+    }
+
+    /// Saves to `name` and reports the outcome in the status bar, returning
+    /// it so callers can react (e.g. keep a confirmation modal open on error).
+    fn save_reporting(&mut self, name: &str) -> Result<(), String> {
+        let outcome = self.save_config(name);
+        match &outcome {
+            Ok(()) => self.set_status(format!("Configuration saved to {:?}", file_path(name)), false),
+            Err(e) => self.set_status(e.clone(), true),
+        }
+        outcome
+    }
+
+    /// Loads `name` and reports the outcome in the status bar (see save_reporting).
+    fn load_reporting(&mut self, name: &str) -> Result<(), String> {
+        let outcome = self.load_config(name);
+        match &outcome {
+            Ok(()) => self.set_status(format!("Loaded {}", name), false),
+            Err(e) => self.set_status(e.clone(), true),
+        }
+        outcome
     }
 
     fn load_from_json(&mut self, content: &str) -> Result<(), String> {
@@ -818,8 +917,77 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                 }
             }
         }
-        Message::SaveConfig => return state.save_config(),
-        Message::LoadConfig => return state.load_config(),
+        Message::SaveConfig => {
+            if state.serialize() != state.snapshot {
+                // Unsaved changes: ask before overwriting the file.
+                state.modal = Some(Modal::ConfirmSave);
+            } else {
+                let name = state.current_file.clone();
+                let _ = state.save_reporting(&name);
+            }
+        }
+        Message::SaveAs => {
+            state.modal = Some(Modal::SaveAs {
+                name: state.current_file.clone(),
+                exists: file_path(&state.current_file).exists(),
+            });
+        }
+        Message::LoadConfig => {
+            // Picker lists the *.json of the config dir, preselecting the file in use.
+            let files = list_config_files();
+            let selected = if files.contains(&state.current_file) {
+                state.current_file.clone()
+            } else {
+                files.first().cloned().unwrap_or_default()
+            };
+            state.modal = Some(Modal::LoadFile { selected, files });
+        }
+        Message::ModalTextChanged(value) => match state.modal.as_mut() {
+            Some(Modal::SaveAs { name, exists }) => {
+                *exists = sanitize_file_name(&value).map(|n| file_path(&n).exists()).unwrap_or(false);
+                *name = value;
+            }
+            Some(Modal::LoadFile { selected, .. }) => *selected = value,
+            _ => {}
+        },
+        Message::ModalConfirm => match state.modal.take() {
+            Some(Modal::ConfirmSave) => {
+                let name = state.current_file.clone();
+                if state.save_reporting(&name).is_err() {
+                    state.modal = Some(Modal::ConfirmSave);
+                }
+            }
+            Some(Modal::SaveAs { name, exists }) => match sanitize_file_name(&name) {
+                Ok(target) => {
+                    if file_path(&target).exists() {
+                        // Existing target: extra confirmation before overwrite.
+                        state.modal = Some(Modal::ConfirmSaveAs(target));
+                    } else {
+                        let _ = state.save_reporting(&target);
+                    }
+                }
+                Err(e) => {
+                    // Invalid name: keep the form open and show the hint in it.
+                    state.set_status(e, true);
+                    state.modal = Some(Modal::SaveAs { name, exists });
+                }
+            },
+            Some(Modal::ConfirmSaveAs(name)) => {
+                if state.save_reporting(&name).is_err() {
+                    state.modal = Some(Modal::ConfirmSaveAs(name));
+                }
+            }
+            Some(Modal::LoadFile { selected, files }) => {
+                if selected.is_empty() {
+                    state.set_status("No config file found to load".to_string(), true);
+                    state.modal = Some(Modal::LoadFile { selected, files });
+                } else if state.load_reporting(&selected).is_err() {
+                    state.modal = Some(Modal::LoadFile { selected, files });
+                }
+            }
+            None => {}
+        },
+        Message::ModalCancel => state.modal = None,
         Message::ToggleDefaults => state.defaults_expanded = !state.defaults_expanded,
         Message::ToggleSensorStyle(section, sensor) => {
             // Insert-or-remove keeps the set as the single source of truth.
@@ -847,6 +1015,9 @@ fn theme(_state: &PiumaSetup) -> Theme {
 /// Fixed label column width so every form row lines up and labels never
 /// overlap their controls (`Length` only accepts u32).
 const LABEL_WIDTH: u32 = 110;
+
+/// Body text size: the iced default (16 pt) reduced by 2 pt as requested.
+const BODY: u32 = 14;
 
 /// Parses "#rgb"/"#rrggbb" into a preview color; invalid or empty = neutral gray.
 fn hex_color(value: &str) -> Color {
@@ -897,11 +1068,30 @@ fn inset_style(_t: &Theme) -> container::Style {
 /// One label + control pair filling half of a form row.
 fn form_cell<'a>(label: &'a str, control: Element<'a, Message>) -> Row<'a, Message> {
     Row::new()
-        .push(text(label).width(LABEL_WIDTH))
+        .push(text(label).size(BODY).width(LABEL_WIDTH))
         .push(control)
         .spacing(10)
         .align_y(Alignment::Center)
         .width(Length::Fill)
+}
+
+/// Text input using the standard body font size.
+fn input<'a>(placeholder: &'a str, value: &'a str, on_input: impl Fn(String) -> Message + 'a) -> TextInput<'a, Message> {
+    TextInput::new(placeholder, value).on_input(on_input).size(BODY)
+}
+
+/// Pick list using the standard body font size.
+fn picklist<'a, T, L, V>(
+    options: L,
+    selected: Option<V>,
+    on_select: impl Fn(T) -> Message + 'a,
+) -> PickList<'a, T, L, V, Message>
+where
+    T: ToString + PartialEq + Clone + 'a,
+    L: Borrow<[T]> + 'a,
+    V: Borrow<T> + 'a,
+{
+    PickList::new(options, selected, on_select).text_size(BODY)
 }
 
 /// Two-column form grid: fields alternate left/right, one per cell, so long
@@ -932,7 +1122,7 @@ fn color_control<'a>(value: &'a str, on_input: impl Fn(String) -> Message + 'a) 
             ..container::Style::default()
         });
     Row::new()
-        .push(TextInput::new("#rrggbb", value).on_input(on_input).width(Length::Fill))
+        .push(input("#rrggbb", value, on_input).width(Length::Fill))
         .push(swatch)
         .spacing(6)
         .align_y(Alignment::Center)
@@ -945,7 +1135,7 @@ fn color_control<'a>(value: &'a str, on_input: impl Fn(String) -> Message + 'a) 
 fn slider_control<'a>(range: RangeInclusive<i32>, value: i32, on_input: impl Fn(i32) -> Message + 'a) -> Element<'a, Message> {
     Row::new()
         .push(Slider::new(range, value, on_input).width(Length::Fill))
-        .push(text(value.to_string()).width(40))
+        .push(text(value.to_string()).size(BODY).width(40))
         .spacing(8)
         .align_y(Alignment::Center)
         .width(Length::Fill)
@@ -956,9 +1146,9 @@ fn slider_control<'a>(range: RangeInclusive<i32>, value: i32, on_input: impl Fn(
 fn collapsible_header<'a>(title: &'a str, summary: String, expanded: bool, on_toggle: Message) -> Element<'a, Message> {
     button(
         Row::new()
-            .push(text(if expanded { "▾" } else { "▸" }).width(14))
-            .push(text(title).size(15))
-            .push(text(summary).size(12)
+            .push(text(if expanded { "▾" } else { "▸" }).size(BODY).width(14))
+            .push(text(title).size(13))
+            .push(text(summary).size(10)
                 .style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.55, 0.55, 0.6)), ..TextStyle::default() }))
             .spacing(8)
             .align_y(Alignment::Center)
@@ -987,7 +1177,7 @@ fn style_summary(colors: &[(&str, &Option<String>)], numbers: &[(&str, &Option<i
 }
 
 /// Root view: the scrollable column of nested cards with the action bar
-/// rendered underneath, so Save/Load/Reset stay reachable at any scroll position.
+/// underneath; a modal, when open, is stacked over everything on a dimmed layer.
 fn view(state: &PiumaSetup) -> Element<Message> {
     let content = column![
         config_header(state),
@@ -999,7 +1189,7 @@ fn view(state: &PiumaSetup) -> Element<Message> {
     .spacing(15)
     .width(Length::Fill);
 
-    container(
+    let base = container(
         column![
             container(scrollable(content).width(Length::Fill).height(Length::Fill))
                 .width(Length::Fill)
@@ -1014,14 +1204,25 @@ fn view(state: &PiumaSetup) -> Element<Message> {
     .style(|_state| container::Style {
         background: Some(Background::Color(Color::from_rgb(0.12, 0.12, 0.12))),
         ..container::Style::default()
-    })
-    .into()
+    });
+
+    match &state.modal {
+        Some(_) => stack![base, modal_overlay(state)].into(),
+        None => base.into(),
+    }
 }
 
-/// Fixed bottom bar: status message on the left, actions on the right.
+/// Fixed bottom bar: edited file + status on the left, actions on the right.
 fn footer(state: &PiumaSetup) -> Element<Message> {
+    let info = column![
+        text(format!("editing: {}", state.current_file)).size(BODY)
+            .style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.5, 0.5, 0.55)), ..TextStyle::default() }),
+        status_bar(state),
+    ]
+    .spacing(2);
+
     let bar = Row::new()
-        .push(container(status_bar(state)).width(Length::Fill))
+        .push(container(info).width(Length::Fill))
         .push(action_buttons())
         .spacing(10)
         .align_y(Alignment::Center)
@@ -1038,9 +1239,117 @@ fn footer(state: &PiumaSetup) -> Element<Message> {
         .into()
 }
 
+/// Dimmed full-window layer with the active modal card centered on top.
+fn modal_overlay(state: &PiumaSetup) -> Element<Message> {
+    container(modal_card(state))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .style(|_t: &Theme| container::Style {
+            background: Some(Background::Color(Color { r: 0.0, g: 0.0, b: 0.0, a: 0.55 })),
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// The card of the currently open modal (an empty element when none).
+fn modal_card(state: &PiumaSetup) -> Element<Message> {
+    // Errors are rendered inside the modal so they are visible over the overlay.
+    let error = if state.status_is_error { state.status_message.clone() } else { None };
+
+    match &state.modal {
+        Some(Modal::ConfirmSave) => dialog_frame(
+            "Unsaved changes",
+            text(format!("Overwrite {} with the current configuration?", state.current_file)).size(BODY).into(),
+            error,
+            dialog_actions(Message::ModalConfirm, "Overwrite"),
+        ),
+        Some(Modal::SaveAs { name, exists }) => {
+            let mut body = column![
+                input("my-styles.json", name, Message::ModalTextChanged)
+                    .width(Length::Fill),
+            ]
+            .spacing(8)
+            .width(Length::Fill);
+            if *exists {
+                body = body.push(
+                    text("File exists: it will be overwritten").size(10)
+                        .style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(1.0, 0.6, 0.2)), ..TextStyle::default() }),
+                );
+            }
+            dialog_frame("Save as", body.into(), error, dialog_actions(Message::ModalConfirm, "Save"))
+        }
+        Some(Modal::ConfirmSaveAs(file)) => dialog_frame(
+            "File exists",
+            text(format!("The file {} already exists. Overwrite it?", file)).size(BODY).into(),
+            error,
+            dialog_actions(Message::ModalConfirm, "Overwrite"),
+        ),
+        Some(Modal::LoadFile { selected, files }) => {
+            // Files as buttons (not a pick list): every choice stays visible
+            // and no dropdown overlay can swallow clicks around the dialog.
+            let mut list = column![].spacing(6).width(Length::Fill);
+            for f in files {
+                let is_selected = *selected == *f;
+                list = list.push(
+                    button(text(f.clone()).size(BODY))
+                        .on_press(Message::ModalTextChanged(f.clone()))
+                        .padding(8)
+                        .width(Length::Fill)
+                        .style(if is_selected { button::primary as fn(&Theme, button::Status) -> button::Style } else { button::secondary as fn(&Theme, button::Status) -> button::Style }),
+                );
+            }
+            let body: Element<Message> = if files.is_empty() {
+                text("No .json files found in the config directory").size(BODY).into()
+            } else {
+                list.into()
+            };
+            dialog_frame("Load configuration", body, error, dialog_actions(Message::ModalConfirm, "Load"))
+        }
+        None => text("").into(),
+    }
+}
+
+/// Modal card frame: title, body, optional error hint, action buttons.
+fn dialog_frame<'a>(
+    title: &'a str,
+    body: Element<'a, Message>,
+    error: Option<String>,
+    actions: Row<'a, Message>,
+) -> Element<'a, Message> {
+    let mut col = column![text(title).size(16)]
+        .spacing(10)
+        .width(Length::Fixed(420.0));
+    col = col.push(body);
+    if let Some(e) = error {
+        col = col.push(text(e).size(10)
+            .style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.9, 0.3, 0.3)), ..TextStyle::default() }));
+    }
+    col = col.push(actions);
+
+    container(col)
+        .padding(16)
+        .style(|_t: &Theme| container::Style {
+            background: Some(Background::Color(Color::from_rgb8(0x26, 0x26, 0x2b))),
+            border: Border { width: 1.0, color: Color::from_rgb8(0x4a, 0x4a, 0x52), radius: 8.0.into() },
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// Cancel + primary action button row shared by all modals.
+fn dialog_actions<'a>(action: Message, label: &'a str) -> Row<'a, Message> {
+    Row::new()
+        .push(button(text("Cancel").size(BODY)).on_press(Message::ModalCancel).padding(8).style(button::secondary))
+        .push(button(text(label).size(BODY)).on_press(action).padding(8).style(button::primary))
+        .spacing(10)
+        .align_y(Alignment::Center)
+}
+
 fn config_header(_state: &PiumaSetup) -> Element<Message> {
-    let title = text("Piuma Configuration Setup").size(24).style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.8, 0.8, 0.8)), ..TextStyle::default() });
-    let subtitle = text("Configure your Piuma status bar").size(16).style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.6, 0.6, 0.6)), ..TextStyle::default() });
+    let title = text("Piuma Configuration Setup").size(22).style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.8, 0.8, 0.8)), ..TextStyle::default() });
+    let subtitle = text("Configure your Piuma status bar").size(14).style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.6, 0.6, 0.6)), ..TextStyle::default() });
 
     column![text(""), title, subtitle, text("")]
         .spacing(10)
@@ -1058,36 +1367,35 @@ fn panel_settings(state: &PiumaSetup) -> Element<Message> {
     // Font Size / Thickness keep their u32 sliders inline: a shared generic
     // slider helper would need `num_traits` bounds, which this binary doesn't depend on.
     let fields = vec![
-        ("Font", TextInput::new("Font name", state.config.font.as_deref().unwrap_or(""))
-            .on_input(Message::FontChanged)
+        ("Font", input("Font name", state.config.font.as_deref().unwrap_or(""), Message::FontChanged)
             .width(Length::Fill)
             .into()),
         ("Font Size", Row::new()
             .push(Slider::new(8..=32, font_size, Message::FontSizeChanged).width(Length::Fill))
-            .push(text(format!("{}pt", font_size)).width(40))
+            .push(text(format!("{}pt", font_size)).size(BODY).width(40))
             .spacing(8)
             .width(Length::Fill)
             .into()),
         ("Thickness", Row::new()
             .push(Slider::new(8..=64, thickness, Message::ThicknessChanged).width(Length::Fill))
-            .push(text(format!("{}px", thickness)).width(40))
+            .push(text(format!("{}px", thickness)).size(BODY).width(40))
             .spacing(8)
             .width(Length::Fill)
             .into()),
-        ("Section Layout", PickList::new(
+        ("Section Layout", picklist(
             vec!["horizontal".to_string(), "vertical".to_string()],
             Some(state.config.section_layout.clone()),
             Message::SectionLayoutChanged,
         ).width(Length::Fill).into()),
         ("Default BG", color_control(state.config.default_bg_color.as_deref().unwrap_or(""), Message::DefaultBgColorChanged)),
         ("Default Text", color_control(state.config.default_text_color.as_deref().unwrap_or(""), Message::DefaultTextColorChanged)),
-        ("Anchor", PickList::new(
+        ("Anchor", picklist(
             vec!["top".to_string(), "bottom".to_string(), "left".to_string(), "right".to_string(),
                  "top-left".to_string(), "top-right".to_string(), "bottom-left".to_string(), "bottom-right".to_string()],
             Some(anchor),
             Message::AnchorChanged,
         ).width(Length::Fill).into()),
-        ("Align", PickList::new(
+        ("Align", picklist(
             vec!["left".to_string(), "center".to_string(), "right".to_string()],
             Some(align),
             Message::AlignChanged,
@@ -1096,7 +1404,7 @@ fn panel_settings(state: &PiumaSetup) -> Element<Message> {
 
     card(
         column![
-            text("Panel Settings").size(18).style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.8, 0.8, 0.8)), ..TextStyle::default() }),
+            text("Panel Settings").size(16).style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.8, 0.8, 0.8)), ..TextStyle::default() }),
             form_grid(fields),
         ]
         .spacing(10)
@@ -1112,12 +1420,12 @@ fn sections_list(state: &PiumaSetup) -> Element<Message> {
         section_list = section_list.push(section_view(state, i, section));
     }
 
-    let add_section = button("+ Add Section")
+    let add_section = button(text("+ Add Section").size(BODY))
         .on_press(Message::SectionAdded)
         .padding(10);
 
     column![
-        text("Sections").size(18).style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.8, 0.8, 0.8)), ..TextStyle::default() }),
+        text("Sections").size(16).style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.8, 0.8, 0.8)), ..TextStyle::default() }),
         section_list,
         add_section,
     ]
@@ -1129,18 +1437,17 @@ fn sections_list(state: &PiumaSetup) -> Element<Message> {
 /// cards nested on an inset background to mark the hierarchy.
 fn section_view<'a>(state: &'a PiumaSetup, index: usize, section: &'a Section) -> Element<'a, Message> {
     let header = Row::new()
-        .push(text("SECTION").size(11)
+        .push(text("SECTION").size(9)
             .style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.5, 0.5, 0.55)), ..TextStyle::default() }))
-        .push(TextInput::new("Section name", section.name.as_deref().unwrap_or(""))
-            .on_input(move |value| Message::SectionNameChanged(index, value))
+        .push(input("Section name", section.name.as_deref().unwrap_or(""), move |value| Message::SectionNameChanged(index, value))
             .width(Length::Fill))
-        .push(button("Remove").on_press(Message::SectionRemoved(index)).padding(5))
+        .push(button(text("Remove").size(BODY)).on_press(Message::SectionRemoved(index)).padding(5))
         .spacing(8)
         .align_y(Alignment::Center)
         .width(Length::Fill);
 
     let settings = form_grid(vec![
-        ("Layout", PickList::new(
+        ("Layout", picklist(
             vec!["horizontal".to_string(), "vertical".to_string()],
             Some(&section.layout),
             move |value| Message::SectionLayoutChangedIndex(index, value),
@@ -1155,7 +1462,7 @@ fn section_view<'a>(state: &'a PiumaSetup, index: usize, section: &'a Section) -
         sensor_list = sensor_list.push(sensor_view(index, j, sensor, style_open));
     }
     sensor_list = sensor_list.push(
-        button("+ Add Sensor").on_press(Message::SensorAdded(index)).padding(6),
+        button(text("+ Add Sensor").size(BODY)).on_press(Message::SensorAdded(index)).padding(6),
     );
     let sensors = container(sensor_list).padding(10).width(Length::Fill).style(inset_style);
 
@@ -1166,18 +1473,16 @@ fn section_view<'a>(state: &'a PiumaSetup, index: usize, section: &'a Section) -
 /// "Style overrides" block (closed by default: overrides are optional).
 fn sensor_view(section_index: usize, sensor_index: usize, sensor: &Sensor, style_open: bool) -> Element<Message> {
     let header = Row::new()
-        .push(TextInput::new("Name", sensor.name.as_deref().unwrap_or(""))
-            .on_input(move |value| Message::SensorNameChanged(section_index, sensor_index, value))
+        .push(input("Name", sensor.name.as_deref().unwrap_or(""), move |value| Message::SensorNameChanged(section_index, sensor_index, value))
             .width(Length::Fill))
-        .push(TextInput::new("Description", sensor.description.as_deref().unwrap_or(""))
-            .on_input(move |value| Message::SensorDescriptionChanged(section_index, sensor_index, value))
+        .push(input("Description", sensor.description.as_deref().unwrap_or(""), move |value| Message::SensorDescriptionChanged(section_index, sensor_index, value))
             .width(Length::Fill))
-        .push(button("Remove").on_press(Message::SensorRemoved(section_index, sensor_index)).padding(5))
+        .push(button(text("Remove").size(BODY)).on_press(Message::SensorRemoved(section_index, sensor_index)).padding(5))
         .spacing(8)
         .align_y(Alignment::Center)
         .width(Length::Fill);
 
-    let source_type_picklist = PickList::new(
+    let source_type_picklist = picklist(
         vec!["ProcCpu", "ProcMem", "ProcDisk", "Uptime", "NvidiaGpu",
              "Network", "Audio", "Clock", "Window", "Workspace",
              "Command", "EnvVar", "StaticText"].into_iter().map(|s| s.to_string()).collect::<Vec<_>>(),
@@ -1198,32 +1503,26 @@ fn sensor_view(section_index: usize, sensor_index: usize, sensor: &Sensor, style
                 _ => "Sensor",
             };
             Row::new()
-                .push(text(format!("{} (no extra config)", label)))
+                .push(text(format!("{} (no extra config)", label)).size(BODY))
                 .spacing(5)
                 .into()
         }
-        "Network" => TextInput::new("Interface", sensor.source_config.interface.as_deref().unwrap_or(""))
-            .on_input(move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "interface".to_string(), value))
+        "Network" => input("Interface", sensor.source_config.interface.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "interface".to_string(), value))
             .width(Length::Fill)
             .into(),
-        "Audio" => TextInput::new("Device", sensor.source_config.device.as_deref().unwrap_or(""))
-            .on_input(move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "device".to_string(), value))
+        "Audio" => input("Device", sensor.source_config.device.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "device".to_string(), value))
             .width(Length::Fill)
             .into(),
-        "Clock" => TextInput::new("Format", sensor.source_config.format.as_deref().unwrap_or(""))
-            .on_input(move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "format".to_string(), value))
+        "Clock" => input("Format", sensor.source_config.format.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "format".to_string(), value))
             .width(Length::Fill)
             .into(),
-        "Command" => TextInput::new("Command", sensor.source_config.command.as_deref().unwrap_or(""))
-            .on_input(move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "command".to_string(), value))
+        "Command" => input("Command", sensor.source_config.command.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "command".to_string(), value))
             .width(Length::Fill)
             .into(),
-        "EnvVar" => TextInput::new("Env Var", sensor.source_config.env_var.as_deref().unwrap_or(""))
-            .on_input(move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "env_var".to_string(), value))
+        "EnvVar" => input("Env Var", sensor.source_config.env_var.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "env_var".to_string(), value))
             .width(Length::Fill)
             .into(),
-        "StaticText" => TextInput::new("Text", sensor.source_config.static_text.as_deref().unwrap_or(""))
-            .on_input(move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "text".to_string(), value))
+        "StaticText" => input("Text", sensor.source_config.static_text.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "text".to_string(), value))
             .width(Length::Fill)
             .into(),
         _ => Row::new().spacing(5).into(),
@@ -1236,8 +1535,7 @@ fn sensor_view(section_index: usize, sensor_index: usize, sensor: &Sensor, style
         .width(Length::Fill)
         .into());
 
-    let action = form_cell("Action", TextInput::new("close_panel / command / ...", sensor.action.as_deref().unwrap_or(""))
-        .on_input(move |value| Message::SensorActionChanged(section_index, sensor_index, value))
+    let action = form_cell("Action", input("close_panel / command / ...", sensor.action.as_deref().unwrap_or(""), move |value| Message::SensorActionChanged(section_index, sensor_index, value))
         .width(Length::Fill)
         .into());
 
@@ -1274,7 +1572,7 @@ fn sensor_view(section_index: usize, sensor_index: usize, sensor: &Sensor, style
             ("Border Width", slider_control(-1i32..=10, sensor.border_width.unwrap_or(-1), move |value| Message::SensorBorderWidthChanged(section_index, sensor_index, value))),
             ("Border Radius", slider_control(-1i32..=20, sensor.border_radius.unwrap_or(-1), move |value| Message::SensorBorderRadiusChanged(section_index, sensor_index, value))),
             ("Padding", slider_control(-1i32..=20, sensor.padding.unwrap_or(-1), move |value| Message::SensorPaddingChanged(section_index, sensor_index, value))),
-            ("Border Type", PickList::new(
+            ("Border Type", picklist(
                 vec![
                     "full".to_string(),
                     "corners".to_string(),
@@ -1314,7 +1612,7 @@ fn sensor_defaults_view(state: &PiumaSetup) -> Element<Message> {
     let mut root = column![header].spacing(10).width(Length::Fill);
     if state.defaults_expanded {
         root = root.push(text("Style applied to every sensor; single sensors override these values.")
-            .size(12)
+            .size(10)
             .style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.55, 0.55, 0.6)), ..TextStyle::default() }));
 
         // Style numbers: -1 = disabled (the defaults apply), 0..=N = enabled.
@@ -1328,7 +1626,7 @@ fn sensor_defaults_view(state: &PiumaSetup) -> Element<Message> {
             ("Border Width", slider_control(-1i32..=10, d.border_width.unwrap_or(-1), |value| Message::DefaultsNumberChanged("border_width".to_string(), value))),
             ("Border Radius", slider_control(-1i32..=20, d.border_radius.unwrap_or(-1), |value| Message::DefaultsNumberChanged("border_radius".to_string(), value))),
             ("Padding", slider_control(-1i32..=20, d.padding.unwrap_or(-1), |value| Message::DefaultsNumberChanged("padding".to_string(), value))),
-            ("Border Type", PickList::new(
+            ("Border Type", picklist(
                 vec![
                     "full".to_string(),
                     "corners".to_string(),
@@ -1347,15 +1645,17 @@ fn sensor_defaults_view(state: &PiumaSetup) -> Element<Message> {
     card(root).into()
 }
 
-/// Save/Load/Reset actions for the fixed bottom bar.
+/// Load / Save / Save As / Reset actions for the fixed bottom bar.
 fn action_buttons() -> Element<'static, Message> {
-    let save_btn = button("Save Configuration").on_press(Message::SaveConfig).padding(10).style(button::primary);
-    let load_btn = button("Load Configuration").on_press(Message::LoadConfig).padding(10).style(button::secondary);
-    let reset_btn = button("Reset to Defaults").on_press(Message::ResetConfig).padding(10);
+    let load_btn = button(text("Load…").size(BODY)).on_press(Message::LoadConfig).padding(10).style(button::secondary);
+    let save_btn = button(text("Save").size(BODY)).on_press(Message::SaveConfig).padding(10).style(button::primary);
+    let save_as_btn = button(text("Save As…").size(BODY)).on_press(Message::SaveAs).padding(10).style(button::secondary);
+    let reset_btn = button(text("Reset").size(BODY)).on_press(Message::ResetConfig).padding(10);
 
     Row::new()
-        .push(save_btn)
         .push(load_btn)
+        .push(save_btn)
+        .push(save_as_btn)
         .push(reset_btn)
         .spacing(10)
         .into()
@@ -1365,7 +1665,7 @@ fn status_bar(state: &PiumaSetup) -> Element<Message> {
     match &state.status_message {
         Some(msg) => {
             let is_error = state.status_is_error;
-            text(msg).size(12).style(move |_t: &Theme| TextStyle { color: Some(if is_error { Color::from_rgb(0.9, 0.3, 0.3) } else { Color::from_rgb(0.3, 0.8, 0.4) }), ..TextStyle::default() }).into()
+            text(msg).size(10).style(move |_t: &Theme| TextStyle { color: Some(if is_error { Color::from_rgb(0.9, 0.3, 0.3) } else { Color::from_rgb(0.3, 0.8, 0.4) }), ..TextStyle::default() }).into()
         }
         None => text("").into(),
     }
