@@ -18,7 +18,25 @@ pub struct PiumaConfig {
     pub default_text_color: Option<String>,
     pub anchor: Option<String>,
     pub align: Option<String>,
+    pub thickness: u32,
+    pub sensor_defaults: SensorDefaults,
     pub sections: Vec<Section>,
+}
+
+/// Style defaults for every sensor (style fields only, no action).
+#[derive(Debug, Clone, Default)]
+pub struct SensorDefaults {
+    pub text_color: Option<String>,
+    pub bg_color: Option<String>,
+    pub text_color_hover: Option<String>,
+    pub bg_color_hover: Option<String>,
+    pub border_color: Option<String>,
+    pub border_color_hover: Option<String>,
+    pub border_width: Option<u32>,
+    pub border_width_hover: Option<u32>,
+    pub border_radius: Option<u32>,
+    pub border_type: Option<String>,
+    pub padding: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +90,8 @@ impl Default for PiumaConfig {
             default_text_color: Some("#e8e8e8".to_string()),
             anchor: Some("top".to_string()),
             align: Some("center".to_string()),
+            thickness: 32,
+            sensor_defaults: SensorDefaults::default(),
             sections: vec![Section::default()],
         }
     }
@@ -131,6 +151,11 @@ impl Default for SourceConfig {
 pub enum Message {
     FontChanged(String),
     FontSizeChanged(u32),
+    ThicknessChanged(u32),
+    /// Sensor style defaults: (field name, value) and (field name, number)
+    /// for the fields of `panel.sensor_defaults`.
+    DefaultsStyleChanged(String, String),
+    DefaultsNumberChanged(String, u32),
     SectionLayoutChanged(String),
     DefaultSectionWeightChanged(u32),
     DefaultBgColorChanged(String),
@@ -210,6 +235,37 @@ impl PiumaSetup {
         }
         if let Some(align) = &self.config.align {
             panel.insert("align".to_string(), JsonValue::String(align.clone()));
+        }
+        panel.insert("thickness".to_string(), JsonValue::Number(self.config.thickness.into()));
+
+        // Sensor style defaults: written only when at least one field is set.
+        let d = &self.config.sensor_defaults;
+        let mut defaults_map = Map::new();
+        for (key, val) in [
+            ("text_color", &d.text_color),
+            ("bg_color", &d.bg_color),
+            ("text_color_hover", &d.text_color_hover),
+            ("bg_color_hover", &d.bg_color_hover),
+            ("border_color", &d.border_color),
+            ("border_color_hover", &d.border_color_hover),
+            ("border_type", &d.border_type),
+        ] {
+            if let Some(v) = val {
+                defaults_map.insert(key.to_string(), JsonValue::String(v.clone()));
+            }
+        }
+        for (key, val) in [
+            ("border_width", &d.border_width),
+            ("border_width_hover", &d.border_width_hover),
+            ("border_radius", &d.border_radius),
+            ("padding", &d.padding),
+        ] {
+            if let Some(v) = val {
+                defaults_map.insert(key.to_string(), JsonValue::Number((*v).into()));
+            }
+        }
+        if !defaults_map.is_empty() {
+            panel.insert("sensor_defaults".to_string(), JsonValue::Object(defaults_map));
         }
 
         let sections_vec: Vec<JsonValue> = self.config.sections.iter().map(|s| self.section_to_json(s)).collect();
@@ -404,6 +460,35 @@ impl PiumaSetup {
         if let Some(align) = panel.get("align").and_then(|v| v.as_str()) {
             self.config.align = Some(align.to_string());
         }
+        // Absent keys reset these two, so a reloaded config can clear them.
+        self.config.thickness = panel.get("thickness").and_then(|v| v.as_u64()).map(|t| t as u32).unwrap_or(32);
+        self.config.sensor_defaults = SensorDefaults::default();
+        if let Some(obj) = panel.get("sensor_defaults").and_then(|v| v.as_object()) {
+            let d = &mut self.config.sensor_defaults;
+            for (key, field) in [
+                ("text_color", &mut d.text_color),
+                ("bg_color", &mut d.bg_color),
+                ("text_color_hover", &mut d.text_color_hover),
+                ("bg_color_hover", &mut d.bg_color_hover),
+                ("border_color", &mut d.border_color),
+                ("border_color_hover", &mut d.border_color_hover),
+                ("border_type", &mut d.border_type),
+            ] {
+                if let Some(v) = obj.get(key).and_then(|v| v.as_str()) {
+                    *field = Some(v.to_string());
+                }
+            }
+            for (key, field) in [
+                ("border_width", &mut d.border_width),
+                ("border_width_hover", &mut d.border_width_hover),
+                ("border_radius", &mut d.border_radius),
+                ("padding", &mut d.padding),
+            ] {
+                if let Some(v) = obj.get(key).and_then(|v| v.as_u64()) {
+                    *field = Some(v as u32);
+                }
+            }
+        }
 
         if let Some(sections) = panel.get("sections").and_then(|v| v.as_array()) {
             self.config.sections = sections.iter().filter_map(|s| self.load_section(s)).collect();
@@ -505,6 +590,31 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
     match message {
         Message::FontChanged(value) => state.config.font = Some(value),
         Message::FontSizeChanged(value) => state.config.font_size = value,
+        Message::ThicknessChanged(value) => state.config.thickness = value,
+        Message::DefaultsStyleChanged(field, value) => {
+            let d = &mut state.config.sensor_defaults;
+            let v = if value.is_empty() { None } else { Some(value) };
+            match field.as_str() {
+                "text_color" => d.text_color = v,
+                "bg_color" => d.bg_color = v,
+                "text_color_hover" => d.text_color_hover = v,
+                "bg_color_hover" => d.bg_color_hover = v,
+                "border_color" => d.border_color = v,
+                "border_color_hover" => d.border_color_hover = v,
+                "border_type" => d.border_type = v,
+                _ => {}
+            }
+        }
+        Message::DefaultsNumberChanged(field, value) => {
+            let d = &mut state.config.sensor_defaults;
+            match field.as_str() {
+                "border_width" => d.border_width = Some(value),
+                "border_width_hover" => d.border_width_hover = Some(value),
+                "border_radius" => d.border_radius = Some(value),
+                "padding" => d.padding = Some(value),
+                _ => {}
+            }
+        }
         Message::SectionLayoutChanged(value) => state.config.section_layout = value,
         Message::DefaultSectionWeightChanged(value) => state.config.default_section_weight = value,
         Message::DefaultBgColorChanged(value) => state.config.default_bg_color = if value.is_empty() { None } else { Some(value) },
@@ -713,6 +823,7 @@ fn view(state: &PiumaSetup) -> Element<Message> {
     let content = column![
         config_header(state),
         panel_settings(state),
+        sensor_defaults_view(state),
         sections_list(state),
         action_buttons(),
         status_bar(state),
@@ -756,6 +867,13 @@ fn panel_settings(state: &PiumaSetup) -> Element<Message> {
         .push(Slider::new(8..=32, state.config.font_size, Message::FontSizeChanged)
             .width(150))
         .push(text(format!("{}pt", state.config.font_size)).width(50))
+        .spacing(10);
+
+    let thickness_row = Row::new()
+        .push(text("Thickness:").width(120))
+        .push(Slider::new(8..=64, state.config.thickness, Message::ThicknessChanged)
+            .width(150))
+        .push(text(format!("{}px", state.config.thickness)).width(50))
         .spacing(10);
 
     let section_layout_row = Row::new()
@@ -804,6 +922,7 @@ fn panel_settings(state: &PiumaSetup) -> Element<Message> {
         text("Panel Settings").size(18).style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.8, 0.8, 0.8)), ..TextStyle::default() }),
         font_row,
         font_size_row,
+        thickness_row,
         section_layout_row,
         default_bg_color_row,
         default_text_color_row,
@@ -1043,6 +1162,87 @@ fn sensor_view(section_index: usize, sensor_index: usize, sensor: &Sensor) -> El
     .padding(8);
 
     container(sensor_col).id(iced::widget::Id::unique()).into()
+}
+
+/// The "Sensor Defaults" card: global style applied to every sensor, with
+/// the same controls as a sensor card minus name/description/source/action.
+fn sensor_defaults_view(state: &PiumaSetup) -> Element<Message> {
+    let d = &state.config.sensor_defaults;
+
+    let text_color_input = TextInput::new("Text", d.text_color.as_deref().unwrap_or(""))
+        .on_input(|value| Message::DefaultsStyleChanged("text_color".to_string(), value))
+        .width(80);
+    let hover_text_input = TextInput::new("Hover Text", d.text_color_hover.as_deref().unwrap_or(""))
+        .on_input(|value| Message::DefaultsStyleChanged("text_color_hover".to_string(), value))
+        .width(80);
+    let bg_color_input = TextInput::new("BG", d.bg_color.as_deref().unwrap_or(""))
+        .on_input(|value| Message::DefaultsStyleChanged("bg_color".to_string(), value))
+        .width(70);
+    let hover_bg_input = TextInput::new("Hover BG", d.bg_color_hover.as_deref().unwrap_or(""))
+        .on_input(|value| Message::DefaultsStyleChanged("bg_color_hover".to_string(), value))
+        .width(70);
+    let border_color_input = TextInput::new("Border", d.border_color.as_deref().unwrap_or(""))
+        .on_input(|value| Message::DefaultsStyleChanged("border_color".to_string(), value))
+        .width(80);
+    let border_color_hover_input = TextInput::new("Border Hover", d.border_color_hover.as_deref().unwrap_or(""))
+        .on_input(|value| Message::DefaultsStyleChanged("border_color_hover".to_string(), value))
+        .width(90);
+
+    let border_width_slider = Slider::new(0u32..=10u32, d.border_width.unwrap_or(0), |value| Message::DefaultsNumberChanged("border_width".to_string(), value))
+        .width(80);
+    let border_radius_slider = Slider::new(0u32..=20u32, d.border_radius.unwrap_or(0), |value| Message::DefaultsNumberChanged("border_radius".to_string(), value))
+        .width(80);
+    let padding_slider = Slider::new(0u32..=20u32, d.padding.unwrap_or(0), |value| Message::DefaultsNumberChanged("padding".to_string(), value))
+        .width(80);
+
+    let border_type_picklist = PickList::new(
+        vec![
+            "full".to_string(),
+            "corners".to_string(),
+            "underline".to_string(),
+            "upperline".to_string(),
+            "left".to_string(),
+            "right".to_string(),
+        ],
+        Some(d.border_type.clone().unwrap_or_else(|| "full".to_string())),
+        |value| Message::DefaultsStyleChanged("border_type".to_string(), value),
+    )
+    .width(110);
+
+    let defaults_col = column![
+        text("Sensor Defaults (style for all sensors)").size(16)
+            .style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.8, 0.8, 0.8)), ..TextStyle::default() }),
+        Row::new()
+            .push(text("Text:").width(35))
+            .push(text_color_input)
+            .push(text("Hover:").width(35))
+            .push(hover_text_input)
+            .push(text("Border:").width(50))
+            .push(border_color_input)
+            .push(text("BrdW:").width(30))
+            .push(border_width_slider)
+            .spacing(5),
+        Row::new()
+            .push(text("BrdH:").width(50))
+            .push(border_color_hover_input)
+            .push(text("BG:").width(35))
+            .push(bg_color_input)
+            .push(text("Hover:").width(35))
+            .push(hover_bg_input)
+            .push(text("BrdR:").width(50))
+            .push(border_radius_slider)
+            .push(text("Pad:").width(30))
+            .push(padding_slider)
+            .spacing(5),
+        Row::new()
+            .push(text("BrdT:").width(45))
+            .push(border_type_picklist)
+            .spacing(5),
+    ]
+    .spacing(4)
+    .padding(8);
+
+    container(defaults_col).into()
 }
 
 fn action_buttons() -> Element<'static, Message> {

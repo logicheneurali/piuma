@@ -345,31 +345,22 @@ fn update(panel: &mut Panel, message: Message, _time: Instant) -> Command<Messag
                     .iter()
                     .map(|s| {
                         let value = sensor_runner::run(&s.source);
-                        let sensor_tc = s.text_color.as_ref()
+                        // Style precedence: per-sensor value, then the global
+                        // `panel.sensor_defaults`, then section/built-in value.
+                        let defaults = panel.config.panel.sensor_defaults.as_ref();
+                        let tc_str = s.text_color.as_deref().or(defaults.and_then(|sd| sd.text_color.as_deref()));
+                        let bg_str = s.bg_color.as_deref().or(defaults.and_then(|sd| sd.bg_color.as_deref()));
+                        let bg_h_str = s.bg_color_hover.as_deref().or(defaults.and_then(|sd| sd.bg_color_hover.as_deref()));
+                        let tc_h_str = s.text_color_hover.as_deref().or(defaults.and_then(|sd| sd.text_color_hover.as_deref()));
+                        let bc_str = s.border_color.as_deref().or(defaults.and_then(|sd| sd.border_color.as_deref()));
+
+                        let sensor_tc = tc_str
                             .and_then(|sc| config::parse_color(sc).ok())
                             .unwrap_or(section_text_color);
-                        let sensor_bg: Option<Color> = match s.bg_color {
-                            Some(ref sc) => match config::parse_color(sc) {
-                                Ok(c) => Some(c),
-                                Err(_) => None,
-                            },
-                            None => None,
-                        };
-                        let sensor_bg_hover: Option<Color> = match s.bg_color_hover {
-                            Some(ref sc) => match config::parse_color(sc) {
-                                Ok(c) => Some(c),
-                                Err(_) => None,
-                            },
-                            None => None,
-                        };
-                        let sensor_tc_hover: Option<iced::Color> = match s.text_color_hover {
-                            Some(ref sc) => config::parse_color(sc).ok(),
-                            None => None,
-                        };
-                        let sensor_border: Option<Color> = match s.border_color {
-                            Some(ref sc) => config::parse_color(sc).ok(),
-                            None => None,
-                        };
+                        let sensor_bg: Option<Color> = bg_str.and_then(|sc| config::parse_color(sc).ok());
+                        let sensor_bg_hover: Option<Color> = bg_h_str.and_then(|sc| config::parse_color(sc).ok());
+                        let sensor_tc_hover: Option<iced::Color> = tc_h_str.and_then(|sc| config::parse_color(sc).ok());
+                        let sensor_border: Option<Color> = bc_str.and_then(|sc| config::parse_color(sc).ok());
                         SensorValue {
                             name: s.name.clone(),
                             description: s.description.as_ref().map(|d| d.to_string()).unwrap_or_default(),
@@ -379,10 +370,10 @@ fn update(panel: &mut Panel, message: Message, _time: Instant) -> Command<Messag
                             text_color_hover: sensor_tc_hover,
                             bg_color_hover: sensor_bg_hover,
                             border_color: sensor_border,
-                            border_width: s.border_width.unwrap_or(0) as u16,
-                            border_radius: s.border_radius.unwrap_or(0) as u16,
-                            border_type: s.border_type.as_deref().unwrap_or("full").to_string(),
-                            padding: s.padding.unwrap_or(0) as u16,
+                            border_width: s.border_width.or(defaults.and_then(|sd| sd.border_width)).unwrap_or(0) as u16,
+                            border_radius: s.border_radius.or(defaults.and_then(|sd| sd.border_radius)).unwrap_or(0) as u16,
+                            border_type: s.border_type.as_deref().or(defaults.and_then(|sd| sd.border_type.as_deref())).unwrap_or("full").to_string(),
+                            padding: s.padding.or(defaults.and_then(|sd| sd.padding)).unwrap_or(0) as u16,
                             action: s.action.clone(),
                         }
                     })
@@ -689,24 +680,27 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
 /// Panel size (as the LayerSurface requests it).
 ///
 /// The surface matches the screen on the axis *perpendicular* to the panel
-/// orientation, and matches the panel's own thickness (`DEFAULT_HEIGHT`) on
-/// the axis it extends along:
+/// orientation, and matches the panel's own thickness on the axis it
+/// extends along:
 ///
-/// * horizontal panel -> `screen_width  x DEFAULT_HEIGHT`
-/// * vertical panel   -> `DEFAULT_HEIGHT x screen_height`
-fn panel_size(_config: &config::Config, screen_width: u32, screen_height: u32) -> iced_exwlshell::settings::LayerSize {
-    let layout = _config
+/// * horizontal panel -> `screen_width  x thickness`
+/// * vertical panel   -> `thickness x screen_height`
+///
+/// `thickness` comes from `panel.thickness` in the config (default 32px).
+fn panel_size(config: &config::Config, screen_width: u32, screen_height: u32) -> iced_exwlshell::settings::LayerSize {
+    let layout = config
         .panel
         .section_layout
         .as_ref()
         .map(|s| s.as_str())
         .unwrap_or("horizontal");
     let vertical = layout == "vertical";
+    let thickness = config.panel.thickness.unwrap_or(DEFAULT_HEIGHT).max(1);
 
     let (width, height) = if vertical {
-        (iced_exwlshell::settings::Extent::px(DEFAULT_HEIGHT), iced_exwlshell::settings::Extent::px(screen_height))
+        (iced_exwlshell::settings::Extent::px(thickness), iced_exwlshell::settings::Extent::px(screen_height))
     } else {
-        (iced_exwlshell::settings::Extent::px(screen_width), iced_exwlshell::settings::Extent::px(DEFAULT_HEIGHT))
+        (iced_exwlshell::settings::Extent::px(screen_width), iced_exwlshell::settings::Extent::px(thickness))
     };
 
     iced_exwlshell::settings::LayerSize { width, height }

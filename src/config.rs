@@ -71,7 +71,29 @@ pub struct PanelConfig {
     pub default_text_color: Option<String>,
     pub anchor: Option<String>,
     pub align: Option<String>,
+    /// Panel thickness (fixed surface dimension) in px; `None` = 32.
+    pub thickness: Option<u32>,
+    /// Style applied to every sensor; per-sensor values take precedence.
+    pub sensor_defaults: Option<SensorDefaults>,
     pub sections: Vec<SectionConfig>,
+}
+
+/// Style values applied to every sensor unless the sensor overrides them:
+/// the same style fields as `SensorConfig`, minus name/description/source/
+/// action (defaults are style only).
+#[derive(Deserialize, serde::Serialize, Clone)]
+pub struct SensorDefaults {
+    pub text_color: Option<String>,
+    pub bg_color: Option<String>,
+    pub text_color_hover: Option<String>,
+    pub bg_color_hover: Option<String>,
+    pub border_color: Option<String>,
+    pub border_color_hover: Option<String>,
+    pub border_width: Option<u32>,
+    pub border_width_hover: Option<u32>,
+    pub border_radius: Option<u32>,
+    pub border_type: Option<String>,
+    pub padding: Option<u32>,
 }
 
 #[derive(Deserialize, serde::Serialize, Clone)]
@@ -158,6 +180,8 @@ pub fn default_config() -> Config {
             default_text_color: None,
             anchor: Some("top".to_string()),
             align: Some("center".to_string()),
+            thickness: None,
+            sensor_defaults: None,
             sections: vec![section],
         },
     }
