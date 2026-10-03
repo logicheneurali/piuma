@@ -421,7 +421,9 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
         section_elements.push(section_element);
     }
 
-    // Build the full panel layout.
+    // Build the full panel layout. Shrink so the panel is as big as its
+    // sensors; the outer container (below) provides the background and spans
+    // the surface on the cross axis.
     let main_layout: Element<'a, Message> = if panel.config.panel.section_layout
         .as_ref()
         .map(|s| s.as_str())
@@ -429,12 +431,10 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
     {
         Column::new()
             .extend(section_elements)
-            .width(Length::Fill)
             .into()
     } else {
         Row::new()
             .extend(section_elements)
-            .width(Length::Fill)
             .into()
     };
 
@@ -445,9 +445,8 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
 
     // Position the real panel within the surface according to `align`.
     // The surface is screen-sized on the cross axis and sized to the panel's
-    // own content on the main axis; the inner container is shrink-wrapped to
-    // the content (so the panel is as big as its sensors) and aligned on the
-    // main axis.
+    // own thickness on the main axis; the inner panel is aligned on its main
+    // axis (left/center/right for horizontal, top/center/bottom for vertical).
     let vertical = panel
         .config
         .panel
@@ -499,48 +498,41 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
 
 /// Panel size (as the LayerSurface requests it).
 ///
-/// The surface spans the whole screen on the axis *perpendicular* to the
-/// panel orientation, so the inner panel can be positioned freely inside it.
-/// The main axis (the direction the panel extends) is sized to the panel's
-/// own content — there is no `percentage` anymore; the panel is as big as its
-/// sensors.
+/// The surface matches the screen on the axis *perpendicular* to the panel
+/// orientation, and matches the panel's own thickness (`DEFAULT_HEIGHT`) on
+/// the axis it extends along:
 ///
-/// * horizontal panel  -> `screen_width  x panel_thickness`
-/// * vertical panel    -> `panel_thickness x screen_height`
-fn panel_size(config: &config::Config, screen_width: u32, screen_height: u32) -> iced_exwlshell::settings::LayerSize {
-    let vertical = config
+/// * horizontal panel -> `screen_width  x DEFAULT_HEIGHT`
+/// * vertical panel   -> `DEFAULT_HEIGHT x screen_height`
+fn panel_size(_config: &config::Config, screen_width: u32, screen_height: u32) -> iced_exwlshell::settings::LayerSize {
+    let layout = _config
         .panel
         .section_layout
         .as_ref()
         .map(|s| s.as_str())
-        .unwrap_or("horizontal") == "vertical";
+        .unwrap_or("horizontal");
+    let vertical = layout == "vertical";
 
-    // Cross-axis extent: the whole screen, so the surface reaches the edges
-    // along the perpendicular direction.
-    let cross = if vertical {
-        iced_exwlshell::settings::Extent::px(screen_width)
+    let (width, height) = if vertical {
+        (iced_exwlshell::settings::Extent::px(DEFAULT_HEIGHT), iced_exwlshell::settings::Extent::px(screen_height))
     } else {
-        iced_exwlshell::settings::Extent::px(screen_height)
+        (iced_exwlshell::settings::Extent::px(screen_width), iced_exwlshell::settings::Extent::px(DEFAULT_HEIGHT))
     };
 
-    // Main axis is content-sized, so leave it to the compositor (Fill).
-    iced_exwlshell::settings::LayerSize {
-        width: if vertical { cross } else { iced_exwlshell::settings::Extent::Fill },
-        height: if vertical { iced_exwlshell::settings::Extent::Fill } else { cross },
-    }
+    iced_exwlshell::settings::LayerSize { width, height }
 }
 
 /// Anchor set for the surface.
 ///
-/// The surface spans the screen on the axis *perpendicular* to the panel
-/// orientation (so the inner panel can be positioned freely), and is pinned to
-/// the screen edge on its own axis:
+/// The surface is pinned to the screen edge on the axis it extends along.
+/// `align` is handled inside the surface by iced (the inner panel is aligned
+/// to left/center/right or top/center/bottom), so the anchor only needs the
+/// single edge that sticks the panel to the screen border:
 ///
-/// * horizontal, top   -> `Top  | Left  | Right`
-/// * horizontal, bottom-> `Bottom| Left  | Right`
-/// * vertical,   left  -> `Left  | Top   | Bottom`
-/// * vertical,   right -> `Right | Top   | Bottom`
-/// * center / anything -> pinned to the nearest edge (top / left).
+/// * horizontal, top    -> `Top`
+/// * horizontal, bottom -> `Bottom`
+/// * vertical,   left   -> `Left`
+/// * vertical,   right  -> `Right`
 fn panel_anchor(config: &config::Config) -> Anchor {
     let vertical = config
         .panel
@@ -549,26 +541,31 @@ fn panel_anchor(config: &config::Config) -> Anchor {
         .map(|s| s.as_str())
         .unwrap_or("horizontal") == "vertical";
 
+    let align = config.panel.align.as_deref().unwrap_or("center");
+
     if vertical {
-        match config.panel.align.as_deref().unwrap_or("center") {
-            "bottom" => Anchor::Bottom | Anchor::Left | Anchor::Right,
-            "right" => Anchor::Right | Anchor::Top | Anchor::Bottom,
-            _ => Anchor::Top | Anchor::Left | Anchor::Bottom,
+        match align {
+            "bottom" => Anchor::Bottom,
+            "right" => Anchor::Right,
+            _ => Anchor::Left,
         }
     } else {
-        match config.panel.align.as_deref().unwrap_or("center") {
-            "right" => Anchor::Right | Anchor::Top | Anchor::Bottom,
-            _ => Anchor::Top | Anchor::Left | Anchor::Right,
+        match align {
+            "bottom" => Anchor::Bottom,
+            _ => Anchor::Top,
         }
     }
 }
 
 // ── style ───────────────────────────────────────────────────────────
 
-fn style(_panel: &Panel, theme: &iced::Theme) -> iced::theme::Style {
+fn style(_panel: &Panel, _theme: &iced::Theme) -> iced::theme::Style {
+    // Root stays transparent: the panel background is drawn by the inner
+    // container, and a root background would force the surface to the whole
+    // screen.
     iced::theme::Style {
-        background_color: DEFAULT_BG_COLOR,
-        text_color: theme.palette().text,
+        background_color: Color::from_rgba(0.0, 0.0, 0.0, 0.0),
+        text_color: _theme.palette().text,
     }
 }
 
