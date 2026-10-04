@@ -6,13 +6,17 @@ description = "Pannello di sistema leggero per Wayland (Hyprland)"
 license = "Apache-2.0"
 
 [dependencies]
-iced = { version = "0.14", features = ["smol", "advanced"] }
+iced = { version = "0.14", features = ["smol", "advanced", "image", "svg"] }
 iced_exwlshell = { git = "https://github.com/waycrate/exwlshelleventloop.git", branch = "master" }
 log = "0.4"
 simple_logger = "5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 dirs = "5.0"
+# System tray (StatusNotifierItem): async D-Bus client/watcher.
+zbus = "5"
+# Freedesktop icon-name → file lookup for tray items.
+freedesktop-icons = "0.4"
 
 [profile.release]
 opt-level = "z"

@@ -29,6 +29,7 @@ use iced_exwlshell::to_layer_message;
 mod config;
 mod sensor_runner;
 mod sensors;
+mod tray;
 
 // ── globals ────────────────────────────────────────────────────────
 
@@ -68,6 +69,9 @@ struct SensorValue {
     border_type: String,
     padding: u16,
     action: Option<String>,
+    /// Tray icons when the source is a `tray` sensor (`None` otherwise);
+    /// the icons themselves live in `tray.rs`.
+    tray: Option<Vec<tray::TrayIcon>>,
 }
 
 /// Rendered section data.
@@ -104,6 +108,9 @@ struct Panel {
     /// Exclusive zone currently applied (equals the panel thickness, the
     /// space hyprland subtracts for windows); re-sent when it changes.
     last_exclusive_zone: i32,
+    /// Last known cursor position, window-relative: feeds the screen-coordinate
+    /// hints of tray activation (see `tray::hint_point`).
+    last_cursor: Option<(f32, f32)>,
 }
 
 // ── messages ────────────────────────────────────────────────────────
@@ -120,6 +127,14 @@ enum Message {
     /// Wheel scrolled over a sensor: (section_index, sensor_index, up);
     /// `None` for scroll events that carry no usable delta.
     SensorScrolled(usize, usize, Option<bool>),
+    /// Tray state changed (item added/removed/updated): rebuild now.
+    TrayItemsChanged,
+    /// Tray icon pressed: (bus, path, button); `tray.rs` computes the
+    /// screen coordinates when the action is spawned.
+    TrayIconPressed(String, String, tray::TrayButton),
+    /// Wheel over a tray icon: (bus, path, scroll units + orientation);
+    /// `None` for deltas that carry no usable delta.
+    TrayIconScrolled(String, String, Option<(i32, bool)>),
 }
 
 // ── namespace ───────────────────────────────────────────────────────
@@ -383,6 +398,10 @@ fn update(panel: &mut Panel, message: Message, _time: Instant) -> Command<Messag
                     .iter()
                     .map(|s| {
                         let value = sensor_runner::run(&s.source);
+                        // Tray sensors render icons from the shared tray state
+                        // (tray.rs) instead of text.
+                        let tray_icons =
+                            matches!(s.source, config::SensorSource::Tray {}).then(tray::items);
                         // Style precedence, per style GROUP: a sensor takes a
                         // group over only when it defines the group's key
                         // colour (`border_color`, `bg_color`, `text_color`).
@@ -426,10 +445,14 @@ fn update(panel: &mut Panel, message: Message, _time: Instant) -> Command<Messag
                         let sensor_tc_hover: Option<iced::Color> = tc_h_str.and_then(|sc| config::parse_color(sc).ok());
                         let sensor_border: Option<Color> = bc_str.and_then(|sc| config::parse_color(sc).ok());
                         SensorValue {
-                            // static_text sensors render only their text: the
-                            // name stays in the config (setup keeps editing
-                            // it) but never appears on the bar.
-                            name: if matches!(s.source, config::SensorSource::StaticText { .. }) {
+                            // static_text and tray sensors render only their
+                            // content: the name stays in the config (setup
+                            // keeps editing it) but never appears on the bar.
+                            name: if matches!(
+                                s.source,
+                                config::SensorSource::StaticText { .. }
+                                    | config::SensorSource::Tray {}
+                            ) {
                                 String::new()
                             } else {
                                 s.name.clone()
@@ -448,6 +471,7 @@ fn update(panel: &mut Panel, message: Message, _time: Instant) -> Command<Messag
                                 .or(defaults.and_then(|sd| config::style_num(sd.padding)))
                                 .unwrap_or(0) as u16,
                             action: s.action.clone(),
+                            tray: tray_icons,
                         }
                     })
                     .collect();
@@ -517,8 +541,30 @@ fn update(panel: &mut Panel, message: Message, _time: Instant) -> Command<Messag
         }
         Message::IcedEvent(e) => {
             // Mouse enter/leave/press are handled per-sensor by MouseArea,
-            // which emits Message::SensorHovered / SensorPressed. Nothing else here.
-            let _ = e;
+            // which emits Message::SensorHovered / SensorPressed. The cursor
+            // position itself is remembered for tray activation hints.
+            if let Event::Mouse(iced::mouse::Event::CursorMoved { position }) = e {
+                panel.last_cursor = Some((position.x, position.y));
+            }
+            Command::none()
+        }
+        Message::TrayItemsChanged => {
+            // An item appeared/vanished/was updated: rebuild the sections at
+            // once instead of waiting for the next tick (same full path).
+            update(panel, Message::Tick(Instant::now()), _time)
+        }
+        Message::TrayIconPressed(bus, path, button) => {
+            // Foreground thread only queues the D-Bus call (tray.rs spawns
+            // its own thread), so the UI never blocks on the item.
+            if let Some((x, y)) = tray::hint_point(panel) {
+                tray::spawn_action(&bus, &path, button, x, y);
+            }
+            Command::none()
+        }
+        Message::TrayIconScrolled(bus, path, delta) => {
+            if let Some((units, horizontal)) = delta {
+                tray::spawn_scroll(&bus, &path, units, horizontal);
+            }
             Command::none()
         }
         Message::SensorPressed(_section_index, _sensor_index, action) => {
@@ -587,11 +633,25 @@ fn update(panel: &mut Panel, message: Message, _time: Instant) -> Command<Messag
 
 // ── subscription (timer + iced events) ──────────────────────────────
 
-fn subscription(_panel: &Panel) -> Subscription<Message> {
-    Subscription::batch([
-        time::every(std::time::Duration::from_secs(1)).map(|now| Message::Tick(now)),
-        event::listen().map(Message::IcedEvent),
-    ])
+fn subscription(panel: &Panel) -> Subscription<Message> {
+    // The tray's D-Bus side runs only while a tray sensor is configured;
+    // dropping it releases the watcher/host bus names automatically.
+    let tray_sub = panel
+        .config
+        .panel
+        .sections
+        .iter()
+        .flat_map(|section| section.sensors.iter())
+        .any(|s| matches!(s.source, config::SensorSource::Tray {}))
+        .then(tray::subscription);
+    Subscription::batch(
+        [
+            time::every(std::time::Duration::from_secs(1)).map(|now| Message::Tick(now)),
+            event::listen().map(Message::IcedEvent),
+        ]
+        .into_iter()
+        .chain(tray_sub),
+    )
 }
 
 // ── view ────────────────────────────────────────────────────────────
@@ -632,8 +692,12 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
             _ => (Length::Shrink, Length::Shrink),
         };
 
-        // Build sensor widgets with optional per-sensor background.
-        let sensor_widgets: Vec<Element<'a, Message>> = section.sensors.iter().enumerate().map(|(sensor_idx, s)| {
+        // Build sensor widgets with optional per-sensor background. A tray
+        // sensor with no items renders nothing at all (no empty box).
+        let sensor_widgets: Vec<Element<'a, Message>> = section.sensors.iter().enumerate().filter_map(|(sensor_idx, s)| {
+            if s.tray.as_ref().is_some_and(|icons| icons.is_empty()) {
+                return None;
+            }
             let sensor_text_color = s.text_color.as_ref().map(|c| *c).unwrap_or(section_text);
 
             // Text color: hover variant when the cursor is over this sensor.
@@ -651,13 +715,18 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
             // Name and value side by side, separated by a small gap (the
             // colon separator was removed on request); an empty name (e.g.
             // static_text sensors) renders the value alone, with no gap.
-            let row = if s.name.is_empty() {
-                Row::new().push(value_widget)
+            // Tray sensors skip the text row: `tray::row` builds their
+            // icon row with clicks, wheel and tooltip included.
+            let main: Element<'a, Message> = if let Some(icons) = &s.tray {
+                tray::row(icons, font_size)
+            } else if s.name.is_empty() {
+                Row::new().push(value_widget).into()
             } else {
                 Row::new()
                     .push(text(&s.name).color(text_color).size(font_size).font(font_obj))
                     .push(value_widget)
                     .spacing(6)
+                    .into()
             };
 
             let desc_str: String = s.description.clone();
@@ -669,9 +738,9 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
                     .color(Color::from_rgba(0.5, 0.5, 0.5, 0.7))
                     .size(font_size.saturating_sub(2))
                     .font(font_obj);
-                Column::new().push(row).push(desc_widget).into()
+                Column::new().push(main).push(desc_widget).into()
             } else {
-                row.into()
+                main
             };
 
             // Determine colors: hover when the cursor is over this sensor.
@@ -696,8 +765,16 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
                 box_h,
             );
 
+            // Tray icons carry their own MouseAreas (press/wheel/tooltip);
+            // wrapping them in the sensor MouseArea as well would handle the
+            // same events twice, so a tray sensor stays bare.
+            if s.tray.is_some() {
+                return Some(styled_container.into());
+            }
+
             // Wrap in MouseArea to deliver hover + click for this specific sensor.
-            MouseArea::new(styled_container)
+            Some(
+                MouseArea::new(styled_container)
                 .on_enter(Message::SensorHovered(section_idx, sensor_idx, true))
                 .on_exit(Message::SensorHovered(section_idx, sensor_idx, false))
                 .on_press(Message::SensorPressed(
@@ -720,6 +797,7 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
                 })
                 .interaction(iced::mouse::Interaction::Pointer)
                 .into()
+            )
         }).collect();
 
         // Optionally prepend a section title.
@@ -1244,6 +1322,7 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         last_size: size,
                         last_anchor: anchor,
                         last_exclusive_zone: zone,
+                        last_cursor: None,
                     }
                 },
                 namespace,

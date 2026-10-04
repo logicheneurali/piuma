@@ -1796,7 +1796,7 @@ const SOURCE_TYPES: &[&str] = &[
     "temp_cpu",
     // no numeric category
     "net_state", "uptime", "clock", "window", "workspace",
-    "command", "env_var", "static_text",
+    "command", "env_var", "static_text", "tray",
 ];
 
 /// Friendly label for a canonical source type (shown when it needs no
@@ -1830,6 +1830,7 @@ fn source_label(canonical: &str) -> &'static str {
         "clock" => "Clock",
         "window" => "Focused window",
         "workspace" => "Workspace",
+        "tray" => "System tray",
         _ => "Sensor",
     }
 }
@@ -2250,5 +2251,33 @@ mod tests {
         assert!(err.contains("Save rejected") && err.contains("missing field"),
             "error must state the rejection and its reason, got: {}", err);
         assert!(!file_path("never-written.json").exists(), "no file may be written");
+    }
+
+    /// A tray sensor must survive load→save untouched (type name included)
+    /// and be accepted by the same parse `save_config` validates with.
+    #[test]
+    fn tray_sensor_roundtrips_and_validates() {
+        let json = r##"{
+  "panel": {
+    "align": "fill",
+    "anchor": "top",
+    "section_layout": "horizontal",
+    "sections": [
+      {
+        "layout": "horizontal",
+        "name": "sys",
+        "sensors": [ { "name": "Tray", "source": { "type": "tray" } } ]
+      }
+    ],
+    "thickness": 26
+  }
+}"##;
+        let mut state = fixture();
+        state.load_from_json(json).expect("tray config must load");
+        let saved = state.serialize().expect("serialize must succeed");
+        let out: JsonValue = serde_json::from_str(&saved).expect("saved JSON must parse");
+        assert_eq!(out["panel"]["sections"][0]["sensors"][0]["source"]["type"], "tray");
+        serde_json::from_str::<config::Config>(&saved)
+            .expect("piuma must accept the saved config (pre-save validation)");
     }
 }

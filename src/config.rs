@@ -251,6 +251,10 @@ pub enum SensorSource {
     Window {},
     #[serde(rename = "workspace", alias = "Workspace")]
     Workspace {},
+    /// System tray (StatusNotifierItem): renders the tray icons; the
+    /// rendering and the whole D-Bus side live in `tray.rs`.
+    #[serde(rename = "tray")]
+    Tray {},
 }
 
 // ── defaults ────────────────────────────────────────────────────────
@@ -366,5 +370,25 @@ pub fn load_config(path: Option<String>) -> (Config, PathBuf) {
     }
 
     (default_config(), default_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `tray` sensor must be part of a config piuma accepts whole: this
+    /// parse is exactly what piuma-setup's pre-save validation runs.
+    #[test]
+    fn tray_sensor_parses_and_roundtrips() {
+        let json = r#"{"panel":{"sections":[{"name":"sys","sensors":[{"name":"Tray","source":{"type":"tray"}}]}]}}"#;
+        let cfg: Config = serde_json::from_str(json).expect("a tray sensor must be valid");
+        assert!(matches!(
+            cfg.panel.sections[0].sensors[0].source,
+            SensorSource::Tray {}
+        ));
+        // The type name must come back unchanged (setup writes it verbatim).
+        let out = serde_json::to_string(&cfg).expect("config must serialize");
+        assert!(out.contains(r#""type":"tray""#), "got: {out}");
+    }
 }
 

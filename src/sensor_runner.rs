@@ -59,5 +59,8 @@ pub fn run(source: &SensorSource) -> String {
         }
         SensorSource::Window {} => sensors::get_window_title(),
         SensorSource::Workspace {} => sensors::get_workspace(),
+        // Tray items carry no text: the icons come from the shared tray
+        // state (see `tray.rs`), rendered by the view directly.
+        SensorSource::Tray {} => String::new(),
     }
 }

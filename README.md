@@ -17,7 +17,7 @@ Sensor `type` values follow a naming convention by category:
 - **`detail_`** – used/total ratio: `detail_mem`, `detail_swap`, `detail_disk`
 - **`temp_`** – temperature: `temp_cpu`
 - **no prefix** – not numeric: `net_state`, `uptime`, `clock`, `window`,
-  `workspace`, `command`, `env_var`, `static_text`
+  `workspace`, `command`, `env_var`, `static_text`, `tray`
 
 The old names (`ProcCpu`, `NvidiaGpu`, `ProcMem`, `ProcDisk`, `Audio`,
 `Network`, `Uptime`, `Clock`, `Window`, `Workspace`, `Command`, `EnvVar`,
@@ -175,10 +175,42 @@ Each sensor's `source` object has a `type` plus the parameters listed
 | `command` | shell command stdout | `command` |
 | `env_var` | environment variable value | `env_var` |
 | `static_text` | fixed text | `static_text` |
+| `tray` | system tray icons (StatusNotifierItem) | — |
 
 Network rates and the CPU percentage are computed from consecutive
 counter samples (`/proc/net/dev`, `/proc/stat`): the very first refresh
 can show `N/A` until the second sample arrives.
+
+### System tray
+
+A `tray` sensor renders the freedesktop StatusNotifierItem icons
+(nm-applet, kdeconnect-indicator, …) on the bar; while no tray app
+registers, the sensor renders nothing at all (no empty box):
+
+```json
+{ "name": "Tray", "source": { "type": "tray" } }
+```
+
+- **Watcher + host**: piuma speaks the `org.kde` interfaces (with the
+  spec-literal `org.freedesktop.StatusNotifierItem` spelling as
+  fallback), claims `org.kde.StatusNotifierWatcher` when it is free and
+  always registers `org.kde.StatusNotifierHost-<pid>`, so items never
+  fall back to the legacy XEmbed tray. When another tray already owns
+  the watcher, piuma *observes* it instead — same item list, same
+  registration signals — and takes over as soon as that watcher leaves.
+- **Interaction**: left click → `Activate`, middle click →
+  `SecondaryActivate`, right click → `ContextMenu` (coordinates are
+  advisory hints in the spec), wheel → `Scroll` (120 units per notch),
+  hover shows the item's tooltip (markup filtered out). Items in
+  `NeedsAttention` swap to their attention icon and get a red frame;
+  `NewIcon` / `NewStatus` / `NewToolTip` refresh the icon immediately,
+  and a dead tray app removes its icon at once.
+- **Limitations (v1)**: the legacy XEmbed tray and `OverlayIcon*`
+  overlays are not implemented; menus are not rendered host-side — the
+  wheel/right-click are forwarded to the item instead (a `dbusmenu`
+  host would be needed to draw them); in observer mode registrations
+  that carry only an object path (no bus name) cannot be resolved and
+  are skipped with a log line.
 
 ### Portability
 
