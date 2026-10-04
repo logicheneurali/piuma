@@ -195,7 +195,10 @@ Sensor sources use the smallest practical set of tools:
   the disk families (`df`), `clock` (`date`).
 - **Optional tools with automatic fallbacks**: `perc_volume` tries
   `amixer` (ALSA) → `wpctl` (PipeWire) → `pactl` (PulseAudio) and sticks
-  to the first that works; `perc_gpu` tries `nvidia-smi` (NVIDIA) → the
+  to the first that works — and so does the mouse wheel over the sensor,
+  which raises/lowers the volume by 5% per notch (clamped 0–100%);
+  `perc_gpu` tries
+  `nvidia-smi` (NVIDIA) → the
   amdgpu sysfs counter (AMD), `N/A` on other GPUs.
 - **Hyprland** (`hyprctl`): `window`, `workspace` — the only
   compositor-specific sensors, by design.

@@ -191,6 +191,60 @@ impl VolumeBackend {
             }
         }
     }
+
+    /// Set the volume to `pct` percent (0..=100) through this backend;
+    /// returns true when the command ran successfully.
+    fn set(self, device: &str, pct: f32) -> bool {
+        let result = match self {
+            // amixer sets a percentage on the control name (e.g. Master).
+            VolumeBackend::Amixer => Command::new("amixer")
+                .args(["set", device, &format!("{pct:.0}%")])
+                .status(),
+            // wpctl takes a fraction of full scale on the default sink.
+            VolumeBackend::Wpctl => Command::new("wpctl")
+                .args(["set-volume", "@DEFAULT_AUDIO_SINK@", &format!("{:.3}", pct / 100.0)])
+                .status(),
+            // pactl takes a percentage on the default sink.
+            VolumeBackend::Pactl => Command::new("pactl")
+                .args(["set-sink-volume", "@DEFAULT_SINK@", &format!("{pct:.0}%")])
+                .status(),
+        };
+        matches!(result, Ok(status) if status.success())
+    }
+}
+
+/// Percentage step applied per wheel notch on a `perc_volume` sensor.
+const VOLUME_STEP: f32 = 5.0;
+
+/// Normalize the `device` parameter: empty = Master (amixer control name).
+fn volume_device(device: &str) -> &str {
+    let device = device.trim();
+    if device.is_empty() { "Master" } else { device }
+}
+
+/// Backend order for the next operation: the cached backend first (it
+/// proved to work), then the fixed probe order amixer → wpctl → pactl.
+fn backend_order() -> Vec<VolumeBackend> {
+    let mut order = vec![VolumeBackend::Amixer, VolumeBackend::Wpctl, VolumeBackend::Pactl];
+    if let Ok(guard) = VOLUME_BACKEND.get_or_init(Default::default).lock() {
+        if let Some(cached) = *guard {
+            order.retain(|b| *b != cached);
+            order.insert(0, cached);
+        }
+    }
+    order
+}
+
+/// Remember the backend that worked so the next call tries it first.
+fn cache_backend(backend: VolumeBackend) {
+    if let Ok(mut guard) = VOLUME_BACKEND.get_or_init(Default::default).lock() {
+        *guard = Some(backend);
+    }
+}
+
+/// Parse a `50%`-style value; `N/A` and anything unparsable → None.
+fn parse_percent(value: &str) -> Option<f32> {
+    value.trim().trim_end_matches('%').parse::<f32>().ok()
 }
 
 /// Get audio volume (e.g. `50%`): tries amixer → wpctl → pactl (ALSA,
@@ -198,26 +252,46 @@ impl VolumeBackend {
 /// device = Master (amixer control name; the other backends use the
 /// default sink).
 pub fn audio_volume(device: &str) -> String {
-    let device = if device.trim().is_empty() { "Master" } else { device.trim() };
-    let cache = VOLUME_BACKEND.get_or_init(Default::default);
-    // Preferred order: the cached backend first, then the fixed probe order.
-    let mut order = vec![VolumeBackend::Amixer, VolumeBackend::Wpctl, VolumeBackend::Pactl];
-    if let Ok(guard) = cache.lock() {
-        if let Some(cached) = *guard {
-            order.retain(|b| *b != cached);
-            order.insert(0, cached);
-        }
-    }
-    for backend in order {
+    let device = volume_device(device);
+    for backend in backend_order() {
         let value = backend.read(device);
         if value != "N/A" {
-            if let Ok(mut guard) = cache.lock() {
-                *guard = Some(backend);
-            }
+            cache_backend(backend);
             return value;
         }
     }
     "N/A".to_string()
+}
+
+/// Serializes the read-modify-write of `adjust_volume` so concurrent
+/// wheel events can't read the same value and lose updates.
+static VOLUME_ADJUST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Volume after one wheel notch: current ± `VOLUME_STEP` clamped to
+/// 0..=100; None when the current value isn't a percentage. Shared by
+/// the backend adjust and the immediate display update.
+pub fn next_volume(current: &str, up: bool) -> Option<f32> {
+    let current = parse_percent(current)?;
+    Some((current + if up { VOLUME_STEP } else { -VOLUME_STEP }).clamp(0.0, 100.0))
+}
+
+/// Raise/lower the volume by `VOLUME_STEP` (wheel over a `perc_volume`
+/// sensor): the current value is read with the working backend, the
+/// target clamped to 0..=100 and set through the same backend — the
+/// next ones are tried when the set itself fails. No backend at all is
+/// reported instead of swallowed.
+pub fn adjust_volume(device: &str, up: bool) {
+    // Poison-tolerant: a panic in one adjustment must not disable the wheel.
+    let _guard = VOLUME_ADJUST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let device = volume_device(device);
+    for backend in backend_order() {
+        let Some(target) = next_volume(&backend.read(device), up) else { continue };
+        if backend.set(device, target) {
+            cache_backend(backend);
+            return;
+        }
+    }
+    eprintln!("[piuma] volume adjust failed: no working backend (amixer/wpctl/pactl)");
 }
 
 /// Get current time.
@@ -612,4 +686,32 @@ pub fn net_down(interface: &str) -> String {
 /// Get network upload rate (e.g. `12.3 KB/s`); `N/A` on the first tick.
 pub fn net_up(interface: &str) -> String {
     net_rate(interface, true).map(fmt_rate).unwrap_or_else(|| "N/A".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Wheel math: ±5 clamped to the 0..=100 range.
+    #[test]
+    fn volume_step_is_clamped() {
+        assert_eq!((50.0_f32 + VOLUME_STEP).clamp(0.0, 100.0), 55.0);
+        assert_eq!((98.0_f32 + VOLUME_STEP).clamp(0.0, 100.0), 100.0);
+        assert_eq!((2.0_f32 - VOLUME_STEP).clamp(0.0, 100.0), 0.0);
+    }
+
+    /// Values read from the three backends parse; `N/A` doesn't.
+    #[test]
+    fn percent_values_parse() {
+        assert_eq!(parse_percent("50%"), Some(50.0));
+        assert_eq!(parse_percent("0%"), Some(0.0));
+        assert_eq!(parse_percent("N/A"), None);
+    }
+
+    /// Empty device falls back to the amixer `Master` control.
+    #[test]
+    fn volume_device_defaults_to_master() {
+        assert_eq!(volume_device(""), "Master");
+        assert_eq!(volume_device(" Speaker "), "Speaker");
+    }
 }

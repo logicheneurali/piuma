@@ -117,6 +117,9 @@ enum Message {
     SensorHovered(usize, usize, bool),
     /// A sensor was clicked: (section_index, sensor_index, action).
     SensorPressed(usize, usize, Option<String>),
+    /// Wheel scrolled over a sensor: (section_index, sensor_index, up);
+    /// `None` for scroll events that carry no usable delta.
+    SensorScrolled(usize, usize, Option<bool>),
 }
 
 // ── namespace ───────────────────────────────────────────────────────
@@ -538,6 +541,38 @@ fn update(panel: &mut Panel, message: Message, _time: Instant) -> Command<Messag
             }
             Command::none()
         }
+        Message::SensorScrolled(section_index, sensor_index, up) => {
+            // Only volume sensors react to the wheel, and only to usable
+            // deltas; adjust in a background thread (non-blocking, like
+            // the click actions above).
+            if let Some(up) = up {
+                let device = panel
+                    .config
+                    .panel
+                    .sections
+                    .get(section_index)
+                    .and_then(|sec| sec.sensors.get(sensor_index))
+                    .and_then(|s| match &s.source {
+                        config::SensorSource::PercVolume { device } => Some(device.clone()),
+                        _ => None,
+                    });
+                if let Some(device) = device {
+                    // Reflect the change on the bar right away (same math as
+                    // the backend adjust); the next tick confirms it.
+                    if let Some(sensor_value) = panel
+                        .sections
+                        .get_mut(section_index)
+                        .and_then(|sec| sec.sensors.get_mut(sensor_index))
+                    {
+                        if let Some(next) = sensors::next_volume(&sensor_value.value, up) {
+                            sensor_value.value = format!("{next:.0}%");
+                        }
+                    }
+                    std::thread::spawn(move || sensors::adjust_volume(&device, up));
+                }
+            }
+            Command::none()
+        }
         Message::SensorHovered(section_index, sensor_index, hovered) => {
             if hovered {
                 panel.hovered = Some((section_index, sensor_index));
@@ -670,6 +705,19 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
                     sensor_idx,
                     s.action.clone(),
                 ))
+                // Wheel over a volume sensor adjusts it (positive y = wheel
+                // up, verified on this stack). Per notch the stack sends a
+                // pixel delta, a zero delta (axis_source) and the same delta
+                // in lines: only non-zero pixel deltas act — the line form
+                // always accompanies the pixel one (wayland protocol), so
+                // exactly one adjustment happens per notch.
+                .on_scroll(move |delta| {
+                    let up = match delta {
+                        iced::mouse::ScrollDelta::Pixels { y, .. } if y != 0.0 => Some(y > 0.0),
+                        _ => None,
+                    };
+                    Message::SensorScrolled(section_idx, sensor_idx, up)
+                })
                 .interaction(iced::mouse::Interaction::Pointer)
                 .into()
         }).collect();
