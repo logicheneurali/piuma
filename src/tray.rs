@@ -796,12 +796,30 @@ pub fn scroll_units(delta: iced::mouse::ScrollDelta) -> Option<(i32, bool)> {
 
 // ── view ────────────────────────────────────────────────────────────
 
+/// The tray sensor's resolved visual style, supplied by the view. It drives
+/// the tooltip only: the popup renders a copy of the sensor box, so it
+/// matches the styling of the icons it belongs to (the bg already carries
+/// the section fallback when the sensor itself is transparent).
+#[derive(Clone)]
+pub struct Style {
+    pub bg_color: Option<iced::Color>,
+    pub text_color: Option<iced::Color>,
+    pub border_color: Option<iced::Color>,
+    pub border_width: u16,
+    pub border_radius: u16,
+    /// `full`, `corners`, `underline`, `upperline`, `left` or `right`.
+    pub border_type: String,
+    pub padding: u16,
+}
+
 /// The tray sensor's content: one widget per item at `ICON_SIZE`, with the
 /// item's tooltip and its own mouse handling (left/middle/right press →
 /// `Activate`/`SecondaryActivate`/`ContextMenu`, wheel → `Scroll`).
 /// Built from a snapshot, so messages carry the item's bus name + path —
 /// never an index that could go stale before the click lands.
-pub fn row<'a>(icons: &'a [TrayIcon], font_size: u32) -> Element<'a, Message> {
+/// `style` is the sensor's own look; the tooltip reuses it via
+/// `crate::styled_box` (the 5px tooltip wrapper gap stays outside it).
+pub fn row<'a>(icons: &'a [TrayIcon], font_size: u32, style: &Style) -> Element<'a, Message> {
     let mut row = Row::new().spacing(4);
     for icon in icons {
         let size = Length::Fixed(f32::from(ICON_SIZE));
@@ -860,10 +878,26 @@ pub fn row<'a>(icons: &'a [TrayIcon], font_size: u32) -> Element<'a, Message> {
             row.push(interactive)
         } else {
             // The spec allows filtering the tooltip markup (done when the
-            // state was refreshed), the title/text shows as-is here.
+            // state was refreshed), the title/text shows as-is here. The
+            // content box is the sensor's own styling (same bg/border/
+            // radius/padding, text in the sensor's colour), so the popup
+            // reads as a copy of the sensor instead of bare floating text.
             row.push(iced::widget::tooltip(
                 interactive,
-                text(&icon.tooltip).size(font_size),
+                crate::styled_box(
+                    text(&icon.tooltip)
+                        .size(font_size)
+                        .color_maybe(style.text_color)
+                        .into(),
+                    style.bg_color,
+                    style.border_color,
+                    style.border_width,
+                    style.border_radius,
+                    &style.border_type,
+                    style.padding,
+                    Length::Shrink,
+                    Length::Shrink,
+                ),
                 iced::widget::tooltip::Position::Top,
             ))
         };

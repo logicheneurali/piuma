@@ -181,7 +181,8 @@ fn border_bar(color: Color, width: Length, height: Length) -> Element<'static, M
 }
 
 /// Build a styled box: background plus its border, drawn according to
-/// `border_type`. Used for the sensor boxes and for the section containers.
+/// `border_type`. Used for the sensor boxes, the section containers and the
+/// tray sensor's tooltip (which must look like the sensor it belongs to).
 ///
 /// * `full` (or any unknown value) -> native container border, which also
 ///   honors `border_radius`;
@@ -193,7 +194,7 @@ fn border_bar(color: Color, width: Length, height: Length) -> Element<'static, M
 ///
 /// The border is drawn only when both a color and a positive width are set,
 /// which is the rule the native border always applied.
-fn styled_box<'a>(
+pub(crate) fn styled_box<'a>(
     content: Element<'a, Message>,
     bg_color: Option<Color>,
     border_color: Option<Color>,
@@ -716,9 +717,24 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
             // colon separator was removed on request); an empty name (e.g.
             // static_text sensors) renders the value alone, with no gap.
             // Tray sensors skip the text row: `tray::row` builds their
-            // icon row with clicks, wheel and tooltip included.
+            // icon row with clicks, wheel and tooltip included. The style
+            // passed here drives the tooltip, which mirrors the sensor box;
+            // a transparent sensor shows the section behind it on the bar,
+            // so the tooltip borrows that colour to stay legible anywhere.
             let main: Element<'a, Message> = if let Some(icons) = &s.tray {
-                tray::row(icons, font_size)
+                tray::row(
+                    icons,
+                    font_size,
+                    &tray::Style {
+                        bg_color: s.bg_color.or(Some(section_bg)),
+                        text_color: s.text_color,
+                        border_color: s.border_color,
+                        border_width: s.border_width,
+                        border_radius: s.border_radius,
+                        border_type: s.border_type.clone(),
+                        padding: s.padding,
+                    },
+                )
             } else if s.name.is_empty() {
                 Row::new().push(value_widget).into()
             } else {
