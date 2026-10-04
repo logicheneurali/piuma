@@ -119,6 +119,8 @@ pub struct SensorDefaults {
 #[derive(Deserialize, serde::Serialize, Clone)]
 #[allow(clippy::upper_variable_names, clippy::struct_field_names)]
 pub struct SectionConfig {
+    /// Empty/omitted name renders as an empty title (setup saves it as absent).
+    #[serde(default)]
     pub name: String,
     pub layout: Option<String>,
     pub weight: Option<u32>,
@@ -130,6 +132,8 @@ pub struct SectionConfig {
 #[derive(Deserialize, serde::Serialize, Clone)]
 #[allow(clippy::upper_variable_names, clippy::struct_field_names)]
 pub struct SensorConfig {
+    /// Empty/omitted name renders as an empty label (setup saves it as absent).
+    #[serde(default)]
     pub name: String,
     pub description: Option<String>,
     pub source: SensorSource,

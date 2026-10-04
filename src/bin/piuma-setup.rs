@@ -46,7 +46,8 @@ pub struct SensorDefaults {
 #[derive(Debug, Clone)]
 pub struct Section {
     pub name: Option<String>,
-    pub layout: String,
+    /// Section layout override; `None` = inherit the panel `section_layout`.
+    pub layout: Option<String>,
     pub weight: Option<u32>,
     pub bg_color: Option<String>,
     pub text_color: Option<String>,
@@ -105,7 +106,7 @@ impl Default for Section {
     fn default() -> Self {
         Section {
             name: Some("System".to_string()),
-            layout: "horizontal".to_string(),
+            layout: Some("horizontal".to_string()),
             weight: None,
             bg_color: Some("#2d2d3a".to_string()),
             text_color: Some("#ff6b6b".to_string()),
@@ -479,7 +480,11 @@ impl PiumaSetup {
         if let Some(name) = &section.name {
             map.insert("name".to_string(), JsonValue::String(name.clone()));
         }
-        map.insert("layout".to_string(), JsonValue::String(section.layout.clone()));
+        // Layout written only when set: an absent key means "inherit the
+        // panel section_layout", writing it would freeze the inheritance.
+        if let Some(layout) = &section.layout {
+            map.insert("layout".to_string(), JsonValue::String(layout.clone()));
+        }
         if let Some(w) = section.weight {
             map.insert("weight".to_string(), JsonValue::Number(w.into()));
         }
@@ -575,6 +580,28 @@ impl PiumaSetup {
     fn load_from_json(&mut self, content: &str) -> Result<(), String> {
         let json: JsonValue = serde_json::from_str(content).map_err(|e| e.to_string())?;
         let panel = json.get("panel").ok_or("Missing panel")?;
+        // Reset to an all-absent state before applying the file: the
+        // *_default() values are templates for items created in the UI, not
+        // file content — seeding from them wrote defaults back on save
+        // whenever a key was absent (and the old "keep previous state" merge
+        // leaked leftovers of the previously loaded file). Errors above leave
+        // the current config untouched. Non-Option fields always get written,
+        // so they hold piuma's own fallbacks to stay behaviour-neutral:
+        // font_size 14 = DEFAULT_FONT_SIZE, section_layout "horizontal" and
+        // weight 1 = main.rs fallbacks, thickness 32 = config.rs default.
+        self.config = PiumaConfig {
+            font: None,
+            font_size: 14,
+            section_layout: "horizontal".to_string(),
+            default_section_weight: 1,
+            default_bg_color: None,
+            default_text_color: None,
+            anchor: None,
+            align: None,
+            thickness: 32,
+            sensor_defaults: SensorDefaults::default(),
+            sections: Vec::new(),
+        };
 
         if let Some(font) = panel.get("font").and_then(|v| v.as_str()) {
             self.config.font = Some(font.to_string());
@@ -600,9 +627,8 @@ impl PiumaSetup {
         if let Some(align) = panel.get("align").and_then(|v| v.as_str()) {
             self.config.align = Some(align.to_string());
         }
-        // Absent keys reset these two, so a reloaded config can clear them.
+        // Absent thickness resets to 32 (the config was reset at the top).
         self.config.thickness = panel.get("thickness").and_then(|v| v.as_u64()).map(|t| t as u32).unwrap_or(32);
-        self.config.sensor_defaults = SensorDefaults::default();
         if let Some(obj) = panel.get("sensor_defaults").and_then(|v| v.as_object()) {
             let d = &mut self.config.sensor_defaults;
             for (key, field) in [
@@ -638,25 +664,24 @@ impl PiumaSetup {
         Ok(())
     }
 
+    /// Parses one section with an all-absent seed: every key missing from the
+    /// file stays missing on save (no default/template injection).
     fn load_section(&self, json: &JsonValue) -> Option<Section> {
         let obj = json.as_object()?;
-        let mut section = Section::default();
+        let mut section = Section {
+            name: None,
+            layout: None,
+            weight: None,
+            bg_color: None,
+            text_color: None,
+            sensors: Vec::new(),
+        };
 
-        if let Some(name) = obj.get("name").and_then(|v| v.as_str()) {
-            section.name = Some(name.to_string());
-        }
-        if let Some(layout) = obj.get("layout").and_then(|v| v.as_str()) {
-            section.layout = layout.to_string();
-        }
-        if let Some(w) = obj.get("weight").and_then(|v| v.as_u64()) {
-            section.weight = Some(w as u32);
-        }
-        if let Some(bg) = obj.get("bg_color").and_then(|v| v.as_str()) {
-            section.bg_color = Some(bg.to_string());
-        }
-        if let Some(tc) = obj.get("text_color").and_then(|v| v.as_str()) {
-            section.text_color = Some(tc.to_string());
-        }
+        section.name = obj.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
+        section.layout = obj.get("layout").and_then(|v| v.as_str()).map(|s| s.to_string());
+        section.weight = obj.get("weight").and_then(|v| v.as_u64()).map(|w| w as u32);
+        section.bg_color = obj.get("bg_color").and_then(|v| v.as_str()).map(|s| s.to_string());
+        section.text_color = obj.get("text_color").and_then(|v| v.as_str()).map(|s| s.to_string());
         if let Some(sensors) = obj.get("sensors").and_then(|v| v.as_array()) {
             section.sensors = sensors.iter().filter_map(|s| self.load_sensor(s)).collect();
         }
@@ -664,9 +689,12 @@ impl PiumaSetup {
         Some(section)
     }
 
+    /// Parses one sensor with an all-absent seed (the `Sensor::default()`
+    /// name "CPU" is only for sensors created in the UI).
     fn load_sensor(&self, json: &JsonValue) -> Option<Sensor> {
         let obj = json.as_object()?;
         let mut sensor = Sensor::default();
+        sensor.name = None;
 
         if let Some(name) = obj.get("name").and_then(|v| v.as_str()) {
             sensor.name = Some(name.to_string());
@@ -693,7 +721,9 @@ impl PiumaSetup {
             if let Some(ev) = source.get("env_var").and_then(|v| v.as_str()) {
                 sensor.source_config.env_var = Some(ev.to_string());
             }
-            if let Some(st) = source.get("text").and_then(|v| v.as_str()) {
+            // Key must match the real schema: piuma and source_to_json both
+            // use "static_text" ("text" was an internal-UI key, never a file key).
+            if let Some(st) = source.get("static_text").and_then(|v| v.as_str()) {
                 sensor.source_config.static_text = Some(st.to_string());
             }
         }
@@ -724,13 +754,19 @@ impl PiumaSetup {
             }
         }
 
+        // Action (click behaviour): loaded like every other field, otherwise
+        // sensor_to_json omits it and a re-save silently drops it.
+        if let Some(val) = obj.get("action").and_then(|v| v.as_str()) {
+            sensor.action = Some(val.to_string());
+        }
+
         Some(sensor)
     }
 }
 
 fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
     match message {
-        Message::FontChanged(value) => state.config.font = Some(value),
+        Message::FontChanged(value) => state.config.font = if value.is_empty() { None } else { Some(value) },
         Message::FontSizeChanged(value) => state.config.font_size = value,
         Message::ThicknessChanged(value) => state.config.thickness = value,
         Message::DefaultsStyleChanged(field, value) => {
@@ -788,7 +824,7 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
         }
         Message::SectionLayoutChangedIndex(index, value) => {
             if index < state.config.sections.len() {
-                state.config.sections[index].layout = value;
+                state.config.sections[index].layout = Some(value);
             }
         }
         Message::SectionWeightChanged(index, value) => {
@@ -1511,7 +1547,7 @@ fn section_view<'a>(state: &'a PiumaSetup, index: usize, section: &'a Section) -
     let settings = form_grid(vec![
         ("Layout", picklist(
             vec!["horizontal".to_string(), "vertical".to_string()],
-            Some(&section.layout),
+            section.layout.as_ref(),
             move |value| Message::SectionLayoutChangedIndex(index, value),
         ).width(Length::Fill).into()),
         ("BG", color_control(section.bg_color.as_deref().unwrap_or(""), move |value| Message::SectionBgColorChanged(index, value))),
