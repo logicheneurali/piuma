@@ -144,14 +144,14 @@ Each sensor's `source` object has a `type` plus the parameters listed
 
 | `type` | output | params |
 |---|---|---|
-| `perc_cpu` | CPU usage (`4,8`) | — |
-| `perc_gpu` | NVIDIA GPU utilization (`12`) | — |
+| `perc_cpu` | CPU usage (`4.8`) | — |
+| `perc_gpu` | GPU utilization (`12`; NVIDIA or AMD) | — |
 | `perc_mem` | RAM used percentage (`45%`) | — |
 | `perc_swap` | swap used percentage (`0%`) | — |
 | `perc_disk` | root fs used percentage (`66%`) | — |
 | `perc_battery` | battery charge percentage (`80%`) | — |
 | `perc_backlight` | backlight brightness percentage (`31%`) | — |
-| `perc_volume` | mixer volume percentage (`50%`) | `device` (default `Master`) |
+| `perc_volume` | mixer volume percentage (`50%`) | `device` (default `Master`; auto fallback `amixer` → `wpctl` → `pactl`) |
 | `used_mem` | RAM used (`14353 MB`) | — |
 | `used_swap` | swap used (`0 MB`) | — |
 | `used_disk` | root fs used (`619G`) | — |
@@ -165,7 +165,7 @@ Each sensor's `source` object has a `type` plus the parameters listed
 | `detail_mem` | RAM used/total (`14353/31807 MB`) | — |
 | `detail_swap` | swap used/total (`0/31806 MB`) | — |
 | `detail_disk` | fs used/total (`619G/950G`) | — |
-| `temp_cpu` | CPU package temperature (`65°C`, hwmon `coretemp`) | — |
+| `temp_cpu` | CPU package temperature (`65°C`, hwmon `coretemp`/`k10temp`) | — |
 | `net_state` | interface state (`connected`) | `interface` |
 | `uptime` | uptime (`up 2 hours, 30 minutes`) | — |
 | `clock` | time (`10:12:42`); `format: "date"` = date only | `format` |
@@ -175,8 +175,30 @@ Each sensor's `source` object has a `type` plus the parameters listed
 | `env_var` | environment variable value | `env_var` |
 | `static_text` | fixed text | `static_text` |
 
-Network rates are computed from consecutive counter samples: the very
-first refresh can show `N/A` until the second sample arrives.
+Network rates and the CPU percentage are computed from consecutive
+counter samples (`/proc/net/dev`, `/proc/stat`): the very first refresh
+can show `N/A` until the second sample arrives.
+
+### Portability
+
+Sensor sources use the smallest practical set of tools:
+
+- **Kernel interfaces only** (`/proc`, `/sys`) — work on any Linux
+  distribution, including minimal/busybox systems: `perc_cpu`,
+  `perc_mem`/`used_mem`/`total_mem`/`detail_mem`, the `perc_swap`/
+  `used_swap`/`total_swap`/`detail_swap` families, `uptime`, `net_state`,
+  `used_netdown`/`used_netup`, `temp_cpu` (Intel `coretemp`, AMD
+  `k10temp`/`zenpower`), `perc_battery` (battery name is discovered, not
+  hardcoded), `perc_backlight`.
+- **Base userland** (coreutils — installed everywhere): `perc_disk` and
+  the disk families (`df`), `clock` (`date`).
+- **Optional tools with automatic fallbacks**: `perc_volume` tries
+  `amixer` (ALSA) → `wpctl` (PipeWire) → `pactl` (PulseAudio) and sticks
+  to the first that works; `perc_gpu` tries `nvidia-smi` (NVIDIA) → the
+  amdgpu sysfs counter (AMD), `N/A` on other GPUs.
+- **Hyprland** (`hyprctl`): `window`, `workspace` — the only
+  compositor-specific sensors, by design.
+- **Yours**: `command` (any POSIX shell), `env_var`, `static_text`.
 
 ## Usage
 
