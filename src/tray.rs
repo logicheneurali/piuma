@@ -111,7 +111,8 @@ pub enum TrayButton {
 
 /// A tracked item's raw state; `image`/`tooltip` are the resolved forms.
 struct Item {
-    /// Registration string (property list + registered/unregistered signals).
+    /// Item id as exposed in the property list and in the registered /
+    /// unregistered signals: `bus + path` (the KDE watcher's form).
     reg: String,
     bus: String,
     path: String,
@@ -368,10 +369,12 @@ async fn owner_proxy<'p>(conn: &Connection, bus: &'p str, path: &'p str) -> Opti
         .ok()
 }
 
-/// Per-item task: when the item's bus name dies (or is replaced) the
-/// watcher must notice by itself (spec) and announce the removal.
-/// `announce` is set only in owner mode: an observer must never emit
-/// the watcher's signals.
+/// Per-item task: remove the item — and announce it — only when its bus
+/// name is really gone. A transfer to another owner keeps the item (the
+/// name never left the bus; the new owner registers itself, which
+/// refreshes the item) and keeps the watch armed for the next change.
+/// `announce` is set only in owner mode: an observer must never emit the
+/// watcher's signals.
 async fn death_loop(
     conn: Connection,
     sender: Sender<Message>,
@@ -383,13 +386,25 @@ async fn death_loop(
     let Some(proxy) = owner_proxy(&conn, &bus, &path).await else {
         return;
     };
-    // Wait for the owner change; without a stream we cannot watch, so keep
-    // the item rather than dropping it on a monitoring failure.
+    // Without a stream we cannot watch, so keep the item rather than
+    // dropping it on a monitoring failure.
     let Ok(mut owner) = proxy.receive_owner_changed().await else {
         eprintln!("[piuma] tray: cannot watch {} — keeping it listed", bus);
         return;
     };
-    owner.next().await;
+    // The stream yields the new owner per change: `Some(_)` = the name is
+    // (still) owned — transfer, keep watching; `None` = the name is gone.
+    // Stream end is treated like a monitoring failure: stop, keep the item.
+    let name_lost = loop {
+        match owner.next().await {
+            Some(Some(_)) => continue,
+            Some(None) => break true,
+            None => break false,
+        }
+    };
+    if !name_lost {
+        return;
+    }
 
     with_items(|items| remove(items, &bus, &path));
     if announce {
@@ -486,9 +501,16 @@ impl Watcher {
         // The caller is blocked in this very call, so it cannot answer our
         // property reads — probing it here would deadlock both sides (and,
         // zbus dispatching calls inline, wedge the whole object server).
-        let is_new = record(&service, &bus, &path);
+        // The property list and the registered/unregistered signals carry
+        // the item id as `bus + path` — the exact form KDE's reference
+        // watcher emits (notifierItemId), which observers split at the
+        // first `/`; the raw `service` argument would drop the sender for
+        // path-form registrations (`/StatusNotifierItem` alone is
+        // unresolvable for anyone but us).
+        let reg = format!("{bus}{path}");
+        let is_new = record(&reg, &bus, &path);
         if let Ok(emitter) = SignalEmitter::new(conn, WATCHER_PATH) {
-            let _ = Watcher::status_notifier_item_registered(&emitter, &service).await;
+            let _ = Watcher::status_notifier_item_registered(&emitter, &reg).await;
         }
         // Probe, refresh and per-item tasks run as an executor task, i.e.
         // after this method has returned its reply.
@@ -497,7 +519,7 @@ impl Watcher {
                 track_recorded(
                     conn.clone(),
                     self.sender.clone(),
-                    service,
+                    reg,
                     bus,
                     path,
                     is_new,
@@ -518,6 +540,8 @@ impl Watcher {
         }
     }
 
+    /// The item ids in the `bus + path` form (what KDE's reference watcher
+    /// emits); observers split them at the first `/`.
     #[zbus(property)]
     fn registered_status_notifier_items(&self) -> Vec<String> {
         with_items(|items| items.iter().map(|i| i.reg.clone()).collect())
@@ -560,8 +584,8 @@ async fn serve_owner() -> zbus::Result<()> {
 }
 
 /// Observer mode: another tray owns the watcher, so mirror its list and
-/// follow its registration signals. Returns when that watcher dies so the
-/// caller can try to take over.
+/// follow its registration signals. Returns when that watcher's name is
+/// lost so the caller can try to take over.
 async fn serve_observer(conn: &Connection, sender: &Sender<Message>) -> zbus::Result<()> {
     let watcher = Builder::<Proxy>::new(conn)
         .destination(WATCHER_NAME)?
@@ -613,29 +637,55 @@ async fn serve_observer(conn: &Connection, sender: &Sender<Message>) -> zbus::Re
         .detach();
 
     let mut owner = watcher.receive_owner_changed().await?;
-    let _ = owner.next().await;
+    // Take over only when the watcher name is actually gone: `Some(Some(_))`
+    // = another tray received the name (stay the observer), `Some(None)` =
+    // the name left the bus; a stream end falls back to the old behavior
+    // (attempt the takeover — the name request decides).
+    loop {
+        match owner.next().await {
+            Some(Some(_)) => continue,
+            Some(None) | None => break,
+        }
+    }
     eprintln!("[piuma] tray: the other watcher left — taking over");
     Ok(())
 }
 
-/// Observer-mode tracking: registration strings carry no sender, so only
-/// bus-name forms are resolvable (via the conventional item path).
+/// Parse an item id (`bus + path`, the form the property list and the
+/// registered signal carry) into its destination bus name and object
+/// path; the path keeps its leading `/`. A bare bus name (no path suffix,
+/// as emitted by some watchers) falls back to the conventional item path.
+/// `None` when the id carries no bus name (path-only) or is empty: only
+/// the watcher knows the sender that registered such a form.
+fn split_reg(reg: &str) -> Option<(&str, &str)> {
+    if reg.is_empty() {
+        return None;
+    }
+    match reg.find('/') {
+        Some(0) => None,
+        Some(i) => Some((&reg[..i], &reg[i..])),
+        None => Some((reg, DEFAULT_ITEM_PATH)),
+    }
+}
+
+/// Observer-mode tracking: split the item id and track it like owner mode
+/// (properties, signals, death), never emitting the watcher's signals.
 async fn track_remote(conn: &Connection, sender: &Sender<Message>, reg: &str) {
-    if reg.starts_with('/') {
+    let Some((bus, path)) = split_reg(reg) else {
         eprintln!(
             "[piuma] tray: cannot resolve path-only registration {reg} in observer mode — skipped"
         );
         return;
-    }
+    };
     // Our own loop is the caller here (nothing waits on us), so awaiting
     // the track inline is fine.
-    let is_new = record(reg, reg, DEFAULT_ITEM_PATH);
+    let is_new = record(reg, bus, path);
     track_recorded(
         conn.clone(),
         sender.clone(),
         reg.to_string(),
-        reg.to_string(),
-        DEFAULT_ITEM_PATH.to_string(),
+        bus.to_string(),
+        path.to_string(),
         is_new,
         false,
     )
@@ -990,6 +1040,27 @@ mod tests {
         assert_eq!(with_items(|i| i.len()), 0);
         with_items(|i| remove(i, ":1.60", "/StatusNotifierItem"));
         assert!(items().is_empty());
+    }
+
+    #[test]
+    fn item_ids_split_into_bus_and_path() {
+        // KDE reference id (both registration forms resolve to bus + path).
+        assert_eq!(
+            split_reg(":1.50/StatusNotifierItem"),
+            Some((":1.50", "/StatusNotifierItem"))
+        );
+        assert_eq!(
+            split_reg("org.kde.StatusNotifierItem-9-1/StatusNotifierItem"),
+            Some(("org.kde.StatusNotifierItem-9-1", "/StatusNotifierItem"))
+        );
+        // Bare bus name (no path suffix): the conventional item path.
+        assert_eq!(
+            split_reg("org.kde.StatusNotifierItem-9-1"),
+            Some(("org.kde.StatusNotifierItem-9-1", DEFAULT_ITEM_PATH))
+        );
+        // Path-only or empty ids carry no bus name — unresolvable here.
+        assert_eq!(split_reg("/StatusNotifierItem"), None);
+        assert_eq!(split_reg(""), None);
     }
 
     #[test]
