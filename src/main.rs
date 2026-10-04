@@ -423,7 +423,14 @@ fn update(panel: &mut Panel, message: Message, _time: Instant) -> Command<Messag
                         let sensor_tc_hover: Option<iced::Color> = tc_h_str.and_then(|sc| config::parse_color(sc).ok());
                         let sensor_border: Option<Color> = bc_str.and_then(|sc| config::parse_color(sc).ok());
                         SensorValue {
-                            name: s.name.clone(),
+                            // static_text sensors render only their text: the
+                            // name stays in the config (setup keeps editing
+                            // it) but never appears on the bar.
+                            name: if matches!(s.source, config::SensorSource::StaticText { .. }) {
+                                String::new()
+                            } else {
+                                s.name.clone()
+                            },
                             description: s.description.as_ref().map(|d| d.to_string()).unwrap_or_default(),
                             value,
                             text_color: Some(sensor_tc),
@@ -601,22 +608,22 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
                 sensor_text_color
             };
 
-            let label_widget = text(&s.name)
-                .color(text_color)
-                .size(font_size)
-                .font(font_obj);
-
             let value_widget = text(&s.value)
                 .color(text_color)
                 .size(font_size)
                 .font(font_obj);
 
             // Name and value side by side, separated by a small gap (the
-            // colon separator was removed on request).
-            let row = Row::new()
-                .push(label_widget)
-                .push(value_widget)
-                .spacing(6);
+            // colon separator was removed on request); an empty name (e.g.
+            // static_text sensors) renders the value alone, with no gap.
+            let row = if s.name.is_empty() {
+                Row::new().push(value_widget)
+            } else {
+                Row::new()
+                    .push(text(&s.name).color(text_color).size(font_size).font(font_obj))
+                    .push(value_widget)
+                    .spacing(6)
+            };
 
             let desc_str: String = s.description.clone();
             let has_desc = !desc_str.is_empty();
