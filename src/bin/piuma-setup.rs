@@ -11,6 +11,12 @@ use std::fs;
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
 
+// piuma's real config schema (same package, different bin target): the
+// save path validates against it before writing, so a config piuma
+// would reject is reported here instead of failing silently at load.
+#[path = "../config.rs"]
+mod config;
+
 // Configuration structure for GUI - mirrors src/config.rs
 #[derive(Debug, Clone)]
 pub struct PiumaConfig {
@@ -347,7 +353,10 @@ impl PiumaSetup {
         match fs::read_to_string(file_path(&state.current_file)) {
             Ok(content) => match state.load_from_json(&content) {
                 Ok(()) => {
-                    state.snapshot = state.serialize();
+                    // Snapshot is only the dirty-check: if this ever failed
+                    // (it cannot for a parsed config) the first save would
+                    // just ask for confirmation and report any real error.
+                    state.snapshot = state.serialize().unwrap_or_default();
                     state.set_status(format!("Loaded {}", state.current_file), false);
                 }
                 // Parse errors leave `snapshot` empty, so the first save always
@@ -355,7 +364,7 @@ impl PiumaSetup {
                 Err(e) => state.set_status(format!("Error parsing {}: {}", state.current_file, e), true),
             },
             Err(_) => {
-                state.snapshot = state.serialize();
+                state.snapshot = state.serialize().unwrap_or_default();
                 state.set_status("No config file found; starting from defaults".to_string(), false);
             }
         }
@@ -456,34 +465,34 @@ impl PiumaSetup {
         map.insert("type".to_string(), JsonValue::String(sensor.source_type.clone()));
 
         match sensor.source_type.as_str() {
-            // Parameterized types: the legacy and the canonical name both
-            // write the same file key (old configs round-trip unchanged).
-            "Network" | "net_state" | "used_netdown" | "used_netup" => {
+            // Parameterized types; load_sensor guarantees canonical names,
+            // so the keys written here always match the piuma.json schema.
+            "net_state" | "used_netdown" | "used_netup" => {
                 if let Some(iface) = &sensor.source_config.interface {
                     map.insert("interface".to_string(), JsonValue::String(iface.clone()));
                 }
             }
-            "Audio" | "perc_volume" => {
+            "perc_volume" => {
                 if let Some(device) = &sensor.source_config.device {
                     map.insert("device".to_string(), JsonValue::String(device.clone()));
                 }
             }
-            "Clock" | "clock" => {
+            "clock" => {
                 if let Some(format) = &sensor.source_config.format {
                     map.insert("format".to_string(), JsonValue::String(format.clone()));
                 }
             }
-            "Command" | "command" => {
+            "command" => {
                 if let Some(cmd) = &sensor.source_config.command {
                     map.insert("command".to_string(), JsonValue::String(cmd.clone()));
                 }
             }
-            "EnvVar" | "env_var" => {
+            "env_var" => {
                 if let Some(ev) = &sensor.source_config.env_var {
                     map.insert("env_var".to_string(), JsonValue::String(ev.clone()));
                 }
             }
-            "StaticText" | "static_text" => {
+            "static_text" => {
                 if let Some(st) = &sensor.source_config.static_text {
                     map.insert("static_text".to_string(), JsonValue::String(st.clone()));
                 }
@@ -571,16 +580,24 @@ impl PiumaSetup {
         JsonValue::Object(map)
     }
 
-    /// Pretty-printed JSON of the current config: exactly what Save would write.
-    fn serialize(&self) -> String {
-        serde_json::to_string_pretty(&self.config_to_json()).unwrap_or_default()
+    /// Pretty-printed JSON of the current config: exactly what Save would
+    /// write. A serialization error is returned so the save path can report
+    /// it instead of writing an empty file (`unwrap_or_default` did that).
+    fn serialize(&self) -> Result<String, String> {
+        serde_json::to_string_pretty(&self.config_to_json())
+            .map_err(|e| format!("Error serializing config: {}", e))
     }
 
     /// Writes the config to `name` (atomic tmp+rename) and refreshes
     /// `current_file`/`snapshot` so the modification check restarts clean.
     fn save_config(&mut self, name: &str) -> Result<(), String> {
         let path = file_path(name);
-        let json = self.serialize();
+        let json = self.serialize()?;
+        // Validate against piuma's real schema before touching the file: a
+        // config piuma would reject (e.g. a static_text sensor without its
+        // text) must fail loudly here, not load as broken later.
+        serde_json::from_str::<config::Config>(&json)
+            .map_err(|e| format!("Save rejected, piuma would refuse this config: {}", e))?;
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir).map_err(|e| format!("Error creating directory: {}", e))?;
         }
@@ -601,7 +618,7 @@ impl PiumaSetup {
             .map_err(|_| format!("No config file found: {}", name))?;
         self.load_from_json(&content)?;
         self.current_file = name.to_string();
-        self.snapshot = self.serialize();
+        self.snapshot = self.serialize().unwrap_or_default();
         Ok(())
     }
 
@@ -806,7 +823,11 @@ impl PiumaSetup {
         }
         if let Some(source) = obj.get("source").and_then(|v| v.as_object()) {
             if let Some(type_) = source.get("type").and_then(|v| v.as_str()) {
-                sensor.source_type = type_.to_string();
+                // Single conversion point: legacy names (ProcCpu, Network…)
+                // become canonical here, so the picklist shows the new names
+                // and Save writes them to piuma.json; piuma's serde aliases
+                // read either spelling identically.
+                sensor.source_type = canonical_type(type_).to_string();
             }
             if let Some(iface) = source.get("interface").and_then(|v| v.as_str()) {
                 sensor.source_config.interface = Some(iface.to_string());
@@ -1147,15 +1168,20 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                 }
             }
         }
-        Message::SaveConfig => {
-            if state.serialize() != state.snapshot {
-                // Unsaved changes: ask before overwriting the file.
-                state.modal = Some(Modal::ConfirmSave);
-            } else {
-                let name = state.current_file.clone();
-                let _ = state.save_reporting(&name);
+        Message::SaveConfig => match state.serialize() {
+            // Serialization errors surface in the status bar; otherwise the
+            // dirty-check decides between straight save and confirmation.
+            Err(e) => state.set_status(e, true),
+            Ok(current) => {
+                if current == state.snapshot {
+                    let name = state.current_file.clone();
+                    let _ = state.save_reporting(&name);
+                } else {
+                    // Unsaved changes: ask before overwriting the file.
+                    state.modal = Some(Modal::ConfirmSave);
+                }
             }
-        }
+        },
         Message::SaveAs => {
             state.modal = Some(Modal::SaveAs {
                 name: state.current_file.clone(),
@@ -1730,6 +1756,9 @@ fn section_view<'a>(state: &'a PiumaSetup, index: usize, section: &'a Section) -
 /// Legacy PascalCase source type → canonical prefixed/lowercase name, so
 /// labels and inputs work for old configs too (the stored value itself is
 /// never rewritten on save).
+/// Maps a legacy type name to the canonical round-9 name; anything else
+/// (already canonical) passes through. Applied when loading, so the whole
+/// editor — picklist, param inputs, save — only ever sees canonical names.
 fn canonical_type<'a>(source_type: &'a str) -> &'a str {
     match source_type {
         "ProcCpu" => "perc_cpu",
@@ -1821,8 +1850,9 @@ fn sensor_view(section_index: usize, sensor_index: usize, sensor_count: usize, s
         .align_y(Alignment::Center)
         .width(Length::Fill);
 
-    // Options = canonical types + the loaded value if it is a legacy name
-    // (faithful round-trip: an old config keeps its old type on save).
+    // Options = the canonical types; load_sensor already converted any
+    // legacy name, so the current value is in this list unless the file
+    // holds an unknown/typo'd type — which stays visible to be fixed.
     let mut source_types: Vec<String> = SOURCE_TYPES.iter().map(|s| s.to_string()).collect();
     if !source_types.iter().any(|t| t == &sensor.source_type) {
         source_types.push(sensor.source_type.clone());
@@ -2058,4 +2088,167 @@ fn app() -> iced::Result {
 
 fn main() -> iced::Result {
     app()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The user's real piuma.json before conversion: legacy and canonical
+    /// type names mixed, plus actions, style overrides and -1 disabled
+    /// values that must all survive a load→save round-trip.
+    const LEGACY_CONFIG: &str = r##"{
+  "panel": {
+    "align": "fill",
+    "anchor": "top",
+    "default_bg_color": "#00000000",
+    "default_section_weight": 1,
+    "default_text_color": "#eeeeeeee",
+    "font": "Noto Sans",
+    "font_size": 11,
+    "section_defaults": {
+      "bg_color": "#30609010",
+      "border_color": "#30609020",
+      "border_radius": 8,
+      "border_type": "full",
+      "border_width": 2
+    },
+    "section_layout": "horizontal",
+    "sections": [
+      {
+        "layout": "horizontal",
+        "name": "hyprland",
+        "sensors": [
+          {
+            "action": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"1\" })'",
+            "name": "1",
+            "source": { "type": "Command" }
+          },
+          {
+            "action": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"2\" })'",
+            "name": "2",
+            "source": { "type": "static_text" }
+          },
+          {
+            "name": "Window",
+            "source": { "type": "Window" }
+          }
+        ],
+        "text_color": "#ff6b6b"
+      },
+      {
+        "layout": "horizontal",
+        "name": "System",
+        "sensors": [
+          {
+            "border_radius": -1,
+            "border_type": "corners",
+            "border_width": -1,
+            "name": "CPU%",
+            "padding": -1,
+            "source": { "type": "ProcCpu" }
+          },
+          {
+            "name": "GPU%",
+            "source": { "type": "NvidiaGpu" }
+          },
+          {
+            "name": "MEM",
+            "source": { "type": "ProcMem" }
+          },
+          {
+            "name": "NET",
+            "source": { "interface": "wlan0", "type": "Network" }
+          },
+          {
+            "name": "VOL",
+            "source": { "device": "Master", "type": "Audio" }
+          },
+          {
+            "name": "CAL",
+            "source": { "command": "date", "type": "Command" }
+          },
+          {
+            "name": "SHELL",
+            "source": { "env_var": "SHELL", "type": "EnvVar" }
+          }
+        ]
+      }
+    ],
+    "sensor_defaults": { "padding": 3 },
+    "thickness": 26
+  }
+}"##;
+
+    /// A PiumaSetup that never touches the filesystem or config dir.
+    fn fixture() -> PiumaSetup {
+        PiumaSetup {
+            config: PiumaConfig::default(),
+            status_message: None,
+            status_is_error: false,
+            defaults_expanded: false,
+            sec_defaults_expanded: false,
+            sensor_style_open: HashSet::new(),
+            current_file: "piuma.json".to_string(),
+            snapshot: String::new(),
+            modal: None,
+        }
+    }
+
+    /// Load→save of a legacy config: only the type names may change
+    /// (to their canonical spelling); params, actions, names, styles,
+    /// section names and -1 values must come out untouched.
+    #[test]
+    fn legacy_types_convert_and_nothing_else_changes() {
+        let mut state = fixture();
+        state.load_from_json(LEGACY_CONFIG).expect("fixture must parse");
+        let out: JsonValue =
+            serde_json::from_str(&state.serialize().expect("serialization must succeed")).expect("saved JSON must parse");
+
+        // Independent oracle: the input with only the five legacy names
+        // of this fixture mapped by hand (no canonical_type call here).
+        let mut expected: JsonValue = serde_json::from_str(LEGACY_CONFIG).unwrap();
+        for section in expected["panel"]["sections"].as_array_mut().unwrap() {
+            for sensor in section["sensors"].as_array_mut().unwrap() {
+                let ty = sensor["source"]["type"].as_str().unwrap().to_string();
+                let mapped = match ty.as_str() {
+                    "ProcCpu" => "perc_cpu",
+                    "NvidiaGpu" => "perc_gpu",
+                    "ProcMem" => "detail_mem",
+                    "Window" => "window",
+                    "Command" => "command",
+                    "Network" => "net_state",
+                    "Audio" => "perc_volume",
+                    "EnvVar" => "env_var",
+                    other => other,
+                };
+                sensor["source"]["type"] = JsonValue::String(mapped.to_string());
+            }
+        }
+        assert_eq!(out, expected, "save must rewrite only source.type, never drop or inject anything");
+    }
+
+    /// A converted config that is loaded and saved again must not change
+    /// any further time (conversion is idempotent).
+    #[test]
+    fn conversion_is_idempotent() {
+        let mut state = fixture();
+        state.load_from_json(LEGACY_CONFIG).unwrap();
+        let first = state.serialize().unwrap();
+        state.load_from_json(&first).unwrap();
+        assert_eq!(state.serialize().unwrap(), first);
+    }
+
+    /// Save must fail with the serde reason — before touching any file —
+    /// for a config piuma would reject (the fixture holds sensors with a
+    /// required parameter missing: command and static_text).
+    #[test]
+    fn save_refuses_config_piuma_would_reject() {
+        let mut state = fixture();
+        state.load_from_json(LEGACY_CONFIG).unwrap();
+        let err = state.save_config("never-written.json").unwrap_err();
+        assert!(err.contains("Save rejected") && err.contains("missing field"),
+            "error must state the rejection and its reason, got: {}", err);
+        assert!(!file_path("never-written.json").exists(), "no file may be written");
+    }
 }

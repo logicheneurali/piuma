@@ -22,7 +22,8 @@ Sensor `type` values follow a naming convention by category:
 The old names (`ProcCpu`, `NvidiaGpu`, `ProcMem`, `ProcDisk`, `Audio`,
 `Network`, `Uptime`, `Clock`, `Window`, `Workspace`, `Command`, `EnvVar`,
 `StaticText`) are still accepted, so existing configs keep loading;
-`piuma-setup` saves back exactly the name it loaded.
+`piuma-setup` converts them to the canonical names on load, so the next
+save writes the new names into `piuma.json`.
 
 ### Styling Features
 - **Hover Effects**: Color changes on mouse hover

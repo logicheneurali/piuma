@@ -314,14 +314,15 @@ pub fn load_config(path: Option<String>) -> (Config, PathBuf) {
     if let Some(path) = path {
         let p = PathBuf::from(path);
         if p.exists() {
-            if let Ok(contents) = std::fs::read_to_string(&p) {
-                if let Ok(config) = serde_json::from_str::<Config>(&contents) {
-                    return (config, p);
-                } else {
-                    eprintln!("[piuma] Failed to parse config at {}", p.display());
-                }
-            } else {
-                eprintln!("[piuma] Cannot read config at {}", p.display());
+            match std::fs::read_to_string(&p) {
+                // The serde reason (e.g. "missing field `static_text`") is
+                // part of the message: a broken config must be fixable, not
+                // mysterious (the hot reload prints it the same way).
+                Ok(contents) => match serde_json::from_str::<Config>(&contents) {
+                    Ok(config) => return (config, p),
+                    Err(e) => eprintln!("[piuma] Failed to parse config at {}: {}", p.display(), e),
+                },
+                Err(e) => eprintln!("[piuma] Cannot read config at {}: {}", p.display(), e),
             }
         } else {
             eprintln!("[piuma] Config file not found: {}", p.display());
@@ -331,12 +332,12 @@ pub fn load_config(path: Option<String>) -> (Config, PathBuf) {
     // Try default location
     let default_path = default_config_path();
     if default_path.exists() {
-        if let Ok(contents) = std::fs::read_to_string(&default_path) {
-            if let Ok(config) = serde_json::from_str::<Config>(&contents) {
-                return (config, default_path);
-            } else {
-                eprintln!("[piuma] Failed to parse config at {}", default_path.display());
-            }
+        match std::fs::read_to_string(&default_path) {
+            Ok(contents) => match serde_json::from_str::<Config>(&contents) {
+                Ok(config) => return (config, default_path),
+                Err(e) => eprintln!("[piuma] Failed to parse config at {}: {}", default_path.display(), e),
+            },
+            Err(e) => eprintln!("[piuma] Cannot read config at {}: {}", default_path.display(), e),
         }
     }
 
@@ -346,9 +347,18 @@ pub fn load_config(path: Option<String>) -> (Config, PathBuf) {
     if !default_path.exists() {
         let config_dir = default_path.parent();
         if let Some(dir) = config_dir {
-            let _ = std::fs::create_dir_all(dir);
-            if let Ok(default_cfg) = serde_json::to_string_pretty(&default_config()) {
-                let _ = std::fs::write(&default_path, default_cfg);
+            // Every failure below is reported: discarding it would leave the
+            // user without a config file and without a clue why.
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                eprintln!("[piuma] Cannot create config dir {}: {}", dir.display(), e);
+            }
+            match serde_json::to_string_pretty(&default_config()) {
+                Ok(default_cfg) => {
+                    if let Err(e) = std::fs::write(&default_path, default_cfg) {
+                        eprintln!("[piuma] Cannot write default config {}: {}", default_path.display(), e);
+                    }
+                }
+                Err(e) => eprintln!("[piuma] Cannot serialize default config: {}", e),
             }
         }
     } else {
@@ -357,3 +367,4 @@ pub fn load_config(path: Option<String>) -> (Config, PathBuf) {
 
     (default_config(), default_path)
 }
+
