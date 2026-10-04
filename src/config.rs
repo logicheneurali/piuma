@@ -95,6 +95,8 @@ pub struct PanelConfig {
     pub thickness: Option<u32>,
     /// Style applied to every sensor; per-sensor values take precedence.
     pub sensor_defaults: Option<SensorDefaults>,
+    /// Style applied to every section; per-section values take precedence.
+    pub section_defaults: Option<SectionDefaults>,
     pub sections: Vec<SectionConfig>,
 }
 
@@ -116,6 +118,20 @@ pub struct SensorDefaults {
     pub padding: Option<i32>,
 }
 
+/// Style values applied to every section unless the section overrides them:
+/// the style fields of `SectionConfig` (bg, text, border) — layout/weight are
+/// structure and stay per-section only. Same group rule as `sensor_defaults`.
+#[derive(Deserialize, serde::Serialize, Clone)]
+#[allow(clippy::upper_variable_names)]
+pub struct SectionDefaults {
+    pub bg_color: Option<String>,
+    pub text_color: Option<String>,
+    pub border_color: Option<String>,
+    pub border_width: Option<i32>,
+    pub border_radius: Option<i32>,
+    pub border_type: Option<String>,
+}
+
 #[derive(Deserialize, serde::Serialize, Clone)]
 #[allow(clippy::upper_variable_names, clippy::struct_field_names)]
 pub struct SectionConfig {
@@ -126,6 +142,14 @@ pub struct SectionConfig {
     pub weight: Option<u32>,
     pub bg_color: Option<String>,
     pub text_color: Option<String>,
+    /// Section border colour; drawn when a positive width is set too.
+    pub border_color: Option<String>,
+    /// Border thickness; `-1` = disabled (same rule as the sensor fields).
+    pub border_width: Option<i32>,
+    pub border_radius: Option<i32>,
+    /// Border drawing style: `full` (default), `corners`, `underline`,
+    /// `upperline`, `left` or `right`.
+    pub border_type: Option<String>,
     pub sensors: Vec<SensorConfig>,
 }
 
@@ -185,6 +209,10 @@ pub fn default_config() -> Config {
         weight: None,
         bg_color: None,
         text_color: None,
+        border_color: None,
+        border_width: None,
+        border_radius: None,
+        border_type: None,
         sensors: vec![
             SensorConfig { name: "CPU".to_string(), description: None, source: SensorSource::ProcCpu {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None },
             SensorConfig { name: "GPU".to_string(), description: None, source: SensorSource::NvidiaGpu {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None },
@@ -206,6 +234,7 @@ pub fn default_config() -> Config {
             align: Some("center".to_string()),
             thickness: None,
             sensor_defaults: None,
+            section_defaults: None,
             sections: vec![section],
         },
     }

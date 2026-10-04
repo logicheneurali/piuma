@@ -24,6 +24,7 @@ pub struct PiumaConfig {
     pub align: Option<String>,
     pub thickness: u32,
     pub sensor_defaults: SensorDefaults,
+    pub section_defaults: SectionDefaults,
     pub sections: Vec<Section>,
 }
 
@@ -43,6 +44,18 @@ pub struct SensorDefaults {
     pub padding: Option<i32>,
 }
 
+/// Style defaults for every section (style fields only, no layout/weight);
+/// mirrors `panel.section_defaults` in src/config.rs.
+#[derive(Debug, Clone, Default)]
+pub struct SectionDefaults {
+    pub bg_color: Option<String>,
+    pub text_color: Option<String>,
+    pub border_color: Option<String>,
+    pub border_width: Option<i32>,
+    pub border_radius: Option<i32>,
+    pub border_type: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Section {
     pub name: Option<String>,
@@ -51,6 +64,10 @@ pub struct Section {
     pub weight: Option<u32>,
     pub bg_color: Option<String>,
     pub text_color: Option<String>,
+    pub border_color: Option<String>,
+    pub border_width: Option<i32>,
+    pub border_radius: Option<i32>,
+    pub border_type: Option<String>,
     pub sensors: Vec<Sensor>,
 }
 
@@ -97,6 +114,7 @@ impl Default for PiumaConfig {
             align: Some("center".to_string()),
             thickness: 32,
             sensor_defaults: SensorDefaults::default(),
+            section_defaults: SectionDefaults::default(),
             sections: vec![Section::default()],
         }
     }
@@ -110,6 +128,10 @@ impl Default for Section {
             weight: None,
             bg_color: Some("#2d2d3a".to_string()),
             text_color: Some("#ff6b6b".to_string()),
+            border_color: None,
+            border_width: None,
+            border_radius: None,
+            border_type: None,
             sensors: vec![Sensor::default()],
         }
     }
@@ -161,6 +183,16 @@ pub enum Message {
     /// for the fields of `panel.sensor_defaults`.
     DefaultsStyleChanged(String, String),
     DefaultsNumberChanged(String, i32),
+    /// Section border style of the card at `usize`: (field name, string
+    /// value) for `border_color` / `border_type` (bg/text have own messages).
+    SectionStyleChanged(usize, String, String),
+    /// Section border style number of the card at `usize`: (field name, number)
+    /// for `border_width` / `border_radius`.
+    SectionNumberChanged(usize, String, i32),
+    /// Section style defaults: same keys as the section style fields,
+    /// for the fields of `panel.section_defaults`.
+    SecDefaultsStyleChanged(String, String),
+    SecDefaultsNumberChanged(String, i32),
     SectionLayoutChanged(String),
     DefaultSectionWeightChanged(u32),
     DefaultBgColorChanged(String),
@@ -200,6 +232,8 @@ pub enum Message {
     SensorActionChanged(usize, usize, String),
     /// Toggles the collapsible "Sensor Defaults" card.
     ToggleDefaults,
+    /// Toggles the collapsible "Section Defaults" card.
+    ToggleSecDefaults,
     /// Toggles the collapsible style block of one sensor: (section, sensor).
     ToggleSensorStyle(usize, usize),
     /// Save: asks confirmation when the config was modified, then writes.
@@ -283,6 +317,8 @@ pub struct PiumaSetup {
     status_is_error: bool,
     /// Whether the collapsible "Sensor Defaults" card is open.
     defaults_expanded: bool,
+    /// Whether the collapsible "Section Defaults" card is open.
+    sec_defaults_expanded: bool,
     /// Indices of the sensors whose "Style overrides" block is open.
     sensor_style_open: HashSet<(usize, usize)>,
     /// Config file currently edited (name inside the piuma config directory).
@@ -302,6 +338,7 @@ impl PiumaSetup {
             status_message: None,
             status_is_error: false,
             defaults_expanded: false,
+            sec_defaults_expanded: false,
             sensor_style_open: HashSet::new(),
             current_file: DEFAULT_FILE.to_string(),
             snapshot: String::new(),
@@ -382,6 +419,28 @@ impl PiumaSetup {
         }
         if !defaults_map.is_empty() {
             panel.insert("sensor_defaults".to_string(), JsonValue::Object(defaults_map));
+        }
+
+        // Section style defaults: written only when at least one field is set.
+        let sd = &self.config.section_defaults;
+        let mut sec_map = Map::new();
+        for (key, val) in [
+            ("bg_color", &sd.bg_color),
+            ("text_color", &sd.text_color),
+            ("border_color", &sd.border_color),
+            ("border_type", &sd.border_type),
+        ] {
+            if let Some(v) = val {
+                sec_map.insert(key.to_string(), JsonValue::String(v.clone()));
+            }
+        }
+        for (key, val) in [("border_width", &sd.border_width), ("border_radius", &sd.border_radius)] {
+            if let Some(v) = val {
+                sec_map.insert(key.to_string(), JsonValue::Number((*v).into()));
+            }
+        }
+        if !sec_map.is_empty() {
+            panel.insert("section_defaults".to_string(), JsonValue::Object(sec_map));
         }
 
         let sections_vec: Vec<JsonValue> = self.config.sections.iter().map(|s| self.section_to_json(s)).collect();
@@ -494,6 +553,17 @@ impl PiumaSetup {
         if let Some(tc) = &section.text_color {
             map.insert("text_color".to_string(), JsonValue::String(tc.clone()));
         }
+        if let Some(bc) = &section.border_color {
+            map.insert("border_color".to_string(), JsonValue::String(bc.clone()));
+        }
+        for (key, val) in [("border_width", section.border_width), ("border_radius", section.border_radius)] {
+            if let Some(v) = val {
+                map.insert(key.to_string(), JsonValue::Number(v.into()));
+            }
+        }
+        if let Some(bt) = &section.border_type {
+            map.insert("border_type".to_string(), JsonValue::String(bt.clone()));
+        }
         let sensors_vec: Vec<JsonValue> = section.sensors.iter().map(|s| self.sensor_to_json(s)).collect();
         map.insert("sensors".to_string(), JsonValue::Array(sensors_vec));
         JsonValue::Object(map)
@@ -600,6 +670,7 @@ impl PiumaSetup {
             align: None,
             thickness: 32,
             sensor_defaults: SensorDefaults::default(),
+            section_defaults: SectionDefaults::default(),
             sections: Vec::new(),
         };
 
@@ -656,6 +727,26 @@ impl PiumaSetup {
                 }
             }
         }
+        // Absent block stays at the all-None default (reset at the top).
+        if let Some(obj) = panel.get("section_defaults").and_then(|v| v.as_object()) {
+            let d = &mut self.config.section_defaults;
+            for (key, field) in [
+                ("bg_color", &mut d.bg_color),
+                ("text_color", &mut d.text_color),
+                ("border_color", &mut d.border_color),
+                ("border_type", &mut d.border_type),
+            ] {
+                if let Some(v) = obj.get(key).and_then(|v| v.as_str()) {
+                    *field = Some(v.to_string());
+                }
+            }
+            for (key, field) in [("border_width", &mut d.border_width), ("border_radius", &mut d.border_radius)] {
+                // as_i64: -1 (disabled) must load too, as_u64 would drop it
+                if let Some(v) = obj.get(key).and_then(|v| v.as_i64()) {
+                    *field = Some(v as i32);
+                }
+            }
+        }
 
         if let Some(sections) = panel.get("sections").and_then(|v| v.as_array()) {
             self.config.sections = sections.iter().filter_map(|s| self.load_section(s)).collect();
@@ -674,6 +765,10 @@ impl PiumaSetup {
             weight: None,
             bg_color: None,
             text_color: None,
+            border_color: None,
+            border_width: None,
+            border_radius: None,
+            border_type: None,
             sensors: Vec::new(),
         };
 
@@ -682,6 +777,11 @@ impl PiumaSetup {
         section.weight = obj.get("weight").and_then(|v| v.as_u64()).map(|w| w as u32);
         section.bg_color = obj.get("bg_color").and_then(|v| v.as_str()).map(|s| s.to_string());
         section.text_color = obj.get("text_color").and_then(|v| v.as_str()).map(|s| s.to_string());
+        section.border_color = obj.get("border_color").and_then(|v| v.as_str()).map(|s| s.to_string());
+        // as_i64: -1 (disabled) must load too, as_u64 would drop it
+        section.border_width = obj.get("border_width").and_then(|v| v.as_i64()).map(|v| v as i32);
+        section.border_radius = obj.get("border_radius").and_then(|v| v.as_i64()).map(|v| v as i32);
+        section.border_type = obj.get("border_type").and_then(|v| v.as_str()).map(|s| s.to_string());
         if let Some(sensors) = obj.get("sensors").and_then(|v| v.as_array()) {
             section.sensors = sensors.iter().filter_map(|s| self.load_sensor(s)).collect();
         }
@@ -790,6 +890,47 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                 "border_width_hover" => d.border_width_hover = Some(value),
                 "border_radius" => d.border_radius = Some(value),
                 "padding" => d.padding = Some(value),
+                _ => {}
+            }
+        }
+        Message::SectionStyleChanged(index, field, value) => {
+            if index < state.config.sections.len() {
+                // Border style keys; section bg/text keep their own messages.
+                let v = if value.is_empty() { None } else { Some(value) };
+                let s = &mut state.config.sections[index];
+                match field.as_str() {
+                    "border_color" => s.border_color = v,
+                    "border_type" => s.border_type = v,
+                    _ => {}
+                }
+            }
+        }
+        Message::SectionNumberChanged(index, field, value) => {
+            if index < state.config.sections.len() {
+                let s = &mut state.config.sections[index];
+                match field.as_str() {
+                    "border_width" => s.border_width = Some(value),
+                    "border_radius" => s.border_radius = Some(value),
+                    _ => {}
+                }
+            }
+        }
+        Message::SecDefaultsStyleChanged(field, value) => {
+            let d = &mut state.config.section_defaults;
+            let v = if value.is_empty() { None } else { Some(value) };
+            match field.as_str() {
+                "bg_color" => d.bg_color = v,
+                "text_color" => d.text_color = v,
+                "border_color" => d.border_color = v,
+                "border_type" => d.border_type = v,
+                _ => {}
+            }
+        }
+        Message::SecDefaultsNumberChanged(field, value) => {
+            let d = &mut state.config.section_defaults;
+            match field.as_str() {
+                "border_width" => d.border_width = Some(value),
+                "border_radius" => d.border_radius = Some(value),
                 _ => {}
             }
         }
@@ -1076,6 +1217,7 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
         },
         Message::ModalCancel => state.modal = None,
         Message::ToggleDefaults => state.defaults_expanded = !state.defaults_expanded,
+        Message::ToggleSecDefaults => state.sec_defaults_expanded = !state.sec_defaults_expanded,
         Message::ToggleSensorStyle(section, sensor) => {
             // Insert-or-remove keeps the set as the single source of truth.
             if !state.sensor_style_open.remove(&(section, sensor)) {
@@ -1279,6 +1421,7 @@ fn view(state: &PiumaSetup) -> Element<Message> {
         config_header(state),
         panel_settings(state),
         sensor_defaults_view(state),
+        section_defaults_view(state),
         sections_list(state),
     ]
     .padding(20)
@@ -1552,6 +1695,21 @@ fn section_view<'a>(state: &'a PiumaSetup, index: usize, section: &'a Section) -
         ).width(Length::Fill).into()),
         ("BG", color_control(section.bg_color.as_deref().unwrap_or(""), move |value| Message::SectionBgColorChanged(index, value))),
         ("Text", color_control(section.text_color.as_deref().unwrap_or(""), move |value| Message::SectionTextColorChanged(index, value))),
+        ("Border", color_control(section.border_color.as_deref().unwrap_or(""), move |value| Message::SectionStyleChanged(index, "border_color".to_string(), value))),
+        ("Border Width", slider_control(-1i32..=10, section.border_width.unwrap_or(-1), move |value| Message::SectionNumberChanged(index, "border_width".to_string(), value))),
+        ("Border Radius", slider_control(-1i32..=20, section.border_radius.unwrap_or(-1), move |value| Message::SectionNumberChanged(index, "border_radius".to_string(), value))),
+        ("Border Type", picklist(
+            vec![
+                "full".to_string(),
+                "corners".to_string(),
+                "underline".to_string(),
+                "upperline".to_string(),
+                "left".to_string(),
+                "right".to_string(),
+            ],
+            Some(section.border_type.clone().unwrap_or_else(|| "full".to_string())),
+            move |value| Message::SectionStyleChanged(index, "border_type".to_string(), value),
+        ).width(Length::Fill).into()),
     ]);
 
     let mut sensor_list = Column::new().spacing(8).width(Length::Fill);
@@ -1738,6 +1896,52 @@ fn sensor_defaults_view(state: &PiumaSetup) -> Element<Message> {
                 ],
                 Some(d.border_type.clone().unwrap_or_else(|| "full".to_string())),
                 |value| Message::DefaultsStyleChanged("border_type".to_string(), value),
+            ).width(Length::Fill).into()),
+        ];
+        root = root.push(form_grid(fields));
+    }
+
+    card(root).into()
+}
+
+/// The "Section Defaults" card: style applied to every section, overridden
+/// per section (same group rule as the sensor defaults).
+fn section_defaults_view(state: &PiumaSetup) -> Element<Message> {
+    let d = &state.config.section_defaults;
+
+    let summary = style_summary(
+        &[
+            ("bg", &d.bg_color), ("text", &d.text_color),
+            ("border", &d.border_color), ("border-type", &d.border_type),
+        ],
+        &[("brd", &d.border_width), ("rad", &d.border_radius)],
+    );
+    let header = collapsible_header("Section Defaults", summary, state.sec_defaults_expanded, Message::ToggleSecDefaults);
+
+    let mut root = column![header].spacing(10).width(Length::Fill);
+    if state.sec_defaults_expanded {
+        root = root.push(text("Style applied to every section; single sections override these values.")
+            .size(10)
+            .style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.55, 0.55, 0.6)), ..TextStyle::default() }));
+
+        // Style numbers: -1 = disabled (built-in fallback), 0..=N = enabled.
+        let fields = vec![
+            ("BG", color_control(d.bg_color.as_deref().unwrap_or(""), |value| Message::SecDefaultsStyleChanged("bg_color".to_string(), value))),
+            ("Text", color_control(d.text_color.as_deref().unwrap_or(""), |value| Message::SecDefaultsStyleChanged("text_color".to_string(), value))),
+            ("Border", color_control(d.border_color.as_deref().unwrap_or(""), |value| Message::SecDefaultsStyleChanged("border_color".to_string(), value))),
+            ("Border Width", slider_control(-1i32..=10, d.border_width.unwrap_or(-1), |value| Message::SecDefaultsNumberChanged("border_width".to_string(), value))),
+            ("Border Radius", slider_control(-1i32..=20, d.border_radius.unwrap_or(-1), |value| Message::SecDefaultsNumberChanged("border_radius".to_string(), value))),
+            ("Border Type", picklist(
+                vec![
+                    "full".to_string(),
+                    "corners".to_string(),
+                    "underline".to_string(),
+                    "upperline".to_string(),
+                    "left".to_string(),
+                    "right".to_string(),
+                ],
+                Some(d.border_type.clone().unwrap_or_else(|| "full".to_string())),
+                |value| Message::SecDefaultsStyleChanged("border_type".to_string(), value),
             ).width(Length::Fill).into()),
         ];
         root = root.push(form_grid(fields));

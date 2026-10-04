@@ -64,6 +64,14 @@ Example configuration:
     "anchor": "bottom",
     "align": "center",
     "percentage": 0.8,
+    "section_defaults": {
+      "bg_color": "#23232f",
+      "text_color": "#c8c8d4",
+      "border_color": "#444466",
+      "border_width": 1,
+      "border_radius": 6,
+      "border_type": "full"
+    },
     "sections": [
       {
         "name": "System",
@@ -71,6 +79,9 @@ Example configuration:
         "weight": null,
         "bg_color": "#2d2d3a",
         "text_color": "#ff6b6b",
+        "border_color": "#556677",
+        "border_width": 2,
+        "border_type": "corners",
         "sensors": [
           {
             "name": "CPU",
@@ -95,14 +106,24 @@ Example configuration:
 ```
 
 Numeric style fields — `border_width`, `border_width_hover`, `border_radius`
-and `padding` (on sensors and on `panel.sensor_defaults`) use the range
-`-1..=N`:
+and `padding` (on sensors, on sections, and on `panel.sensor_defaults` /
+`panel.section_defaults`) use the range `-1..=N`:
 
-- `-1` = **disabled**: the sensor does not override that field; the value
-  comes from `panel.sensor_defaults` (built-in fallback if absent there too);
+- `-1` = **disabled**: the item does not override that field; the value
+  comes from the panel defaults block (built-in fallback if absent there
+  too);
 - `0..=N` = **enabled**: a valid value that activates the padding / border /
   radius with that amount;
 - a field missing from the config behaves like `-1`.
+
+Sections support the same border drawing as sensors (`border_color`,
+`border_width`, `border_radius`, `border_type` = `full`, `corners`,
+`underline`, `upperline`, `left`, `right`; no hover variants), with the same
+precedence rule as `panel.sensor_defaults`: a section owns the border group
+only when it sets `border_color`, otherwise the whole group comes from
+`panel.section_defaults`. `bg_color`/`text_color` are single keys: the
+section value when set, otherwise the defaults, the panel
+`default_bg_color`/`default_text_color`, then the built-in ones.
 
 ## Usage
 

@@ -78,6 +78,12 @@ struct SectionData {
     bg_color: Color,
     text_color: Color,
     title_color: Color,
+    /// Resolved border (section > section_defaults): drawn by `styled_box`
+    /// with the same rule as the sensors (color + positive width).
+    border_color: Option<Color>,
+    border_width: u16,
+    border_radius: u16,
+    border_type: String,
     weight: f32,
     sensors: Vec<SensorValue>,
 }
@@ -156,20 +162,20 @@ fn border_bar(color: Color, width: Length, height: Length) -> Element<'static, M
         .into()
 }
 
-/// Build the sensor box: background plus its border, drawn according to
-/// `border_type`:
+/// Build a styled box: background plus its border, drawn according to
+/// `border_type`. Used for the sensor boxes and for the section containers.
 ///
 /// * `full` (or any unknown value) -> native container border, which also
 ///   honors `border_radius`;
 /// * `underline` / `upperline` / `left` / `right` -> a single colored bar on
-///   that side, overlaid through a `Stack` so the sensor keeps exactly the
+///   that side, overlaid through a `Stack` so the box keeps exactly the
 ///   size it would have without a border;
 /// * `corners` -> four L-shaped brackets (each arm covers one quarter of
 ///   its side, so every side keeps a visible middle gap).
 ///
 /// The border is drawn only when both a color and a positive width are set,
 /// which is the rule the native border always applied.
-fn sensor_box<'a>(
+fn styled_box<'a>(
     content: Element<'a, Message>,
     bg_color: Option<Color>,
     border_color: Option<Color>,
@@ -359,8 +365,14 @@ fn update(panel: &mut Panel, message: Message, _time: Instant) -> Command<Messag
                     .unwrap_or(Some(DEFAULT_TEXT_COLOR))
                     .unwrap_or(DEFAULT_TEXT_COLOR);
 
+                // Text colour chain: section > section_defaults > panel > built-in.
                 let section_text_color = section_cfg.text_color.as_ref()
                     .and_then(|s| config::parse_color(s).ok())
+                    .or_else(|| {
+                        panel.config.panel.section_defaults.as_ref()
+                            .and_then(|sd| sd.text_color.as_ref())
+                            .and_then(|s| config::parse_color(s).ok())
+                    })
                     .unwrap_or(section_default_txt);
 
                 let sensors: Vec<SensorValue> = section_cfg
@@ -436,28 +448,43 @@ fn update(panel: &mut Panel, message: Message, _time: Instant) -> Command<Messag
                     .unwrap_or(Some(DEFAULT_BG_COLOR))
                     .unwrap_or(DEFAULT_BG_COLOR);
 
+                // Section style precedence, per style GROUP (the same rule as
+                // `panel.sensor_defaults`): the border group belongs to the
+                // section only when it sets `border_color`; otherwise the
+                // whole group comes from `panel.section_defaults`. bg/text
+                // are single keys: section value when set, else the default.
+                let sdefaults = panel.config.panel.section_defaults.as_ref();
+                let own_border = section_cfg.border_color.is_some();
+                let bg_str = section_cfg.bg_color.as_deref()
+                    .or(sdefaults.and_then(|sd| sd.bg_color.as_deref()));
+                let bc_str = section_cfg.border_color.as_deref()
+                    .or(sdefaults.and_then(|sd| sd.border_color.as_deref()));
+                // Numeric fields follow the -1 = disabled rule: only an
+                // enabled value (>= 0) overrides the defaults.
+                let bw_val = (if own_border { config::style_num(section_cfg.border_width) } else { None })
+                    .or(sdefaults.and_then(|sd| config::style_num(sd.border_width)))
+                    .unwrap_or(0);
+                let br_val = (if own_border { config::style_num(section_cfg.border_radius) } else { None })
+                    .or(sdefaults.and_then(|sd| config::style_num(sd.border_radius)))
+                    .unwrap_or(0);
+                let bt_str = (if own_border { section_cfg.border_type.as_deref() } else { None })
+                    .or(sdefaults.and_then(|sd| sd.border_type.as_deref()))
+                    .unwrap_or("full");
+
                 sections.push(SectionData {
                     name: section_cfg.name.clone(),
                     layout: section_cfg.layout.as_ref().map(|s| s.to_string()).unwrap_or("horizontal".to_string()),
                     bg_color: resolve_color(
-                        section_cfg.bg_color.as_ref().and_then(|s| config::parse_color(s).ok()),
+                        bg_str.and_then(|s| config::parse_color(s).ok()),
                         default_bg,
                     ),
                     text_color: section_text_color,
-                    title_color: {
-                        let tc = section_cfg.text_color.as_ref()
-                            .map(|sc| config::parse_color(sc).ok())
-                            .flatten()
-                            .or_else(|| {
-                                panel.config.panel.default_text_color
-                                    .as_ref()
-                                    .map(|sc| config::parse_color(sc).ok())
-                                    .flatten()
-                                    .or(Some(DEFAULT_TEXT_COLOR))
-                            })
-                            .unwrap_or(DEFAULT_TEXT_COLOR);
-                        tc.scale_alpha(0.8)
-                    },
+                    // Title = section text colour at 80% alpha (same chain).
+                    title_color: section_text_color.scale_alpha(0.8),
+                    border_color: bc_str.and_then(|s| config::parse_color(s).ok()),
+                    border_width: bw_val as u16,
+                    border_radius: br_val as u16,
+                    border_type: bt_str.to_string(),
                     weight: panel.config.panel.default_section_weight.as_ref().map(|w| (*w as u32) as f32).unwrap_or(1.0),
                     sensors,
                 });
@@ -615,7 +642,7 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
             let border_color = s.border_color;
             let pad = s.padding;
 
-            let styled_container = sensor_box(
+            let styled_container = styled_box(
                 content,
                 bg_color,
                 border_color,
@@ -674,20 +701,23 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
             row.into()
         };
 
-        // Wrap in container with section background. It fills the panel's cross
-        // (thickness) axis and centres the section content on that axis, so
-        // `thickness` reaches the sections: stretched boxes fill it, stacked
-        // groups are centred within it.
-        let section_element: Element<'a, Message> = container(sensors_inner)
-            .width(if vertical { Length::Fill } else { Length::Shrink })
-            .height(if vertical { Length::Shrink } else { Length::Fill })
-            .align_x(if vertical { Alignment::Center } else { Alignment::Start })
-            .align_y(if vertical { Alignment::Start } else { Alignment::Center })
-            .style(move |_theme: &iced::Theme| ContainerStyle {
-                background: Some(Background::Color(section_bg)),
-                ..ContainerStyle::default()
-            })
-            .into();
+        // Wrap in a styled box: section background plus the section border,
+        // drawn with the same rules as the sensor boxes. It fills the panel's
+        // cross (thickness) axis and centres the section content on that axis,
+        // so `thickness` reaches the sections: stretched boxes fill it, stacked
+        // groups are centred within it. Content padding stays in the Row/
+        // Column above, so the box itself adds none.
+        let section_element: Element<'a, Message> = styled_box(
+            sensors_inner,
+            Some(section_bg),
+            section.border_color,
+            section.border_width,
+            section.border_radius,
+            &section.border_type,
+            0,
+            if vertical { Length::Fill } else { Length::Shrink },
+            if vertical { Length::Shrink } else { Length::Fill },
+        );
 
         section_elements.push(section_element);
     }
@@ -1057,7 +1087,8 @@ fn panel_size(config: &config::Config, screen_width: u32, screen_height: u32) ->
 /// The surface is pinned to the screen edge on the axis it extends along.
 /// `align` is handled inside the surface by iced (the inner panel is aligned
 /// to left/center/right or top/center/bottom), so the anchor only needs the
-/// single edge that sticks the panel to the screen border:
+/// single edge that sticks the panel to the screen border, which comes from
+/// `panel.anchor`:
 ///
 /// * horizontal, top    -> `Top`
 /// * horizontal, bottom -> `Bottom`
@@ -1071,16 +1102,19 @@ fn panel_anchor(config: &config::Config) -> Anchor {
         .map(|s| s.as_str())
         .unwrap_or("horizontal") == "vertical";
 
-    let align = config.panel.align.as_deref().unwrap_or("center");
+    // Edge from `anchor` (default: top for horizontal, left for vertical);
+    // `align` positions the panel INSIDE the surface, it does not pick the
+    // edge — reading it here ignored `panel.anchor` completely.
+    let anchor = config.panel.anchor.as_deref().unwrap_or(if vertical { "left" } else { "top" });
 
     if vertical {
-        match align {
+        match anchor {
             "bottom" => Anchor::Bottom,
             "right" => Anchor::Right,
             _ => Anchor::Left,
         }
     } else {
-        match align {
+        match anchor {
             "bottom" => Anchor::Bottom,
             _ => Anchor::Top,
         }
