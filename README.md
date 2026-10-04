@@ -5,12 +5,24 @@ Piuma is a lightweight system information panel for Hyprland/Wayland, designed a
 ## Features
 
 ### Sensor Types
-- **System Sensors**: CPU, GPU, Memory, Disk, Uptime
-- **Network Sensor**: Shows connection status of specified network interface
-- **Audio Sensor**: Shows volume level of audio device
-- **Clock Sensor**: Shows current time or date
-- **Window Sensor**: Shows currently focused window title
-- **Workspace Sensor**: Shows current workspace name
+
+Sensor `type` values follow a naming convention by category:
+
+- **`perc_`** – percentage: `perc_cpu`, `perc_gpu`, `perc_mem`, `perc_swap`,
+  `perc_disk`, `perc_battery`, `perc_backlight`, `perc_volume`
+- **`used_`** – numeric consumption: `used_mem`, `used_swap`, `used_disk`,
+  `used_battery`, `used_netdown`, `used_netup`
+- **`total_`** – full value: `total_mem`, `total_swap`, `total_disk`,
+  `total_battery`
+- **`detail_`** – used/total ratio: `detail_mem`, `detail_swap`, `detail_disk`
+- **`temp_`** – temperature: `temp_cpu`
+- **no prefix** – not numeric: `net_state`, `uptime`, `clock`, `window`,
+  `workspace`, `command`, `env_var`, `static_text`
+
+The old names (`ProcCpu`, `NvidiaGpu`, `ProcMem`, `ProcDisk`, `Audio`,
+`Network`, `Uptime`, `Clock`, `Window`, `Workspace`, `Command`, `EnvVar`,
+`StaticText`) are still accepted, so existing configs keep loading;
+`piuma-setup` saves back exactly the name it loaded.
 
 ### Styling Features
 - **Hover Effects**: Color changes on mouse hover
@@ -86,7 +98,7 @@ Example configuration:
           {
             "name": "CPU",
             "description": "CPU usage percentage",
-            "source": { "type": "ProcCpu" },
+            "source": { "type": "perc_cpu" },
             "text_color": "#ffaa00",
             "bg_color": "#333333",
             "text_color_hover": "#ffffff",
@@ -124,6 +136,47 @@ only when it sets `border_color`, otherwise the whole group comes from
 `panel.section_defaults`. `bg_color`/`text_color` are single keys: the
 section value when set, otherwise the defaults, the panel
 `default_bg_color`/`default_text_color`, then the built-in ones.
+
+### Sensor sources
+
+Each sensor's `source` object has a `type` plus the parameters listed
+(`—` = none). Output examples from a real run:
+
+| `type` | output | params |
+|---|---|---|
+| `perc_cpu` | CPU usage (`4,8`) | — |
+| `perc_gpu` | NVIDIA GPU utilization (`12`) | — |
+| `perc_mem` | RAM used percentage (`45%`) | — |
+| `perc_swap` | swap used percentage (`0%`) | — |
+| `perc_disk` | root fs used percentage (`66%`) | — |
+| `perc_battery` | battery charge percentage (`80%`) | — |
+| `perc_backlight` | backlight brightness percentage (`31%`) | — |
+| `perc_volume` | mixer volume percentage (`50%`) | `device` (default `Master`) |
+| `used_mem` | RAM used (`14353 MB`) | — |
+| `used_swap` | swap used (`0 MB`) | — |
+| `used_disk` | root fs used (`619G`) | — |
+| `used_battery` | battery energy (`64.0 Wh`) | — |
+| `used_netdown` | interface download rate (`1.6 KB/s`) | `interface` |
+| `used_netup` | interface upload rate (`66 B/s`) | `interface` |
+| `total_mem` | RAM total (`31807 MB`) | — |
+| `total_swap` | swap total (`31806 MB`) | — |
+| `total_disk` | root fs size (`950G`) | — |
+| `total_battery` | full battery energy (`80.0 Wh`) | — |
+| `detail_mem` | RAM used/total (`14353/31807 MB`) | — |
+| `detail_swap` | swap used/total (`0/31806 MB`) | — |
+| `detail_disk` | fs used/total (`619G/950G`) | — |
+| `temp_cpu` | CPU package temperature (`65°C`, hwmon `coretemp`) | — |
+| `net_state` | interface state (`connected`) | `interface` |
+| `uptime` | uptime (`up 2 hours, 30 minutes`) | — |
+| `clock` | time (`10:12:42`); `format: "date"` = date only | `format` |
+| `window` | focused window title | — |
+| `workspace` | current workspace | — |
+| `command` | shell command stdout | `command` |
+| `env_var` | environment variable value | `env_var` |
+| `static_text` | fixed text | `static_text` |
+
+Network rates are computed from consecutive counter samples: the very
+first refresh can show `N/A` until the second sample arrives.
 
 ## Usage
 

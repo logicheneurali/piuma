@@ -181,22 +181,75 @@ pub struct SensorConfig {
     pub action: Option<String>,
 }
 
+/// Sensor sources. JSON `type` values follow the naming convention:
+/// `perc_` percent, `used_` numeric consumption, `total_` total value,
+/// `detail_` used/total ratio, `temp_` temperature; everything else is
+/// plain lowercase (it has no numeric category). The `alias` on each
+/// renamed variant keeps configs written with the old PascalCase names
+/// loadable forever.
 #[derive(Deserialize, serde::Serialize, Clone)]
 #[serde(tag = "type")]
 #[allow(clippy::upper_variable_names)]
 pub enum SensorSource {
+    #[serde(rename = "command", alias = "Command")]
     Command { command: String },
+    #[serde(rename = "env_var", alias = "EnvVar")]
     EnvVar { env_var: String },
+    #[serde(rename = "static_text", alias = "StaticText")]
     StaticText { static_text: String },
-    NvidiaGpu {},
-    ProcCpu {},
-    ProcMem {},
-    ProcDisk {},
+    #[serde(rename = "perc_cpu", alias = "ProcCpu")]
+    PercCpu {},
+    #[serde(rename = "perc_gpu", alias = "NvidiaGpu")]
+    PercGpu {},
+    #[serde(rename = "perc_mem")]
+    PercMem {},
+    #[serde(rename = "perc_swap")]
+    PercSwap {},
+    #[serde(rename = "perc_disk", alias = "ProcDisk")]
+    PercDisk {},
+    #[serde(rename = "perc_battery")]
+    PercBattery {},
+    #[serde(rename = "perc_backlight")]
+    PercBacklight {},
+    #[serde(rename = "perc_volume", alias = "Audio")]
+    PercVolume { device: String },
+    #[serde(rename = "used_mem")]
+    UsedMem {},
+    #[serde(rename = "used_swap")]
+    UsedSwap {},
+    #[serde(rename = "used_disk")]
+    UsedDisk {},
+    #[serde(rename = "used_battery")]
+    UsedBattery {},
+    #[serde(rename = "used_netdown")]
+    UsedNetdown { interface: String },
+    #[serde(rename = "used_netup")]
+    UsedNetup { interface: String },
+    #[serde(rename = "total_mem")]
+    TotalMem {},
+    #[serde(rename = "total_swap")]
+    TotalSwap {},
+    #[serde(rename = "total_disk")]
+    TotalDisk {},
+    #[serde(rename = "total_battery")]
+    TotalBattery {},
+    #[serde(rename = "detail_mem", alias = "ProcMem")]
+    DetailMem {},
+    #[serde(rename = "detail_swap")]
+    DetailSwap {},
+    #[serde(rename = "detail_disk")]
+    DetailDisk {},
+    #[serde(rename = "temp_cpu")]
+    TempCpu {},
+    #[serde(rename = "uptime", alias = "Uptime")]
     Uptime {},
-    Network { interface: String },
-    Audio { device: String },
+    #[serde(rename = "net_state", alias = "Network")]
+    NetState { interface: String },
+    #[serde(rename = "clock", alias = "Clock")]
     Clock { format: Option<String> },
+    #[serde(rename = "window", alias = "Window")]
     Window {},
+    #[serde(rename = "workspace", alias = "Workspace")]
     Workspace {},
 }
 
@@ -214,10 +267,10 @@ pub fn default_config() -> Config {
         border_radius: None,
         border_type: None,
         sensors: vec![
-            SensorConfig { name: "CPU".to_string(), description: None, source: SensorSource::ProcCpu {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None },
-            SensorConfig { name: "GPU".to_string(), description: None, source: SensorSource::NvidiaGpu {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None },
-            SensorConfig { name: "MEM".to_string(), description: None, source: SensorSource::ProcMem {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None },
-            SensorConfig { name: "DISK".to_string(), description: None, source: SensorSource::ProcDisk {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None },
+            SensorConfig { name: "CPU".to_string(), description: None, source: SensorSource::PercCpu {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None },
+            SensorConfig { name: "GPU".to_string(), description: None, source: SensorSource::PercGpu {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None },
+            SensorConfig { name: "MEM".to_string(), description: None, source: SensorSource::DetailMem {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None },
+            SensorConfig { name: "DISK".to_string(), description: None, source: SensorSource::PercDisk {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None },
             SensorConfig { name: "UPTIME".to_string(), description: None, source: SensorSource::Uptime {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None },
         ],
     };

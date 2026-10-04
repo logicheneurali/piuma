@@ -142,7 +142,7 @@ impl Default for Sensor {
         Sensor {
             name: Some("CPU".to_string()),
             description: None,
-            source_type: "ProcCpu".to_string(),
+            source_type: "perc_cpu".to_string(),
             source_config: SourceConfig::default(),
             text_color: None,
             bg_color: None,
@@ -456,32 +456,34 @@ impl PiumaSetup {
         map.insert("type".to_string(), JsonValue::String(sensor.source_type.clone()));
 
         match sensor.source_type.as_str() {
-            "Network" => {
+            // Parameterized types: the legacy and the canonical name both
+            // write the same file key (old configs round-trip unchanged).
+            "Network" | "net_state" | "used_netdown" | "used_netup" => {
                 if let Some(iface) = &sensor.source_config.interface {
                     map.insert("interface".to_string(), JsonValue::String(iface.clone()));
                 }
             }
-            "Audio" => {
+            "Audio" | "perc_volume" => {
                 if let Some(device) = &sensor.source_config.device {
                     map.insert("device".to_string(), JsonValue::String(device.clone()));
                 }
             }
-            "Clock" => {
+            "Clock" | "clock" => {
                 if let Some(format) = &sensor.source_config.format {
                     map.insert("format".to_string(), JsonValue::String(format.clone()));
                 }
             }
-            "Command" => {
+            "Command" | "command" => {
                 if let Some(cmd) = &sensor.source_config.command {
                     map.insert("command".to_string(), JsonValue::String(cmd.clone()));
                 }
             }
-            "EnvVar" => {
+            "EnvVar" | "env_var" => {
                 if let Some(ev) = &sensor.source_config.env_var {
                     map.insert("env_var".to_string(), JsonValue::String(ev.clone()));
                 }
             }
-            "StaticText" => {
+            "StaticText" | "static_text" => {
                 if let Some(st) = &sensor.source_config.static_text {
                     map.insert("static_text".to_string(), JsonValue::String(st.clone()));
                 }
@@ -1725,6 +1727,84 @@ fn section_view<'a>(state: &'a PiumaSetup, index: usize, section: &'a Section) -
     card(column![header, settings, sensors].spacing(10).width(Length::Fill)).into()
 }
 
+/// Legacy PascalCase source type → canonical prefixed/lowercase name, so
+/// labels and inputs work for old configs too (the stored value itself is
+/// never rewritten on save).
+fn canonical_type<'a>(source_type: &'a str) -> &'a str {
+    match source_type {
+        "ProcCpu" => "perc_cpu",
+        "NvidiaGpu" => "perc_gpu",
+        "ProcMem" => "detail_mem",
+        "ProcDisk" => "perc_disk",
+        "Audio" => "perc_volume",
+        "Network" => "net_state",
+        "Uptime" => "uptime",
+        "Clock" => "clock",
+        "Window" => "window",
+        "Workspace" => "workspace",
+        "Command" => "command",
+        "EnvVar" => "env_var",
+        "StaticText" => "static_text",
+        other => other,
+    }
+}
+
+/// Canonical source types for the picklist, grouped by naming convention:
+/// prefixed categories first (perc_/used_/total_/detail_/temp_), plain
+/// lowercase (no numeric category) last.
+const SOURCE_TYPES: &[&str] = &[
+    // perc_ — percentages
+    "perc_cpu", "perc_gpu", "perc_mem", "perc_swap", "perc_disk",
+    "perc_battery", "perc_backlight", "perc_volume",
+    // used_ — numeric consumption
+    "used_mem", "used_swap", "used_disk", "used_battery",
+    "used_netdown", "used_netup",
+    // total_ — full values
+    "total_mem", "total_swap", "total_disk", "total_battery",
+    // detail_ — used/total ratios
+    "detail_mem", "detail_swap", "detail_disk",
+    // temp_ — temperatures
+    "temp_cpu",
+    // no numeric category
+    "net_state", "uptime", "clock", "window", "workspace",
+    "command", "env_var", "static_text",
+];
+
+/// Friendly label for a canonical source type (shown when it needs no
+/// extra configuration).
+fn source_label(canonical: &str) -> &'static str {
+    match canonical {
+        "perc_cpu" => "CPU usage",
+        "perc_gpu" => "GPU usage",
+        "perc_mem" => "Memory %",
+        "perc_swap" => "Swap %",
+        "perc_disk" => "Disk %",
+        "perc_battery" => "Battery %",
+        "perc_backlight" => "Backlight %",
+        "perc_volume" => "Volume",
+        "used_mem" => "Memory used",
+        "used_swap" => "Swap used",
+        "used_disk" => "Disk used",
+        "used_battery" => "Battery used",
+        "used_netdown" => "Net download rate",
+        "used_netup" => "Net upload rate",
+        "total_mem" => "Memory total",
+        "total_swap" => "Swap total",
+        "total_disk" => "Disk total",
+        "total_battery" => "Battery total",
+        "detail_mem" => "Memory used/total",
+        "detail_swap" => "Swap used/total",
+        "detail_disk" => "Disk used/total",
+        "temp_cpu" => "CPU temperature",
+        "net_state" => "Net state",
+        "uptime" => "Uptime",
+        "clock" => "Clock",
+        "window" => "Focused window",
+        "workspace" => "Workspace",
+        _ => "Sensor",
+    }
+}
+
 /// Sensor card: identity header, source, action, then the collapsible
 /// "Style overrides" block (closed by default: overrides are optional).
 /// `sensor_count` bounds the ▼ arrow (disabled on the last sensor).
@@ -1741,50 +1821,41 @@ fn sensor_view(section_index: usize, sensor_index: usize, sensor_count: usize, s
         .align_y(Alignment::Center)
         .width(Length::Fill);
 
+    // Options = canonical types + the loaded value if it is a legacy name
+    // (faithful round-trip: an old config keeps its old type on save).
+    let mut source_types: Vec<String> = SOURCE_TYPES.iter().map(|s| s.to_string()).collect();
+    if !source_types.iter().any(|t| t == &sensor.source_type) {
+        source_types.push(sensor.source_type.clone());
+    }
     let source_type_picklist = picklist(
-        vec!["ProcCpu", "ProcMem", "ProcDisk", "Uptime", "NvidiaGpu",
-             "Network", "Audio", "Clock", "Window", "Workspace",
-             "Command", "EnvVar", "StaticText"].into_iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        source_types,
         Some(&sensor.source_type),
         move |value| Message::SensorSourceTypeChanged(section_index, sensor_index, value),
     ).width(130);
 
-    let source_config: Element<Message> = match sensor.source_type.as_str() {
-        "ProcCpu" | "ProcMem" | "ProcDisk" | "Uptime" | "NvidiaGpu" | "Window" | "Workspace" => {
-            let label = match sensor.source_type.as_str() {
-                "ProcCpu" => "CPU usage",
-                "ProcMem" => "Memory",
-                "ProcDisk" => "Disk",
-                "Uptime" => "Uptime",
-                "NvidiaGpu" => "Nvidia GPU",
-                "Window" => "Focused window",
-                "Workspace" => "Workspace",
-                _ => "Sensor",
-            };
-            Row::new()
-                .push(text(format!("{} (no extra config)", label)).size(BODY))
-                .spacing(5)
-                .into()
-        }
-        "Network" => input("Interface", sensor.source_config.interface.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "interface".to_string(), value))
+    let source_config: Element<Message> = match canonical_type(&sensor.source_type) {
+        "net_state" | "used_netdown" | "used_netup" => input("Interface", sensor.source_config.interface.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "interface".to_string(), value))
             .width(Length::Fill)
             .into(),
-        "Audio" => input("Device", sensor.source_config.device.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "device".to_string(), value))
+        "perc_volume" => input("Device", sensor.source_config.device.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "device".to_string(), value))
             .width(Length::Fill)
             .into(),
-        "Clock" => input("Format", sensor.source_config.format.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "format".to_string(), value))
+        "clock" => input("Format", sensor.source_config.format.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "format".to_string(), value))
             .width(Length::Fill)
             .into(),
-        "Command" => input("Command", sensor.source_config.command.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "command".to_string(), value))
+        "command" => input("Command", sensor.source_config.command.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "command".to_string(), value))
             .width(Length::Fill)
             .into(),
-        "EnvVar" => input("Env Var", sensor.source_config.env_var.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "env_var".to_string(), value))
+        "env_var" => input("Env Var", sensor.source_config.env_var.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "env_var".to_string(), value))
             .width(Length::Fill)
             .into(),
-        "StaticText" => input("Text", sensor.source_config.static_text.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "text".to_string(), value))
+        "static_text" => input("Text", sensor.source_config.static_text.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "text".to_string(), value))
             .width(Length::Fill)
             .into(),
-        _ => Row::new().spacing(5).into(),
+        other => Row::new()
+            .push(text(format!("{} (no extra config)", source_label(other))).size(BODY))
+            .spacing(5)
+            .into(),
     };
 
     let source = form_cell("Source", Row::new()
