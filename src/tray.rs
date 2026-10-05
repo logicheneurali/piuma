@@ -771,8 +771,9 @@ async fn drive(sender: &Sender<Message>) -> zbus::Result<()> {
     }
 }
 
-/// Sleep without pulling in a timer dependency: a thread wakes the future.
-async fn delay(d: Duration) {
+/// Sleep without pulling in a timer dependency: a thread wakes the future
+/// (shared with `notifications.rs` for its expiry loop).
+pub(crate) async fn delay(d: Duration) {
     let (tx, rx) = oneshot::channel::<()>();
     std::thread::spawn(move || {
         std::thread::sleep(d);

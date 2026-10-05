@@ -97,7 +97,23 @@ pub struct PanelConfig {
     pub sensor_defaults: Option<SensorDefaults>,
     /// Style applied to every section; per-section values take precedence.
     pub section_defaults: Option<SectionDefaults>,
+    /// Freedesktop Desktop Notifications server (`notifications.rs`);
+    /// present ⇔ the D-Bus server runs.
+    pub notifications: Option<NotificationsConfig>,
     pub sections: Vec<SectionConfig>,
+}
+
+/// `panel.notifications`: tunes the D-Bus server (the block's presence
+/// is what enables it). All fields optional — defaults apply.
+#[derive(Deserialize, serde::Serialize, Clone)]
+pub struct NotificationsConfig {
+    /// Auto-expiry used when an app passes `-1` (default 5000 ms).
+    pub default_timeout_ms: Option<u64>,
+    /// Entries kept for the sensor's scroll history (default 20).
+    pub history_size: Option<u32>,
+    /// Honour `replaces_id` (default true; false records every call as a
+    /// new notification).
+    pub replace_existing: Option<bool>,
 }
 
 /// Style values applied to every sensor unless the sensor overrides them:
@@ -255,6 +271,11 @@ pub enum SensorSource {
     /// rendering and the whole D-Bus side live in `tray.rs`.
     #[serde(rename = "tray")]
     Tray {},
+    /// Desktop Notifications: shows the newest active notification; the
+    /// D-Bus server itself lives in `notifications.rs` (enabled by the
+    /// `panel.notifications` block).
+    #[serde(rename = "notifications")]
+    Notifications {},
 }
 
 // ── defaults ────────────────────────────────────────────────────────
@@ -292,6 +313,7 @@ pub fn default_config() -> Config {
             thickness: None,
             sensor_defaults: None,
             section_defaults: None,
+            notifications: None,
             sections: vec![section],
         },
     }

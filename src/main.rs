@@ -27,6 +27,7 @@ use iced_exwlshell::settings::{LayerShellSettings, LayerSize, StartMode};
 use iced_exwlshell::to_layer_message;
 
 mod config;
+mod notifications;
 mod sensor_runner;
 mod sensors;
 mod tray;
@@ -133,6 +134,8 @@ enum Message {
     SensorScrolled(usize, usize, Option<bool>),
     /// Tray state changed (item added/removed/updated): rebuild now.
     TrayItemsChanged,
+    /// A notification arrived, was replaced, expired or closed: rebuild.
+    NotificationsChanged,
     /// Tray icon pressed: (bus, path, button); `tray.rs` computes the
     /// screen coordinates when the action is spawned.
     TrayIconPressed(String, String, tray::TrayButton),
@@ -574,6 +577,11 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             // once instead of waiting for the next tick (same full path).
             update(panel, Message::Tick(Instant::now()))
         }
+        Message::NotificationsChanged => {
+            // A notification arrived, was replaced, expired or closed:
+            // rebuild at once (same full path as the tray poke).
+            update(panel, Message::Tick(Instant::now()))
+        }
         Message::TrayIconPressed(bus, path, button) => {
             // Foreground thread only queues the D-Bus call (tray.rs spawns
             // its own thread), so the UI never blocks on the item.
@@ -665,13 +673,27 @@ fn subscription(panel: &Panel) -> Subscription<Message> {
         .flat_map(|section| section.sensors.iter())
         .any(|s| matches!(s.source, config::SensorSource::Tray {}))
         .then(tray::subscription);
+    // The notifications D-Bus server runs only while the block is present
+    // (its subscription claims the bus name at startup, before any client
+    // can activate the name's activator); dropping it releases the name.
+    // `configure` keeps the live settings in step on every (re)build.
+    let notif_sub = panel
+        .config
+        .panel
+        .notifications
+        .as_ref()
+        .map(|cfg| {
+            notifications::configure(cfg);
+            notifications::subscription()
+        });
     Subscription::batch(
         [
             time::every(std::time::Duration::from_secs(1)).map(|now| Message::Tick(now)),
             event::listen().map(Message::IcedEvent),
         ]
         .into_iter()
-        .chain(tray_sub),
+        .chain(tray_sub)
+        .chain(notif_sub),
     )
 }
 

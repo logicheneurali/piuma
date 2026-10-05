@@ -1,6 +1,7 @@
 //! Generic sensor runner — executes sensor sources and returns their values.
 
 use crate::config::SensorSource;
+use crate::notifications;
 use crate::sensors;
 
 /// Run a sensor source and return its formatted value.
@@ -62,5 +63,7 @@ pub fn run(source: &SensorSource) -> String {
         // Tray items carry no text: the icons come from the shared tray
         // state (see `tray.rs`), rendered by the view directly.
         SensorSource::Tray {} => String::new(),
+        // Newest active notification's summary (see `notifications.rs`).
+        SensorSource::Notifications {} => notifications::display_value(),
     }
 }
