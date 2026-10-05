@@ -10,9 +10,10 @@
 //! and never replaces a name (per the agreed v1 decisions).
 //!
 //! * every notification goes into a bounded history (`history_size`);
-//!   expiry (reason 1) and `CloseNotification` (reason 2) only mark the
-//!   entry closed and emit the signal — closed entries stay in the
-//!   history, which is what the sensor scroll (F2) browses;
+//!   expiry (reason 1), a user dismissal from the popup (reason 2) and
+//!   `CloseNotification` (reason 3) only mark the entry closed and emit
+//!   the signal — closed entries stay in the history, which is what the
+//!   sensor scroll (F2) browses;
 //! * `replaces_id` updates in place — same id, fresh deadline, active
 //!   again — unless `replace_existing` is disabled;
 //! * urgency 2 (critical) never auto-expires; `expire_timeout` `0` never
@@ -45,9 +46,11 @@ const NOTIF_NAME: &str = "org.freedesktop.Notifications";
 const NOTIF_PATH: &str = "/org/freedesktop/Notifications";
 const NOTIF_IFACE: &str = "org.freedesktop.Notifications";
 
-/// Spec reason codes: 1 = expired, 2 = closed by `CloseNotification`.
+/// Spec reason codes (Table 8): 1 = expired, 2 = dismissed by the user,
+/// 3 = closed by a `CloseNotification` call.
 const REASON_EXPIRED: u32 = 1;
-const REASON_CLOSED: u32 = 2;
+const REASON_DISMISSED: u32 = 2;
+const REASON_CLOSED: u32 = 3;
 /// Longest summary the sensor prints (bars must not stretch).
 const MAX_SUMMARY: usize = 60;
 
@@ -72,14 +75,14 @@ const DEFAULTS: Settings = Settings {
 
 static SETTINGS: RwLock<Settings> = RwLock::new(DEFAULTS);
 
-/// Image payload from the spec's `image-data` hint, validated at insert
-/// (8-bit samples, rows cover `rowstride * height`). The popup resolves
-/// priority image-data > image-path > app_icon (F3).
+/// Image payload from the spec's `image-data` hint, repacked at insert
+/// to tight RGBA (row padding stripped, RGB expanded), so the popup can
+/// draw it with `Handle::from_rgba` directly. Cards resolve priority
+/// image-data > image-path > app_icon.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ImageData {
     pub width: i32,
     pub height: i32,
-    pub has_alpha: bool,
     pub data: Vec<u8>,
 }
 
@@ -101,7 +104,7 @@ pub struct Notification {
     /// Flat key/label pairs; the `"default"` key is the primary action.
     pub actions: Vec<String>,
     pub received: Instant,
-    /// Reason once closed (1/2); `None` while active.
+    /// Reason once closed (1/2/3); `None` while active.
     pub closed: Option<u32>,
     expires_at: Option<Instant>,
 }
@@ -208,15 +211,32 @@ fn displayed() -> Option<Notification> {
 
 /// Click on the sensor: run the shown entry's spec `default` action by
 /// telling the app (`ActionInvoked`); no-op without a `default` key or
-/// without anything shown. The emit runs on the tray's shared blocking
-/// connection in a background thread (UI never blocks on D-Bus).
+/// without anything shown.
 pub fn invoke_default() {
-    let Some(n) = displayed() else {
-        return;
-    };
+    if let Some(n) = displayed() {
+        invoke(&n);
+    }
+}
+
+/// Click on a popup card: the same for the entry with `id`; a stale id
+/// (evicted since the snapshot) is a no-op.
+pub fn invoke_id(id: u32) {
+    let n = HISTORY
+        .read()
+        .ok()
+        .and_then(|hist| hist.iter().find(|n| n.id == id).cloned());
+    if let Some(n) = n {
+        invoke(&n);
+    }
+}
+
+/// Emit `ActionInvoked(id, "default")` on the tray's shared blocking
+/// connection in a background thread (UI never blocks on D-Bus).
+fn invoke(n: &Notification) {
     if !n.actions.iter().any(|a| a == "default") {
         return;
     }
+    let id = n.id;
     std::thread::spawn(move || {
         let Some(conn) = crate::tray::action_connection() else {
             eprintln!("[piuma] notifications: no session connection for ActionInvoked");
@@ -227,11 +247,89 @@ pub fn invoke_default() {
             NOTIF_PATH,
             NOTIF_IFACE,
             "ActionInvoked",
-            &(n.id, "default"),
+            &(id, "default"),
         ) {
             eprintln!("[piuma] notifications: ActionInvoked failed: {e}");
         }
     });
+}
+
+/// User dismissal from the popup (✕ button or card click): mark closed
+/// with the spec's reason 2 and report whether `NotificationClosed` must
+/// fire (first close of a known id).
+pub fn dismiss(id: u32) -> bool {
+    mark_closed(id, REASON_DISMISSED).1
+}
+
+/// Emit `NotificationClosed(id, 2)` for a dismissal taken outside the
+/// D-Bus method (the UI path) — same background-thread pattern as
+/// `invoke`.
+pub fn spawn_closed_signal(id: u32) {
+    std::thread::spawn(move || {
+        let Some(conn) = crate::tray::action_connection() else {
+            eprintln!("[piuma] notifications: no session connection for NotificationClosed");
+            return;
+        };
+        if let Err(e) = conn.emit_signal(
+            None::<&str>,
+            NOTIF_PATH,
+            NOTIF_IFACE,
+            "NotificationClosed",
+            &(id, REASON_DISMISSED),
+        ) {
+            eprintln!("[piuma] notifications: NotificationClosed failed: {e}");
+        }
+    });
+}
+
+// ── popup-facing snapshots (F3) ────────────────────────────────────
+
+/// Icon a card can render: RGBA repacked at insert, or a path from
+/// `image-path`/`app_icon` (a themed icon *name* simply yields no icon).
+pub enum CardIcon {
+    Rgba {
+        width: i32,
+        height: i32,
+        data: Vec<u8>,
+    },
+    Path(String),
+}
+
+/// One popup card: the fields the view draws, cloned out so the history
+/// lock is never held across rendering.
+pub struct Card {
+    pub id: u32,
+    pub summary: String,
+    pub body: String,
+    /// Priority per spec: image-data first, path as fallback.
+    pub icon: Option<CardIcon>,
+}
+
+/// The active notifications, newest first, at most `max` (the stack
+/// shown by the popup window).
+pub fn active_cards(max: usize) -> Vec<Card> {
+    let Ok(hist) = HISTORY.read() else {
+        return Vec::new();
+    };
+    hist.iter()
+        .rev()
+        .filter(|n| n.closed.is_none())
+        .take(max)
+        .map(|n| Card {
+            id: n.id,
+            summary: n.summary.clone(),
+            body: n.body.clone(),
+            icon: n
+                .image
+                .as_ref()
+                .map(|img| CardIcon::Rgba {
+                    width: img.width,
+                    height: img.height,
+                    data: img.data.clone(),
+                })
+                .or_else(|| (!n.icon.is_empty()).then(|| CardIcon::Path(n.icon.clone()))),
+        })
+        .collect()
 }
 
 /// Cut at a char boundary and append `…`.
@@ -325,14 +423,23 @@ fn hint_string(hints: &HashMap<String, OwnedValue>, key: &str) -> Option<String>
     hint(hints, key)?.downcast::<String>().ok()
 }
 
-/// Spec `image-data` hint `(iiibiiay)`, validated: 8-bit samples and a
-/// buffer that covers `rowstride * height` rows (padding allowed).
+/// Spec `image-data` hint `(iiibiiay)` — seven fields (width, height,
+/// rowstride, has_alpha, bits_per_sample, **channels**, data): 8-bit
+/// samples over `rowstride * height` rows, repacked here to tight RGBA
+/// (padding stripped per row, alpha added when the payload is RGB).
 fn parse_image_data(hints: &HashMap<String, OwnedValue>) -> Option<ImageData> {
     let value = hint(hints, "image-data")?;
-    let (width, height, rowstride, has_alpha, bits, data) = value
-        .downcast::<(i32, i32, i32, bool, i32, Vec<u8>)>()
+    let (width, height, rowstride, has_alpha, bits, channels, data) = value
+        .downcast::<(i32, i32, i32, bool, i32, i32, Vec<u8>)>()
         .ok()?;
-    let channels: i64 = if has_alpha { 4 } else { 3 };
+    // Spec: channels is 4 with alpha, 3 without; tolerate a lying
+    // channels by falling back to has_alpha, but never read past 4.
+    let channels = match channels {
+        3 | 4 => channels,
+        _ if has_alpha => 4,
+        _ => 3,
+    };
+    let channels = i64::from(channels);
     let (width, height, rowstride) = (i64::from(width), i64::from(height), i64::from(rowstride));
     if width <= 0
         || height <= 0
@@ -342,11 +449,19 @@ fn parse_image_data(hints: &HashMap<String, OwnedValue>) -> Option<ImageData> {
     {
         return None;
     }
+    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        let row = &data[(y * rowstride) as usize..];
+        for x in 0..width {
+            let px = &row[(x * channels) as usize..];
+            rgba.extend_from_slice(&px[..3]);
+            rgba.push(if channels == 4 { px[3] } else { 255 });
+        }
+    }
     Some(ImageData {
         width: width as i32,
         height: height as i32,
-        has_alpha,
-        data,
+        data: rgba,
     })
 }
 
@@ -396,7 +511,7 @@ impl Notifications {
         Ok(id)
     }
 
-    /// Close a known notification (reason 2); unknown ids are an error.
+    /// Close a known notification (reason 3); unknown ids are an error.
     async fn close_notification(
         &mut self,
         #[zbus(connection)] conn: &Connection,
@@ -654,32 +769,76 @@ mod tests {
     }
 
     #[test]
-    fn image_data_is_validated() {
+    fn close_reasons_match_the_spec() {
+        assert_eq!(REASON_EXPIRED, 1, "expired");
+        assert_eq!(REASON_DISMISSED, 2, "dismissed by the user");
+        assert_eq!(REASON_CLOSED, 3, "closed by CloseNotification");
+    }
+
+    #[test]
+    fn image_data_is_validated_and_repacked_to_tight_rgba() {
         let _g = fresh();
         use zbus::zvariant::Structure;
         // Build the `(iiibiiay)` hint the way the bus carries it: a
         // structure value wrapped as OwnedValue.
-        let hint_of = |w: i32, h: i32, stride: i32, alpha: bool, bits: i32, data: Vec<u8>| {
-            OwnedValue::try_from(Value::Structure(Structure::from((w, h, stride, alpha, bits, data))))
-                .unwrap()
+        let hint_of = |w: i32, h: i32, stride: i32, alpha: bool, bits: i32, ch: i32, data: Vec<u8>| {
+            OwnedValue::try_from(Value::Structure(Structure::from((
+                w, h, stride, alpha, bits, ch, data,
+            ))))
+            .unwrap()
         };
         let mut hints = HashMap::new();
-        // Valid 2x2 RGBA (rowstride 8).
-        hints.insert("image-data".to_string(), hint_of(2, 2, 8, true, 8, vec![0u8; 16]));
+        // Valid 2x2 RGBA with a tight rowstride: bytes survive as-is.
+        hints.insert(
+            "image-data".to_string(),
+            hint_of(2, 2, 8, true, 8, 4, vec![0u8; 16]),
+        );
         assert_eq!(
             parse_image_data(&hints),
             Some(ImageData {
                 width: 2,
                 height: 2,
-                has_alpha: true,
                 data: vec![0u8; 16],
             })
         );
+        // Row padding is stripped: rowstride 12 over 8 bytes of pixels.
+        let padded: Vec<u8> = (0..24u8).collect();
+        hints.insert(
+            "image-data".to_string(),
+            hint_of(2, 2, 12, true, 8, 4, padded),
+        );
+        let out = parse_image_data(&hints).expect("padded rows accepted");
+        assert_eq!(out.data.len(), 16, "tight RGBA");
+        assert_eq!(&out.data[0..8], &[0, 1, 2, 3, 4, 5, 6, 7], "row 0");
+        assert_eq!(&out.data[8..16], &[12, 13, 14, 15, 16, 17, 18, 19], "row 1");
+        // RGB gains an opaque alpha channel.
+        hints.insert(
+            "image-data".to_string(),
+            hint_of(2, 1, 6, false, 8, 3, vec![10, 20, 30, 40, 50, 60]),
+        );
+        let out = parse_image_data(&hints).expect("rgb accepted");
+        assert_eq!(out.data, vec![10, 20, 30, 255, 40, 50, 60, 255]);
+        // channels wins over a contradictory has_alpha (spec: 4 ⇔ alpha).
+        hints.insert(
+            "image-data".to_string(),
+            hint_of(1, 1, 4, false, 8, 4, vec![1, 2, 3, 4]),
+        );
+        assert_eq!(
+            parse_image_data(&hints).map(|i| i.data),
+            Some(vec![1, 2, 3, 4]),
+            "4 channels keep the alpha byte"
+        );
         // Wrong sample depth.
-        hints.insert("image-data".to_string(), hint_of(2, 2, 8, true, 16, vec![0u8; 16]));
+        hints.insert(
+            "image-data".to_string(),
+            hint_of(2, 2, 8, true, 16, 4, vec![0u8; 16]),
+        );
         assert_eq!(parse_image_data(&hints), None, "bits != 8");
         // Truncated buffer (rowstride*height not covered).
-        hints.insert("image-data".to_string(), hint_of(2, 2, 8, true, 8, vec![0u8; 8]));
+        hints.insert(
+            "image-data".to_string(),
+            hint_of(2, 2, 8, true, 8, 4, vec![0u8; 8]),
+        );
         assert_eq!(parse_image_data(&hints), None, "short data");
         // Absent hint.
         hints.clear();
@@ -754,5 +913,38 @@ mod tests {
         let shown = displayed().expect("browsed entry");
         assert_eq!(shown.id, id);
         assert_eq!(shown.closed, Some(REASON_CLOSED));
+    }
+
+    #[test]
+    fn dismiss_closes_once_with_reason_2_and_cards_stack_newest_first() {
+        let _g = fresh();
+        // Six actives: the stack caps at 5.
+        let mut ids = Vec::new();
+        for i in 0..6 {
+            ids.push(record(0, sample(&format!("n{i}"), 1, None)));
+        }
+        let cards = active_cards(5);
+        assert_eq!(cards.len(), 5, "capped at the stack size");
+        assert_eq!(cards[0].id, ids[5], "newest first");
+        assert_eq!(cards[4].id, ids[1]);
+        assert!(
+            cards.iter().all(|c| c.id != ids[0]),
+            "the 6th (oldest) is not shown"
+        );
+        // Dismiss signals once, with the user's reason, and leaves the stack.
+        assert!(dismiss(ids[5]), "first close signals");
+        assert!(!dismiss(ids[5]), "second close is a no-op");
+        let closed = HISTORY
+            .read()
+            .unwrap()
+            .iter()
+            .find(|n| n.id == ids[5])
+            .unwrap()
+            .closed;
+        assert_eq!(closed, Some(REASON_DISMISSED));
+        assert!(active_cards(5).iter().all(|c| c.id != ids[5]));
+        // Anything else closed (spec reason 3) is off the stack too.
+        mark_closed(ids[4], REASON_CLOSED);
+        assert!(active_cards(5).iter().all(|c| c.id != ids[4]));
     }
 }

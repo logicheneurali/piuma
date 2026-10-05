@@ -8,6 +8,7 @@
 use std::time::{Instant, SystemTime};
 
 use iced::widget::{container, text, Column, Row, MouseArea, Space, Stack};
+use iced::widget::image::Image;
 use iced::{
     Alignment, Background, Color, Element, Event, Length, Rectangle, Size,
     Subscription, Task as Command, Vector,
@@ -22,7 +23,9 @@ use iced::advanced::{mouse, overlay, renderer, Clipboard, Layout, Shell};
 
 use iced_exwlshell::ExWlSettings;
 use iced_exwlshell::daemon;
-use iced_exwlshell::reexport::{Anchor, Layer};
+use iced_exwlshell::reexport::{
+    Anchor, KeyboardInteractivity, Layer, Margin, NewLayerShellSettings, OutputOption,
+};
 use iced_exwlshell::settings::{LayerShellSettings, LayerSize, StartMode};
 use iced_exwlshell::to_layer_message;
 
@@ -54,6 +57,17 @@ const DEFAULT_TEXT_COLOR: Color = Color::from_rgb(0.88, 0.88, 0.94);
 
 /// Internal action identifiers.
 const ACTION_CLOSE_PANEL: &str = "close_panel";
+
+// ── popup card geometry (F3) ────────────────────────────────────────
+// The popup surface is sized to the stack exactly (cards × height +
+// gaps): the region below the stack simply is not surface, so clicks
+// there reach the window underneath with no input-region handling.
+const POPUP_MAX_CARDS: usize = 5;
+const POPUP_WIDTH: u32 = 360;
+const POPUP_CARD_H: u32 = 84;
+const POPUP_CARD_GAP: u32 = 8;
+/// Gap between the screen edges and the popup corner.
+const POPUP_MARGIN: i32 = 8;
 
 // ── model ───────────────────────────────────────────────────────────
 
@@ -116,6 +130,10 @@ struct Panel {
     /// Last known cursor position, window-relative: feeds the screen-coordinate
     /// hints of tray activation (see `tray::hint_point`).
     last_cursor: Option<(f32, f32)>,
+    /// Popup stack window (F3): its id while open, `None` while hidden.
+    popup: Option<iced::window::Id>,
+    /// Card count the popup surface is currently sized for.
+    popup_cards: usize,
 }
 
 // ── messages ────────────────────────────────────────────────────────
@@ -142,6 +160,10 @@ enum Message {
     /// Wheel over a tray icon: (bus, path, scroll units + orientation);
     /// `None` for deltas that carry no usable delta.
     TrayIconScrolled(String, String, Option<(i32, bool)>),
+    /// Click on a popup card: run its spec `default` action, dismiss it.
+    PopupCardClicked(u32),
+    /// Click on a popup card's ✕: dismiss it only (spec reason 2).
+    PopupCardDismissed(u32),
 }
 
 // ── namespace ───────────────────────────────────────────────────────
@@ -561,6 +583,11 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                     }));
                 }
             }
+            // The popup follows the active set (and re-anchors with the
+            // bar on a geometry change) — one place drives its window.
+            if let Some(cmd) = sync_popup(panel, geometry_changed) {
+                cmds.push(cmd);
+            }
             if cmds.is_empty() { Command::none() } else { Command::batch(cmds) }
         }
         Message::IcedEvent(e) => {
@@ -582,6 +609,12 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             // rebuild at once (same full path as the tray poke).
             update(panel, Message::Tick(Instant::now()))
         }
+        Message::PopupCardClicked(id) => {
+            // Whole-card click = the spec's default action, then dismiss.
+            notifications::invoke_id(id);
+            popup_dismiss(panel, id)
+        }
+        Message::PopupCardDismissed(id) => popup_dismiss(panel, id),
         Message::TrayIconPressed(bus, path, button) => {
             // Foreground thread only queues the D-Bus call (tray.rs spawns
             // its own thread), so the UI never blocks on the item.
@@ -723,14 +756,19 @@ fn subscription(panel: &Panel) -> Subscription<Message> {
 
 // ── view ────────────────────────────────────────────────────────────
 
-/// Id of the bar's layer surface, captured on the first render (until
-/// notification popups exist the bar is the only surface, so the first
-/// `view` call is necessarily its own). `LayoutChange` and
+/// Id of the bar's layer surface, captured on the first render of the
+/// bar itself (the popup renders its own tree and never reaches this
+/// line, so the first bar `view` call sets it regardless of the order
+/// in which the surfaces come up). `LayoutChange` and
 /// `ExclusiveZoneChange` carry it to keep targeting the bar once other
 /// surfaces are registered — the multi-surface runtime keys actions by id.
 static BAR_ID: std::sync::OnceLock<iced::window::Id> = std::sync::OnceLock::new();
 
 fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> {
+    // The popup window renders its own tree; only bar calls feed BAR_ID.
+    if panel.popup == Some(window) {
+        return popup_view(panel);
+    }
     let _ = BAR_ID.set(window);
     let font_name = panel.config.panel.font.as_ref().map(|s| s.to_string()).unwrap_or(DEFAULT_FONT.to_string());
     let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
@@ -1397,6 +1435,204 @@ fn panel_anchor(config: &config::Config) -> Anchor {
     }
 }
 
+// ── popup window (F3) ───────────────────────────────────────────────
+
+/// Keep the popup window in step with the active notifications: no
+/// notifications block or nothing active closes it, the first card
+/// opens it (Overlay layer, opposite the bar's edge, exclusive zone 0)
+/// and a count change resizes the surface to the stack's exact height.
+/// `reposition` forces the resize/anchor message (bar geometry changed).
+fn sync_popup(panel: &mut Panel, reposition: bool) -> Option<Command<Message>> {
+    let enabled = panel.config.panel.notifications.is_some();
+    let cards = if enabled {
+        notifications::active_cards(POPUP_MAX_CARDS).len()
+    } else {
+        0
+    };
+    match (panel.popup, cards) {
+        (None, 0) => None,
+        (Some(id), 0) => {
+            panel.popup = None;
+            panel.popup_cards = 0;
+            Some(iced::window::close(id))
+        }
+        (None, n) => {
+            let (id, open) = Message::layershell_open(NewLayerShellSettings {
+                size: popup_size(n),
+                layer: Layer::Overlay,
+                anchor: popup_anchor(&panel.config),
+                exclusive_zone: None,
+                margin: Some(Margin {
+                    top: POPUP_MARGIN,
+                    right: POPUP_MARGIN,
+                    bottom: 0,
+                    left: 0,
+                }),
+                keyboard_interactivity: KeyboardInteractivity::None,
+                output_option: OutputOption::LastOutput,
+                namespace: Some("piuma-notifications".to_string()),
+                ..Default::default()
+            });
+            panel.popup = Some(id);
+            panel.popup_cards = n;
+            Some(open)
+        }
+        (Some(id), n) if reposition || n != panel.popup_cards => {
+            panel.popup_cards = n;
+            Some(Command::done(Message::LayoutChange {
+                id,
+                anchor: popup_anchor(&panel.config),
+                size: popup_size(n),
+            }))
+        }
+        _ => None,
+    }
+}
+
+/// Surface size for a stack of `cards`: exact, so there is no dead
+/// (click-blocking) surface below the last card.
+fn popup_size(cards: usize) -> LayerSize {
+    let n = cards as u32;
+    LayerSize::px(POPUP_WIDTH, n * POPUP_CARD_H + n.saturating_sub(1) * POPUP_CARD_GAP)
+}
+
+/// Right-hand corner opposite to the bar's edge: a bottom bar leaves
+/// the top corner, a top bar the bottom one, side bars the top corner.
+fn popup_anchor(config: &config::Config) -> Anchor {
+    let bar = panel_anchor(config);
+    if bar == Anchor::Top {
+        Anchor::Bottom | Anchor::Right
+    } else {
+        Anchor::Top | Anchor::Right
+    }
+}
+
+/// Dismiss a popup card: close the entry with the user's reason (and
+/// its `NotificationClosed` signal), refresh the sensor text at once
+/// and resize the stack.
+fn popup_dismiss(panel: &mut Panel, id: u32) -> Command<Message> {
+    if notifications::dismiss(id) {
+        notifications::spawn_closed_signal(id);
+        refresh_notification_sensor(panel);
+    }
+    sync_popup(panel, false).unwrap_or_else(Command::none)
+}
+
+/// Rewrite every `notifications` sensor's value in place after a UI
+/// change (the next tick confirms it), like the scroll/click arms do.
+fn refresh_notification_sensor(panel: &mut Panel) {
+    let value = notifications::display_value();
+    for (si, sec) in panel.config.panel.sections.iter().enumerate() {
+        for (sni, s) in sec.sensors.iter().enumerate() {
+            if matches!(s.source, config::SensorSource::Notifications {}) {
+                if let Some(sv) = panel
+                    .sections
+                    .get_mut(si)
+                    .and_then(|sec| sec.sensors.get_mut(sni))
+                {
+                    sv.value = value.clone();
+                }
+            }
+        }
+    }
+}
+
+/// The popup stack: one card per active notification (newest on top).
+/// The content block is one MouseArea (click → `PopupCardClicked` =
+/// default action + dismiss) and the ✕ a separate MouseArea inside the
+/// same card, so the two targets never overlap.
+fn popup_view(panel: &Panel) -> Element<'_, Message> {
+    let bg = panel
+        .config
+        .panel
+        .default_bg_color
+        .as_ref()
+        .and_then(|s| config::parse_color(s).ok())
+        .unwrap_or(DEFAULT_BG_COLOR);
+    let fg = panel
+        .config
+        .panel
+        .default_text_color
+        .as_ref()
+        .and_then(|s| config::parse_color(s).ok())
+        .unwrap_or(DEFAULT_TEXT_COLOR);
+    let bold = Font {
+        weight: iced::font::Weight::Bold,
+        ..Font::with_name(DEFAULT_FONT)
+    };
+
+    let mut stack: Column<'_, Message> = Column::new().spacing(POPUP_CARD_GAP as f32);
+    for card in notifications::active_cards(POPUP_MAX_CARDS) {
+        // Icon: image-data wins, a real file path follows; anything else
+        // (e.g. a themed icon name) renders without an icon.
+        let icon: Option<Image> = match &card.icon {
+            Some(notifications::CardIcon::Rgba { width, height, data }) => Some(
+                Image::new(iced::widget::image::Handle::from_rgba(
+                    *width as u32,
+                    *height as u32,
+                    data.clone(),
+                ))
+                .width(32)
+                .height(32)
+                .content_fit(iced::ContentFit::Contain),
+            ),
+            Some(notifications::CardIcon::Path(p)) => std::path::Path::new(p)
+                .exists()
+                .then(|| {
+                    Image::new(iced::widget::image::Handle::from_path(p.clone()))
+                        .width(32)
+                        .height(32)
+                        .content_fit(iced::ContentFit::Contain)
+                }),
+            None => None,
+        };
+        let mut lines: Column<'_, Message> = Column::new()
+            .spacing(2)
+            .push(text(card.summary).size(15).font(bold).color(fg).width(Length::Fill));
+        if !card.body.is_empty() {
+            lines = lines.push(text(card.body).size(12).color(fg).width(Length::Fill));
+        }
+        let mut content = Row::new()
+            .spacing(8)
+            .align_y(Alignment::Center);
+        if let Some(icon) = icon {
+            content = content.push(icon);
+        }
+        let content = content
+            .push(lines.width(Length::Fill))
+            .width(Length::Fill);
+        let card_row: Row<'_, Message> = Row::new()
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .push(MouseArea::new(content).on_press(Message::PopupCardClicked(card.id)))
+            // The ✕ gets 8px of padding: a 14px glyph alone is too small
+            // a target, and its MouseArea must not overlap the card's.
+            .push(MouseArea::new(
+                container(text("✕").size(14).color(fg)).padding(8),
+            ).on_press(Message::PopupCardDismissed(card.id)));
+        stack = stack.push(
+            container(card_row)
+                .width(Length::Fill)
+                .height(Length::Fixed(POPUP_CARD_H as f32))
+                .padding(12)
+                .clip(true)
+                .style(move |_theme| ContainerStyle {
+                    background: Some(Background::Color(bg)),
+                    border: iced::Border {
+                        width: 1.0,
+                        color: fg.scale_alpha(0.15),
+                        radius: 10.0.into(),
+                    },
+                    ..ContainerStyle::default()
+                }),
+        );
+    }
+    container(stack)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
 // ── style ───────────────────────────────────────────────────────────
 
 fn style(_panel: &Panel, _theme: &iced::Theme) -> iced::theme::Style {
@@ -1466,6 +1702,8 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         last_anchor: anchor,
                         last_exclusive_zone: zone,
                         last_cursor: None,
+                        popup: None,
+                        popup_cards: 0,
                     }
                 },
                 namespace,
