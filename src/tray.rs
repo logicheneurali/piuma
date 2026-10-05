@@ -19,6 +19,7 @@
 //! and is poked with `Message::TrayItemsChanged` so changes show up at once.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{OnceLock, RwLock};
 use std::time::Duration;
 
@@ -56,8 +57,28 @@ const WATCHER_PATHS: &[&str] = &[
 /// Conventional item path when registration carries a bus name only.
 const DEFAULT_ITEM_PATH: &str = "/StatusNotifierItem";
 
-/// Icon edge in pixels rendered on the bar.
+/// Default icon edge in pixels, before the bar knows its geometry;
+/// `icon_target()` starts here.
 pub const ICON_SIZE: u16 = 16;
+/// Current icon edge: main.rs stores the usable height of the tray
+/// sensor box on every config load, so icons fill their sensor and never
+/// overflow it. The widgets (`row`) and the asset resolution
+/// (`best_pixmap`, `resolve_image`) all read it. Relaxed ordering: a
+/// stale read only means an icon scales slightly off until the next tick.
+static ICON_TARGET: AtomicU16 = AtomicU16::new(ICON_SIZE);
+
+/// The icon edge in px the bar renders at right now.
+pub fn icon_target() -> u16 {
+    ICON_TARGET.load(Ordering::Relaxed)
+}
+
+/// Store the icon edge (main computes it from the sensor's usable height).
+/// Already-resolved items are not re-fetched: svg/named art scales with
+/// the widget anyway, raster art scales at render time and is picked at
+/// the new size on the item's next refresh.
+pub fn set_icon_target(size: u16) {
+    ICON_TARGET.store(size, Ordering::Relaxed);
+}
 /// Qt scroll convention: 120 units per wheel notch; this stack reports
 /// 15 px per notch, so pixels are scaled by 8.
 const SCROLL_UNITS_PER_PIXEL: f32 = 8.0;
@@ -230,7 +251,7 @@ fn tooltip_string(title: &str, text: &str) -> String {
 
 /// Prefer the declared size closest to what the bar renders.
 fn best_pixmap(pixmaps: &[(i32, i32, Vec<u8>)]) -> Option<&(i32, i32, Vec<u8>)> {
-    let target = i32::from(ICON_SIZE);
+    let target = i32::from(icon_target());
     pixmaps
         .iter()
         .filter(|(w, h, data)| *w > 0 && *h > 0 && data.len() == (*w as usize * *h as usize * 4))
@@ -242,7 +263,7 @@ fn best_pixmap(pixmaps: &[(i32, i32, Vec<u8>)]) -> Option<&(i32, i32, Vec<u8>)> 
 fn resolve_image(name: &str, pixmaps: &[(i32, i32, Vec<u8>)]) -> Option<TrayImage> {
     if !name.is_empty() {
         if let Some(path) = freedesktop_icons::lookup(name)
-            .with_size(ICON_SIZE)
+            .with_size(icon_target())
             .with_theme(icon_theme())
             .find()
         {
@@ -862,7 +883,8 @@ pub struct Style {
     pub padding: u16,
 }
 
-/// The tray sensor's content: one widget per item at `ICON_SIZE`, with the
+/// The tray sensor's content: one widget per item at the current icon
+/// target (`icon_target()`, sized by main to the sensor's usable height), with the
 /// item's tooltip and its own mouse handling (left/middle/right press →
 /// `Activate`/`SecondaryActivate`/`ContextMenu`, wheel → `Scroll`).
 /// Built from a snapshot, so messages carry the item's bus name + path —
@@ -872,7 +894,7 @@ pub struct Style {
 pub fn row<'a>(icons: &'a [TrayIcon], font_size: u32, style: &Style) -> Element<'a, Message> {
     let mut row = Row::new().spacing(4);
     for icon in icons {
-        let size = Length::Fixed(f32::from(ICON_SIZE));
+        let size = Length::Fixed(f32::from(icon_target()));
         let art: Element<'a, Message> = match &icon.image {
             TrayImage::File(p) if icon.image.is_svg() => {
                 iced::widget::svg(iced::widget::svg::Handle::from_path(p.clone()))

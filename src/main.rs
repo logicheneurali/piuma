@@ -44,6 +44,10 @@ static mut SCREEN_HEIGHT: u32 = 1080;
 const DEFAULT_FONT: &str = "Noto Sans";
 const DEFAULT_FONT_SIZE: u32 = 14;
 const DEFAULT_HEIGHT: u32 = 32;
+/// Padding the section content Row/Column adds on every side: used by the
+/// layout below and by the tray icon size formula (single source, the
+/// formula must match what the view really draws).
+const SECTION_CONTENT_PAD: u16 = 4;
 const DEFAULT_BG_COLOR: Color = Color::from_rgba(0.06, 0.06, 0.08, 0.85);
 const DEFAULT_TEXT_COLOR: Color = Color::from_rgb(0.88, 0.88, 0.94);
 
@@ -525,6 +529,9 @@ fn update(panel: &mut Panel, message: Message, _time: Instant) -> Command<Messag
                 });
             }
             panel.sections = sections;
+            // Icons size to the space their sensor box really has; both the
+            // view and the icon resolution read tray::icon_target.
+            update_tray_icon_target(panel);
             let mut cmds: Vec<Command<Message>> = Vec::new();
             if geometry_changed {
                 // Resize/re-anchor the layer surface at runtime; the view
@@ -824,10 +831,10 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
                     .size(font_size.saturating_add(2))
                     .font(font_obj)
             ).align_x(Alignment::Center);
-            let title_el: Element<'a, Message> = title_widget.padding(4).into();
+            let title_el: Element<'a, Message> = title_widget.padding(SECTION_CONTENT_PAD).into();
             let sensor_col = Column::new()
                 .extend(sensor_widgets)
-                .padding(4);
+                .padding(SECTION_CONTENT_PAD);
             // `stretch` here means: vertical section in a vertical panel ->
             // fill the thickness (width) so the boxes stretch; the title stays
             // content-sized and is centred above them.
@@ -843,7 +850,7 @@ fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
             let row = Row::new()
                 .extend(sensor_widgets)
                 .spacing(8)
-                .padding(4);
+                .padding(SECTION_CONTENT_PAD);
             // `stretch` here means: horizontal section in a horizontal panel ->
             // fill the thickness (height) so the boxes stretch.
             let row = if stretch { row.height(Length::Fill) } else { row };
@@ -1202,6 +1209,59 @@ fn panel_thickness(config: &config::Config) -> u32 {
     config.panel.thickness.unwrap_or(DEFAULT_HEIGHT).max(1)
 }
 
+/// Icon edge (px) that fits inside a tray sensor box: panel thickness minus
+/// everything the layout draws on the thickness axis inside it — section
+/// border and content padding on both sides, the section title when sensors
+/// are stacked vertically (`title_extra`), and the sensor's own padding and
+/// border — clamped to a usable range so a hairline bar and a very thick
+/// bar both stay sane.
+fn tray_icon_target(
+    thickness: u32,
+    section_border: u32,
+    title_extra: u32,
+    padding: u32,
+    border: u32,
+) -> u16 {
+    let chrome =
+        2 * (section_border + u32::from(SECTION_CONTENT_PAD) + padding + border) + title_extra;
+    thickness.saturating_sub(chrome).clamp(4, 48) as u16
+}
+
+/// Recompute `tray::icon_target` from the built sections (every tick and on
+/// every reload): the smallest fit across all tray sensors wins, so one icon
+/// size serves the whole bar and no tray sensor overflows. The stacked-title
+/// term applies only to vertically laid out sections, where the title shares
+/// the thickness axis; with no tray sensor at all the target is left alone.
+fn update_tray_icon_target(panel: &Panel) {
+    let thickness = panel_thickness(&panel.config);
+    let font = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
+    let mut smallest: Option<u16> = None;
+    for section in &panel.sections {
+        // Title height as the view draws it: text (font + 2) in a box
+        // padded SECTION_CONTENT_PAD on both sides.
+        let title_extra = if section.layout == "vertical" && !section.name.is_empty() {
+            font + 2 + 2 * u32::from(SECTION_CONTENT_PAD)
+        } else {
+            0
+        };
+        for sensor in &section.sensors {
+            if sensor.tray.is_some() {
+                let target = tray_icon_target(
+                    thickness,
+                    u32::from(section.border_width),
+                    title_extra,
+                    u32::from(sensor.padding),
+                    u32::from(sensor.border_width),
+                );
+                smallest = Some(smallest.map_or(target, |m| m.min(target)));
+            }
+        }
+    }
+    if let Some(target) = smallest {
+        tray::set_icon_target(target);
+    }
+}
+
 /// Panel size (as the LayerSurface requests it).
 ///
 /// The surface matches the screen on the axis *perpendicular* to the panel
@@ -1419,4 +1479,34 @@ fn parse_config_arg() -> Option<String> {
         i += 1;
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tray_icon_target;
+
+    /// A bare 26px bar: only the section content padding (4px a side).
+    #[test]
+    fn tray_icon_target_subtracts_section_padding() {
+        assert_eq!(tray_icon_target(26, 0, 0, 0, 0), 18);
+    }
+
+    /// Section border + sensor padding/border, both sides, subtracted too.
+    #[test]
+    fn tray_icon_target_subtracts_chrome() {
+        assert_eq!(tray_icon_target(44, 1, 0, 6, 2), 44 - 2 - 8 - 12 - 4);
+    }
+
+    /// A stacked section title eats thickness as well (font 14 → 14+2+8).
+    #[test]
+    fn tray_icon_target_subtracts_stacked_title() {
+        assert_eq!(tray_icon_target(44, 0, 24, 0, 0), 44 - 8 - 24);
+    }
+
+    /// Clamped: never smaller than 4px, never larger than 48px.
+    #[test]
+    fn tray_icon_target_clamps() {
+        assert_eq!(tray_icon_target(10, 0, 0, 0, 0), 4);
+        assert_eq!(tray_icon_target(400, 0, 0, 0, 0), 48);
+    }
 }

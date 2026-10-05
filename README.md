@@ -205,6 +205,10 @@ registers, the sensor renders nothing at all (no empty box):
   `NeedsAttention` swap to their attention icon and get a red frame;
   `NewIcon` / `NewStatus` / `NewToolTip` refresh the icon immediately,
   and a dead tray app removes its icon at once.
+- **Sizing**: icons scale to the usable height of their sensor box —
+  thickness minus section/sensor padding and borders (and the section
+  title where sensors stack vertically) — clamped to 4–48px, so they
+  fill the sensor and never overflow it.
 - **Limitations (v1)**: the legacy XEmbed tray and `OverlayIcon*`
   overlays are not implemented; menus are not rendered host-side — the
   wheel/right-click are forwarded to the item instead (a `dbusmenu`
