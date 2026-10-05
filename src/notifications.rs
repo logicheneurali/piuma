@@ -43,6 +43,7 @@ use crate::Message;
 
 const NOTIF_NAME: &str = "org.freedesktop.Notifications";
 const NOTIF_PATH: &str = "/org/freedesktop/Notifications";
+const NOTIF_IFACE: &str = "org.freedesktop.Notifications";
 
 /// Spec reason codes: 1 = expired, 2 = closed by `CloseNotification`.
 const REASON_EXPIRED: u32 = 1;
@@ -109,6 +110,10 @@ pub struct Notification {
 static HISTORY: RwLock<VecDeque<Notification>> = RwLock::new(VecDeque::new());
 /// Monotonic ids: spec allows any scheme, 1-based and never reused.
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
+/// Sensor scroll position: 0 = live (newest active entry), n > 0 = the
+/// n-th newest received entry (closed ones included). Every arrival
+/// resets it to 0, so the sensor follows what is new by default.
+static SELECTED: AtomicU32 = AtomicU32::new(0);
 
 /// Copy the `panel.notifications` block into the live settings; called
 /// from the subscription gate every time the block is present (cheap and
@@ -140,6 +145,14 @@ pub fn display_value() -> String {
     let Ok(hist) = HISTORY.read() else {
         return String::new();
     };
+    // Browse mode (wheel moved off the live position): show that entry
+    // with its position in the history; an evicted entry falls back live.
+    let sel = SELECTED.load(Ordering::Relaxed);
+    if sel > 0 {
+        if let Some(n) = hist.iter().rev().nth(sel as usize - 1) {
+            return format!("{} ({sel}/{})", truncate(&n.summary, MAX_SUMMARY), hist.len());
+        }
+    }
     let active = hist.iter().filter(|n| n.closed.is_none());
     let mut count = 0usize;
     let mut last: Option<&Notification> = None;
@@ -155,6 +168,70 @@ pub fn display_value() -> String {
         out.push_str(&format!(" ({count})"));
     }
     out
+}
+
+/// Wheel over the sensor: down walks towards the oldest entry, up back
+/// towards live (list convention: newest on top).
+pub fn scroll(up: bool) {
+    if up {
+        SELECTED
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |s| {
+                Some(s.saturating_sub(1))
+            })
+            .ok();
+    } else {
+        // Cap at the history length: index n addresses rev().nth(n - 1).
+        let cap = HISTORY.read().map(|h| h.len()).unwrap_or(0) as u32;
+        SELECTED
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |s| {
+                Some((s + 1).min(cap))
+            })
+            .ok();
+    }
+}
+
+/// The entry the sensor currently shows — what a click acts on (live
+/// position: newest active; browse: that entry, even if closed).
+fn displayed() -> Option<Notification> {
+    let hist = HISTORY.read().ok()?;
+    let sel = SELECTED.load(Ordering::Relaxed);
+    if sel > 0 {
+        if let Some(n) = hist.iter().rev().nth(sel as usize - 1) {
+            return Some(n.clone());
+        }
+    }
+    hist.iter()
+        .filter(|n| n.closed.is_none())
+        .next_back()
+        .cloned()
+}
+
+/// Click on the sensor: run the shown entry's spec `default` action by
+/// telling the app (`ActionInvoked`); no-op without a `default` key or
+/// without anything shown. The emit runs on the tray's shared blocking
+/// connection in a background thread (UI never blocks on D-Bus).
+pub fn invoke_default() {
+    let Some(n) = displayed() else {
+        return;
+    };
+    if !n.actions.iter().any(|a| a == "default") {
+        return;
+    }
+    std::thread::spawn(move || {
+        let Some(conn) = crate::tray::action_connection() else {
+            eprintln!("[piuma] notifications: no session connection for ActionInvoked");
+            return;
+        };
+        if let Err(e) = conn.emit_signal(
+            None::<&str>,
+            NOTIF_PATH,
+            NOTIF_IFACE,
+            "ActionInvoked",
+            &(n.id, "default"),
+        ) {
+            eprintln!("[piuma] notifications: ActionInvoked failed: {e}");
+        }
+    });
 }
 
 /// Cut at a char boundary and append `…`.
@@ -178,6 +255,8 @@ fn record(replace: u32, n: Notification) -> u32 {
         .read()
         .map(|s| *s)
         .unwrap_or(DEFAULTS);
+    // Anything new (or updated) makes the sensor follow it again.
+    SELECTED.store(0, Ordering::Relaxed);
     let mut hist = HISTORY.write().unwrap_or_else(|e| e.into_inner());
     if settings.replace_existing && replace != 0 {
         if let Some(existing) = hist.iter_mut().find(|n| n.id == replace) {
@@ -486,6 +565,7 @@ mod tests {
         let guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         HISTORY.write().unwrap().clear();
         NEXT_ID.store(1, Ordering::Relaxed);
+        SELECTED.store(0, Ordering::Relaxed);
         *SETTINGS.write().unwrap() = DEFAULTS;
         guard
     }
@@ -625,5 +705,54 @@ mod tests {
         let out = display_value();
         assert_eq!(out.chars().count(), MAX_SUMMARY);
         assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn wheel_walks_the_history_and_new_arrivals_reset_to_live() {
+        let _g = fresh();
+        record(0, sample("one", 1, None));
+        record(0, sample("two", 1, None));
+        assert_eq!(display_value(), "two (2)", "live");
+        // Down: newest received (position marker), then the older one.
+        scroll(false);
+        assert_eq!(display_value(), "two (1/2)");
+        scroll(false);
+        assert_eq!(display_value(), "one (2/2)");
+        scroll(false);
+        assert_eq!(display_value(), "one (2/2)", "capped at the oldest");
+        // Up walks back to live.
+        scroll(true);
+        scroll(true);
+        assert_eq!(display_value(), "two (2)", "live again");
+        scroll(true);
+        scroll(true);
+        assert_eq!(display_value(), "two (2)", "saturated at live");
+        // A new notification resets the selection to live.
+        scroll(false);
+        scroll(false);
+        record(0, sample("three", 1, None));
+        assert_eq!(display_value(), "three (3)", "arrival resets to live");
+    }
+
+    #[test]
+    fn displayed_is_the_click_target_of_the_shown_entry() {
+        let _g = fresh();
+        // Nothing shown: no target.
+        assert!(displayed().is_none());
+        let with_action = Notification {
+            actions: vec!["default".into(), "Apri".into()],
+            ..sample("with default", 1, None)
+        };
+        let id = record(0, with_action);
+        let shown = displayed().expect("live entry");
+        assert_eq!(shown.id, id);
+        assert!(shown.actions.iter().any(|a| a == "default"));
+        // Closed entries are unreachable in live mode but not via browse.
+        mark_closed(id, REASON_CLOSED);
+        assert!(displayed().is_none(), "live follows the newest active");
+        scroll(false);
+        let shown = displayed().expect("browsed entry");
+        assert_eq!(shown.id, id);
+        assert_eq!(shown.closed, Some(REASON_CLOSED));
     }
 }

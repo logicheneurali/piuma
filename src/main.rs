@@ -596,7 +596,7 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             }
             Command::none()
         }
-        Message::SensorPressed(_section_index, _sensor_index, action) => {
+        Message::SensorPressed(section_index, sensor_index, action) => {
             let action = action.filter(|a| !a.trim().is_empty());
             match action.as_deref() {
                 Some(ACTION_CLOSE_PANEL) => {
@@ -612,26 +612,50 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                             .spawn();
                     });
                 }
-                None => {}
+                None => {
+                    // No configured action: on a notifications sensor the
+                    // click runs the shown entry's spec `default` action
+                    // (emitted as `ActionInvoked`, other sensors ignore it).
+                    let is_notifications = panel
+                        .config
+                        .panel
+                        .sections
+                        .get(section_index)
+                        .and_then(|sec| sec.sensors.get(sensor_index))
+                        .is_some_and(|s| matches!(s.source, config::SensorSource::Notifications {}));
+                    if is_notifications {
+                        notifications::invoke_default();
+                    }
+                }
             }
             Command::none()
         }
         Message::SensorScrolled(section_index, sensor_index, up) => {
-            // Only volume sensors react to the wheel, and only to usable
-            // deltas; adjust in a background thread (non-blocking, like
-            // the click actions above).
+            // Wheel: the notifications sensor walks its history, volume
+            // sensors adjust the level; both reflect the change in place
+            // (non-blocking, like the click actions above).
             if let Some(up) = up {
-                let device = panel
+                let source = panel
                     .config
                     .panel
                     .sections
                     .get(section_index)
                     .and_then(|sec| sec.sensors.get(sensor_index))
-                    .and_then(|s| match &s.source {
-                        config::SensorSource::PercVolume { device } => Some(device.clone()),
-                        _ => None,
-                    });
-                if let Some(device) = device {
+                    .map(|s| &s.source);
+                if matches!(source, Some(config::SensorSource::Notifications {})) {
+                    notifications::scroll(up);
+                    // Rewrite the value at once; the next tick confirms it.
+                    if let Some(sensor_value) = panel
+                        .sections
+                        .get_mut(section_index)
+                        .and_then(|sec| sec.sensors.get_mut(sensor_index))
+                    {
+                        sensor_value.value = notifications::display_value();
+                    }
+                    return Command::none();
+                }
+                if let Some(config::SensorSource::PercVolume { device }) = source {
+                    let device = device.clone();
                     // Reflect the change on the bar right away (same math as
                     // the backend adjust); the next tick confirms it.
                     if let Some(sensor_value) = panel

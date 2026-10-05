@@ -782,7 +782,9 @@ pub(crate) async fn delay(d: Duration) {
     let _ = rx.await;
 }
 
-fn action_connection() -> Option<&'static zbus::blocking::Connection> {
+/// Shared blocking session connection for outgoing traffic (tray clicks
+/// and scroll, notifications `ActionInvoked` emission).
+pub(crate) fn action_connection() -> Option<&'static zbus::blocking::Connection> {
     static CONN: OnceLock<zbus::blocking::Connection> = OnceLock::new();
     match CONN.get() {
         Some(c) => Some(c),
