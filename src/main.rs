@@ -21,7 +21,7 @@ use iced::advanced::widget::{Operation, Tree, Widget};
 use iced::advanced::{mouse, overlay, renderer, Clipboard, Layout, Shell};
 
 use iced_exwlshell::ExWlSettings;
-use iced_exwlshell::layershell::timed;
+use iced_exwlshell::daemon;
 use iced_exwlshell::reexport::{Anchor, Layer};
 use iced_exwlshell::settings::{LayerShellSettings, LayerSize, StartMode};
 use iced_exwlshell::to_layer_message;
@@ -119,7 +119,7 @@ struct Panel {
 
 // ── messages ────────────────────────────────────────────────────────
 
-#[to_layer_message]
+#[to_layer_message(multi)]
 #[derive(Debug, Clone)]
 enum Message {
     Tick(Instant),
@@ -357,7 +357,10 @@ fn maybe_reload(panel: &mut Panel) -> Option<config::Config> {
 
 // ── update ──────────────────────────────────────────────────────────
 
-fn update(panel: &mut Panel, message: Message, _time: Instant) -> Command<Message> {
+/// Applies a message to the panel. `timed`'s `Instant` parameter was dropped
+/// in the migration to the `daemon` build pattern (multi-surface): each
+/// `Tick` already carries its own `Instant`.
+fn update(panel: &mut Panel, message: Message) -> Command<Message> {
     match message {
         Message::Tick(_) => {
             // Hot reload: pick up config file changes (content and, when
@@ -533,17 +536,27 @@ fn update(panel: &mut Panel, message: Message, _time: Instant) -> Command<Messag
             // view and the icon resolution read tray::icon_target.
             update_tray_icon_target(panel);
             let mut cmds: Vec<Command<Message>> = Vec::new();
-            if geometry_changed {
-                // Resize/re-anchor the layer surface at runtime; the view
-                // already uses the new config for content and alignment.
-                cmds.push(Command::done(Message::LayoutChange {
-                    anchor: panel.last_anchor,
-                    size: panel.last_size,
-                }));
-            }
-            if zone_changed {
-                // Keep hyprland's reserved space in step with the thickness.
-                cmds.push(Command::done(Message::ExclusiveZoneChange(panel.last_exclusive_zone)));
+            // With multiple layer surfaces the runtime routes actions by
+            // surface id: target the bar explicitly. Its id is captured on
+            // the first render, which always precedes this Tick (the guard
+            // only covers a theoretical startup race).
+            if let Some(bar_id) = BAR_ID.get().copied() {
+                if geometry_changed {
+                    // Resize/re-anchor the layer surface at runtime; the view
+                    // already uses the new config for content and alignment.
+                    cmds.push(Command::done(Message::LayoutChange {
+                        id: bar_id,
+                        anchor: panel.last_anchor,
+                        size: panel.last_size,
+                    }));
+                }
+                if zone_changed {
+                    // Keep hyprland's reserved space in step with the thickness.
+                    cmds.push(Command::done(Message::ExclusiveZoneChange {
+                        id: bar_id,
+                        zone_size: panel.last_exclusive_zone,
+                    }));
+                }
             }
             if cmds.is_empty() { Command::none() } else { Command::batch(cmds) }
         }
@@ -559,7 +572,7 @@ fn update(panel: &mut Panel, message: Message, _time: Instant) -> Command<Messag
         Message::TrayItemsChanged => {
             // An item appeared/vanished/was updated: rebuild the sections at
             // once instead of waiting for the next tick (same full path).
-            update(panel, Message::Tick(Instant::now()), _time)
+            update(panel, Message::Tick(Instant::now()))
         }
         Message::TrayIconPressed(bus, path, button) => {
             // Foreground thread only queues the D-Bus call (tray.rs spawns
@@ -664,7 +677,15 @@ fn subscription(panel: &Panel) -> Subscription<Message> {
 
 // ── view ────────────────────────────────────────────────────────────
 
-fn view<'a>(panel: &'a Panel) -> Element<'a, Message> {
+/// Id of the bar's layer surface, captured on the first render (until
+/// notification popups exist the bar is the only surface, so the first
+/// `view` call is necessarily its own). `LayoutChange` and
+/// `ExclusiveZoneChange` carry it to keep targeting the bar once other
+/// surfaces are registered — the multi-surface runtime keys actions by id.
+static BAR_ID: std::sync::OnceLock<iced::window::Id> = std::sync::OnceLock::new();
+
+fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> {
+    let _ = BAR_ID.set(window);
     let font_name = panel.config.panel.font.as_ref().map(|s| s.to_string()).unwrap_or(DEFAULT_FONT.to_string());
     let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
     let _ = &font_name;
@@ -1381,7 +1402,7 @@ fn main() -> Result<(), iced_exwlshell::Error> {
     let handle = std::thread::Builder::new()
         .name("piuma-panel".to_string())
         .spawn(move || {
-            timed(
+            daemon(
                 || {
                     let cfg = unsafe { CONFIG.as_ref().map(|c| c.clone()).unwrap_or_else(|| config::default_config()) };
                     // Initial geometry (size, anchor, exclusive zone) must
@@ -1403,9 +1424,9 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                 },
                 namespace,
                 update,
-                subscription,
                 view,
             )
+            .subscription(subscription)
             .style(style)
             .wl_settings(ExWlSettings {
                 layer_settings: LayerShellSettings {
