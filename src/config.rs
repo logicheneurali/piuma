@@ -412,5 +412,43 @@ mod tests {
         let out = serde_json::to_string(&cfg).expect("config must serialize");
         assert!(out.contains(r#""type":"tray""#), "got: {out}");
     }
+
+    /// `panel.notifications`: presence gates the D-Bus server, missing
+    /// keys fall back to the runtime defaults, and the sensor type must
+    /// parse — this is exactly piuma-setup's pre-save validation.
+    #[test]
+    fn notifications_block_and_sensor_parse() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"panel":{"notifications":{"default_timeout_ms":4000,"history_size":7,"replace_existing":false},"sections":[]}}"#,
+        )
+        .expect("block must parse");
+        let n = cfg.panel.notifications.as_ref().expect("present");
+        assert_eq!(
+            (n.default_timeout_ms, n.history_size, n.replace_existing),
+            (Some(4000), Some(7), Some(false))
+        );
+        // Empty block: present (server on) with absent keys → defaults.
+        let cfg2: Config =
+            serde_json::from_str(r#"{"panel":{"notifications":{},"sections":[]}}"#).unwrap();
+        let n2 = cfg2.panel.notifications.as_ref().expect("presence");
+        assert_eq!(
+            (n2.default_timeout_ms, n2.history_size, n2.replace_existing),
+            (None, None, None)
+        );
+        // Absent: no server.
+        let cfg3: Config = serde_json::from_str(r#"{"panel":{"sections":[]}}"#).unwrap();
+        assert!(cfg3.panel.notifications.is_none());
+        // The sensor type parses and the block survives serialization.
+        let cfg4: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[{"sensors":[{"name":"N","source":{"type":"notifications"}}]}]}}"#,
+        )
+        .expect("sensor must parse");
+        assert!(matches!(
+            cfg4.panel.sections[0].sensors[0].source,
+            SensorSource::Notifications {}
+        ));
+        let out = serde_json::to_string(&cfg).expect("config must serialize");
+        assert!(out.contains(r#""notifications""#), "got: {out}");
+    }
 }
 

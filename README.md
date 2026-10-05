@@ -17,13 +17,28 @@ Sensor `type` values follow a naming convention by category:
 - **`detail_`** – used/total ratio: `detail_mem`, `detail_swap`, `detail_disk`
 - **`temp_`** – temperature: `temp_cpu`
 - **no prefix** – not numeric: `net_state`, `uptime`, `clock`, `window`,
-  `workspace`, `command`, `env_var`, `static_text`, `tray`
+  `workspace`, `command`, `env_var`, `static_text`, `tray`, `notifications`
 
 The old names (`ProcCpu`, `NvidiaGpu`, `ProcMem`, `ProcDisk`, `Audio`,
 `Network`, `Uptime`, `Clock`, `Window`, `Workspace`, `Command`, `EnvVar`,
 `StaticText`) are still accepted, so existing configs keep loading;
 `piuma-setup` converts them to the canonical names on load, so the next
 save writes the new names into `piuma.json`.
+
+### Desktop Notifications
+- **Freedesktop server**: with the `panel.notifications` block present,
+  piuma claims `org.freedesktop.Notifications` on the session bus — apps
+  notify over D-Bus just like with mako/dunst
+- **Popup stack**: cards on the overlay layer in the corner opposite the
+  bar (icon from `image-data`/`image-path`/`app_icon`, summary and
+  markup-stripped body), up to 5 at once; clicking a card runs the
+  notification's `default` action and dismisses it, the ✕ only dismisses
+- **Bar sensor**: the `notifications` source shows the newest active
+  summary with a count; the wheel walks the history (`(selected/total)`),
+  the click runs the shown entry's `default` action
+- **Spec signals**: `NotificationClosed` uses reason 1 (expired),
+  2 (dismissed) and 3 (`CloseNotification`); `ActionInvoked` carries the
+  invoked action key
 
 ### Styling Features
 - **Hover Effects**: Color changes on mouse hover
@@ -176,6 +191,7 @@ Each sensor's `source` object has a `type` plus the parameters listed
 | `env_var` | environment variable value | `env_var` |
 | `static_text` | fixed text | `static_text` |
 | `tray` | system tray icons (StatusNotifierItem) | — |
+| `notifications` | newest active notification (`N6 newest (5)`) | — |
 
 Network rates and the CPU percentage are computed from consecutive
 counter samples (`/proc/net/dev`, `/proc/stat`): the very first refresh
@@ -215,6 +231,49 @@ registers, the sensor renders nothing at all (no empty box):
   host would be needed to draw them); in observer mode registrations
   that carry only an object path (no bus name) cannot be resolved and
   are skipped with a log line.
+
+### Desktop notifications
+
+With the `panel.notifications` block present, piuma claims
+`org.freedesktop.Notifications` on the session bus (a freedesktop
+notification server like mako/dunst) and pops the notifications up as a
+card stack on the overlay layer, in the corner opposite the bar:
+
+```json
+"notifications": {
+  "default_timeout_ms": 5000,
+  "history_size": 20,
+  "replace_existing": true
+}
+```
+
+The block's **presence** enables the whole feature (no block = server off,
+no popup); its keys are optional and fall back to the values above:
+
+- `default_timeout_ms` – fallback expiry when the client passes `-1`;
+  `0` and urgency 2 (critical) never expire on their own.
+- `history_size` – how many entries the wheel-browsable history keeps
+  (the oldest are evicted when it is full; the popup only ever shows
+  the newest 5 active ones).
+- `replace_existing` – honour `replaces_id` (update in place, same id);
+  `false` allocates a new id on every call.
+
+```json
+{ "name": "Notifiche", "source": { "type": "notifications" } }
+```
+
+The `notifications` sensor shows the newest active summary plus
+`(selected/total)` while the wheel browses the history, and a left click
+runs the shown entry's `default` action. On the popup, clicking a card
+does the same (then dismisses the card) and the ✕ only dismisses. The
+server emits the spec signals with the right reasons: 1 (expired),
+2 (dismissed/closed by user), 3 (`CloseNotification`).
+
+- **Limitations (v1)**: no sounds, no persistence across restarts, no
+  do-not-disturb mode; body markup is stripped, actions other than
+  `default` are not rendered (the spec's `activationToken` is ignored);
+  icons come from `image-data`, `image-path` or the `app_icon` path
+  (a themed icon *name* yields no icon).
 
 ### Portability
 

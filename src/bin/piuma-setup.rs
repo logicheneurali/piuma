@@ -1,7 +1,7 @@
 //! Piuma Setup - GUI Configuration Tool
 //! A visual tool to configure Piuma panel settings using iced 0.14
 
-use iced::widget::{button, column, container, scrollable, stack, text, Button, Column, Container, Row, TextInput, Slider, PickList};
+use iced::widget::{button, column, container, scrollable, stack, text, toggler, Button, Column, Container, Row, TextInput, Slider, PickList};
 use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Task, Theme};
 use iced::widget::text::Style as TextStyle;
 use serde_json::{Map, Value as JsonValue};
@@ -31,7 +31,31 @@ pub struct PiumaConfig {
     pub thickness: u32,
     pub sensor_defaults: SensorDefaults,
     pub section_defaults: SectionDefaults,
+    /// `panel.notifications`: presence gates piuma's D-Bus server, so
+    /// `None` and `Some` are meaningful states (the GUI toggle).
+    pub notifications: Option<NotificationsCfg>,
     pub sections: Vec<Section>,
+}
+
+/// The `panel.notifications` block with resolved values: the editor
+/// shows concrete numbers, so enabling writes all three keys (identical
+/// behaviour to omitting them — these are piuma's defaults).
+#[derive(Debug, Clone)]
+pub struct NotificationsCfg {
+    pub default_timeout_ms: u32,
+    pub history_size: u32,
+    pub replace_existing: bool,
+}
+
+/// Mirrors the runtime defaults in `src/notifications.rs` (Settings::DEFAULTS).
+impl Default for NotificationsCfg {
+    fn default() -> Self {
+        Self {
+            default_timeout_ms: 5_000,
+            history_size: 20,
+            replace_existing: true,
+        }
+    }
 }
 
 /// Style defaults for every sensor (style fields only, no action).
@@ -121,6 +145,7 @@ impl Default for PiumaConfig {
             thickness: 32,
             sensor_defaults: SensorDefaults::default(),
             section_defaults: SectionDefaults::default(),
+            notifications: None,
             sections: vec![Section::default()],
         }
     }
@@ -205,6 +230,11 @@ pub enum Message {
     DefaultTextColorChanged(String),
     AnchorChanged(String),
     AlignChanged(String),
+    /// `panel.notifications` editor: presence gates piuma's D-Bus server.
+    NotificationsEnabled(bool),
+    NotificationsTimeoutChanged(u32),
+    NotificationsHistoryChanged(u32),
+    NotificationsReplaceChanged(bool),
     SectionAdded,
     SectionRemoved(usize),
     /// Moves a section one position up/down in the panel order.
@@ -399,6 +429,19 @@ impl PiumaSetup {
             panel.insert("align".to_string(), JsonValue::String(align.clone()));
         }
         panel.insert("thickness".to_string(), JsonValue::Number(self.config.thickness.into()));
+
+        // `panel.notifications`: whole block in or out (it gates the D-Bus
+        // server); the editor writes every key explicitly.
+        if let Some(n) = &self.config.notifications {
+            let mut block = Map::new();
+            block.insert(
+                "default_timeout_ms".to_string(),
+                JsonValue::Number(n.default_timeout_ms.into()),
+            );
+            block.insert("history_size".to_string(), JsonValue::Number(n.history_size.into()));
+            block.insert("replace_existing".to_string(), JsonValue::Bool(n.replace_existing));
+            panel.insert("notifications".to_string(), JsonValue::Object(block));
+        }
 
         // Sensor style defaults: written only when at least one field is set.
         let d = &self.config.sensor_defaults;
@@ -690,6 +733,7 @@ impl PiumaSetup {
             thickness: 32,
             sensor_defaults: SensorDefaults::default(),
             section_defaults: SectionDefaults::default(),
+            notifications: None,
             sections: Vec::new(),
         };
 
@@ -719,6 +763,23 @@ impl PiumaSetup {
         }
         // Absent thickness resets to 32 (the config was reset at the top).
         self.config.thickness = panel.get("thickness").and_then(|v| v.as_u64()).map(|t| t as u32).unwrap_or(32);
+        // `panel.notifications`: block presence gates piuma's D-Bus server;
+        // missing keys resolve to piuma's runtime defaults (5000/20/true).
+        if let Some(block) = panel.get("notifications") {
+            if block.is_object() {
+                let num = |k: &str| block.get(k).and_then(|v| v.as_u64());
+                self.config.notifications = Some(NotificationsCfg {
+                    default_timeout_ms: num("default_timeout_ms")
+                        .unwrap_or(5_000)
+                        .min(u64::from(u32::MAX)) as u32,
+                    history_size: num("history_size").unwrap_or(20).min(u64::from(u32::MAX)) as u32,
+                    replace_existing: block
+                        .get("replace_existing")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true),
+                });
+            }
+        }
         if let Some(obj) = panel.get("sensor_defaults").and_then(|v| v.as_object()) {
             let d = &mut self.config.sensor_defaults;
             for (key, field) in [
@@ -963,6 +1024,30 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
         Message::DefaultTextColorChanged(value) => state.config.default_text_color = if value.is_empty() { None } else { Some(value) },
         Message::AnchorChanged(value) => state.config.anchor = if value.is_empty() { None } else { Some(value) },
         Message::AlignChanged(value) => state.config.align = if value.is_empty() { None } else { Some(value) },
+        Message::NotificationsEnabled(on) => {
+            // Enabling from scratch seeds the defaults; disabling drops the
+            // block, which is what turns piuma's D-Bus server off.
+            state.config.notifications = match (on, state.config.notifications.take()) {
+                (true, Some(prev)) => Some(prev),
+                (true, None) => Some(NotificationsCfg::default()),
+                (false, _) => None,
+            };
+        }
+        Message::NotificationsTimeoutChanged(value) => {
+            if let Some(n) = &mut state.config.notifications {
+                n.default_timeout_ms = value;
+            }
+        }
+        Message::NotificationsHistoryChanged(value) => {
+            if let Some(n) = &mut state.config.notifications {
+                n.history_size = value;
+            }
+        }
+        Message::NotificationsReplaceChanged(value) => {
+            if let Some(n) = &mut state.config.notifications {
+                n.replace_existing = value;
+            }
+        }
         Message::SectionAdded => {
             state.config.sections.push(Section::default());
         }
@@ -1448,6 +1533,7 @@ fn view(state: &PiumaSetup) -> Element<Message> {
     let content = column![
         config_header(state),
         panel_settings(state),
+        notifications_settings(state),
         sensor_defaults_view(state),
         section_defaults_view(state),
         sections_list(state),
@@ -1680,6 +1766,52 @@ fn panel_settings(state: &PiumaSetup) -> Element<Message> {
     .into()
 }
 
+/// The `panel.notifications` editor: the enable toggle is the block's
+/// presence (it turns piuma's D-Bus server on/off), the three fields
+/// are the block's settings; they only exist while the block does.
+fn notifications_settings<'a>(state: &'a PiumaSetup) -> Element<'a, Message> {
+    let enabled = state.config.notifications.is_some();
+    let mut body = column![
+        toggler(enabled)
+            .label("Enable desktop notifications")
+            .on_toggle(Message::NotificationsEnabled)
+    ]
+    .spacing(10);
+
+    if let Some(n) = &state.config.notifications {
+        let (timeout, history, replace) =
+            (n.default_timeout_ms, n.history_size, n.replace_existing);
+        body = body.push(form_grid(vec![
+            ("Default Timeout", Row::new()
+                .push(Slider::new(500..=60_000u32, timeout, Message::NotificationsTimeoutChanged).width(Length::Fill))
+                .push(text(format!("{}ms", timeout)).size(BODY).width(64))
+                .spacing(8)
+                .width(Length::Fill)
+                .into()),
+            ("History Size", Row::new()
+                .push(Slider::new(1..=100u32, history, Message::NotificationsHistoryChanged).width(Length::Fill))
+                .push(text(format!("{}", history)).size(BODY).width(64))
+                .spacing(8)
+                .width(Length::Fill)
+                .into()),
+            ("Replace Existing", toggler(replace)
+                .label("Honor replaces_id")
+                .on_toggle(Message::NotificationsReplaceChanged)
+                .into()),
+        ]));
+    }
+
+    card(
+        column![
+            text("Desktop Notifications").size(16).style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.8, 0.8, 0.8)), ..TextStyle::default() }),
+            body,
+        ]
+        .spacing(10)
+        .width(Length::Fill),
+    )
+    .into()
+}
+
 /// The "Sections" block: one card per section, plus the add button.
 fn sections_list(state: &PiumaSetup) -> Element<Message> {
     let mut section_list = Column::new().spacing(15);
@@ -1796,7 +1928,7 @@ const SOURCE_TYPES: &[&str] = &[
     "temp_cpu",
     // no numeric category
     "net_state", "uptime", "clock", "window", "workspace",
-    "command", "env_var", "static_text", "tray",
+    "command", "env_var", "static_text", "tray", "notifications",
 ];
 
 /// Friendly label for a canonical source type (shown when it needs no
@@ -1831,6 +1963,7 @@ fn source_label(canonical: &str) -> &'static str {
         "window" => "Focused window",
         "workspace" => "Workspace",
         "tray" => "System tray",
+        "notifications" => "Desktop notifications",
         _ => "Sensor",
     }
 }
@@ -2279,5 +2412,64 @@ mod tests {
         assert_eq!(out["panel"]["sections"][0]["sensors"][0]["source"]["type"], "tray");
         serde_json::from_str::<config::Config>(&saved)
             .expect("piuma must accept the saved config (pre-save validation)");
+    }
+
+    /// `panel.notifications` and a notifications sensor must survive
+    /// load→save untouched (values and presence included).
+    #[test]
+    fn notifications_block_and_sensor_roundtrip() {
+        let json = r##"{
+  "panel": {
+    "align": "fill",
+    "anchor": "top",
+    "notifications": { "default_timeout_ms": 4000, "history_size": 7, "replace_existing": false },
+    "section_layout": "horizontal",
+    "sections": [
+      { "layout": "horizontal", "name": "sys",
+        "sensors": [ { "name": "Notifiche", "source": { "type": "notifications" } } ] }
+    ],
+    "thickness": 26
+  }
+}"##;
+        let mut state = fixture();
+        state.load_from_json(json).expect("config must load");
+        let n = state.config.notifications.as_ref().expect("block must load");
+        assert_eq!(
+            (n.default_timeout_ms, n.history_size, n.replace_existing),
+            (4000, 7, false)
+        );
+        let saved = state.serialize().expect("serialize must succeed");
+        let out: JsonValue = serde_json::from_str(&saved).expect("saved JSON must parse");
+        assert_eq!(out["panel"]["notifications"]["default_timeout_ms"], 4000);
+        assert_eq!(out["panel"]["notifications"]["history_size"], 7);
+        assert_eq!(out["panel"]["notifications"]["replace_existing"], false);
+        assert_eq!(
+            out["panel"]["sections"][0]["sensors"][0]["source"]["type"],
+            "notifications"
+        );
+        serde_json::from_str::<config::Config>(&saved)
+            .expect("piuma must accept the saved config (pre-save validation)");
+    }
+
+    /// The editor writes all three keys when enabled (defaults on a fresh
+    /// enable) and drops the block entirely when disabled — that toggle is
+    /// what starts/stops piuma's D-Bus server.
+    #[test]
+    fn notifications_editor_writes_and_clears_the_block() {
+        let mut state = fixture();
+        state.config.notifications = Some(NotificationsCfg::default());
+        let out: JsonValue = serde_json::from_str(&state.serialize().unwrap()).unwrap();
+        assert_eq!(out["panel"]["notifications"]["default_timeout_ms"], 5000);
+        assert_eq!(out["panel"]["notifications"]["history_size"], 20);
+        assert_eq!(out["panel"]["notifications"]["replace_existing"], true);
+        serde_json::from_str::<config::Config>(&out.to_string())
+            .expect("piuma must accept the defaults block");
+
+        state.config.notifications = None;
+        let out: JsonValue = serde_json::from_str(&state.serialize().unwrap()).unwrap();
+        assert!(
+            out["panel"].get("notifications").is_none(),
+            "disabled must serialize without the block"
+        );
     }
 }
