@@ -32,7 +32,9 @@ save writes the new names into `piuma.json`.
 - **Popup stack**: cards on the overlay layer in the corner opposite the
   bar (icon from `image-data`/`image-path`/`app_icon`, summary and
   markup-stripped body), up to 5 at once; clicking a card runs the
-  notification's `default` action and dismisses it, the ✕ only dismisses
+  notification's `default` action and dismisses it, the ✕ only dismisses;
+  the card look (font size, colors incl. hover, borders, padding) is
+  configurable — white text on black, grey border by default
 - **Bar sensor**: the `notifications` source shows the newest active
   summary with a count; the wheel walks the history (`(selected/total)`),
   the click runs the shown entry's `default` action
@@ -243,7 +245,13 @@ card stack on the overlay layer, in the corner opposite the bar:
 "notifications": {
   "default_timeout_ms": 5000,
   "history_size": 20,
-  "replace_existing": true
+  "replace_existing": true,
+  "font_size": 12,
+  "text_color": "#ffffff", "text_color_hover": "#ffffff",
+  "bg_color": "#000000", "bg_color_hover": "#000000",
+  "border_color": "#808080", "border_color_hover": "#808080",
+  "border_width": 1, "border_radius": 10, "border_type": "full",
+  "padding": 12
 }
 ```
 
@@ -255,8 +263,18 @@ no popup); its keys are optional and fall back to the values above:
 - `history_size` – how many entries the wheel-browsable history keeps
   (the oldest are evicted when it is full; the popup only ever shows
   the newest 5 active ones).
-- `replace_existing` – honour `replaces_id` (update in place, same id);
-  `false` allocates a new id on every call.
+- `replace_existing` – when an app sends an update for the same
+  notification, show it on the **existing card** instead of adding a
+  duplicate (same id, new content, fresh timer); `false` records every
+  call as a new notification instead.
+- The style keys (`font_size`, `text_color[_hover]`, `bg_color[_hover]`,
+  `border_color[_hover]`, `border_width`, `border_radius`, `border_type`,
+  `padding`) dress the popup cards with the same fields as
+  `panel.sensor_defaults` — the defaults are white text on black with a
+  grey border, and an absent or `-1` numeric key means "use the
+  default". The card height follows font and padding, so the surface
+  stays click-exact for any style. All of it is editable in
+  `piuma-setup` under *Desktop Notifications*.
 
 ```json
 { "name": "Notifiche", "source": { "type": "notifications" } }

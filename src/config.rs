@@ -114,6 +114,19 @@ pub struct NotificationsConfig {
     /// Honour `replaces_id` (default true; false records every call as a
     /// new notification).
     pub replace_existing: Option<bool>,
+    /// Popup card style: absent/`-1` numeric keys fall back to the popup
+    /// defaults (12px, white text on black, grey border) at render time.
+    pub font_size: Option<u32>,
+    pub text_color: Option<String>,
+    pub text_color_hover: Option<String>,
+    pub bg_color: Option<String>,
+    pub bg_color_hover: Option<String>,
+    pub border_color: Option<String>,
+    pub border_color_hover: Option<String>,
+    pub border_width: Option<i32>,
+    pub border_radius: Option<i32>,
+    pub border_type: Option<String>,
+    pub padding: Option<i32>,
 }
 
 /// Style values applied to every sensor unless the sensor overrides them:
@@ -415,17 +428,40 @@ mod tests {
 
     /// `panel.notifications`: presence gates the D-Bus server, missing
     /// keys fall back to the runtime defaults, and the sensor type must
-    /// parse — this is exactly piuma-setup's pre-save validation.
+    /// parse — this is exactly piuma-setup's pre-save validation. The
+    /// popup style keys parse too (`-1` = "use the popup default").
     #[test]
     fn notifications_block_and_sensor_parse() {
         let cfg: Config = serde_json::from_str(
-            r#"{"panel":{"notifications":{"default_timeout_ms":4000,"history_size":7,"replace_existing":false},"sections":[]}}"#,
+            r##"{"panel":{"notifications":{"default_timeout_ms":4000,"history_size":7,"replace_existing":false,"font_size":16,"text_color":"#ffe066","bg_color":"#101010","border_color":"#ff5555","border_width":2,"border_radius":16,"border_type":"corners","padding":8},"sections":[]}}"##,
         )
         .expect("block must parse");
         let n = cfg.panel.notifications.as_ref().expect("present");
         assert_eq!(
             (n.default_timeout_ms, n.history_size, n.replace_existing),
             (Some(4000), Some(7), Some(false))
+        );
+        assert_eq!(
+            (
+                n.font_size,
+                n.text_color.as_deref(),
+                n.bg_color.as_deref(),
+                n.border_color.as_deref(),
+                n.border_width,
+                n.border_radius,
+                n.border_type.as_deref(),
+                n.padding
+            ),
+            (
+                Some(16),
+                Some("#ffe066"),
+                Some("#101010"),
+                Some("#ff5555"),
+                Some(2),
+                Some(16),
+                Some("corners"),
+                Some(8)
+            )
         );
         // Empty block: present (server on) with absent keys → defaults.
         let cfg2: Config =
@@ -434,6 +470,10 @@ mod tests {
         assert_eq!(
             (n2.default_timeout_ms, n2.history_size, n2.replace_existing),
             (None, None, None)
+        );
+        assert!(
+            n2.font_size.is_none() && n2.text_color.is_none() && n2.border_width.is_none(),
+            "absent style keys keep the popup defaults"
         );
         // Absent: no server.
         let cfg3: Config = serde_json::from_str(r#"{"panel":{"sections":[]}}"#).unwrap();

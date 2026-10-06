@@ -38,22 +38,47 @@ pub struct PiumaConfig {
 }
 
 /// The `panel.notifications` block with resolved values: the editor
-/// shows concrete numbers, so enabling writes all three keys (identical
-/// behaviour to omitting them — these are piuma's defaults).
+/// shows concrete values, so enabling writes every key (identical
+/// behaviour to omitting them — these are piuma's runtime defaults:
+/// server 5000/20/true, popup white text on black, grey border).
 #[derive(Debug, Clone)]
 pub struct NotificationsCfg {
     pub default_timeout_ms: u32,
     pub history_size: u32,
     pub replace_existing: bool,
+    // Popup card style (mirrors `PopupStyle` in src/main.rs).
+    pub font_size: u32,
+    pub text_color: String,
+    pub text_color_hover: String,
+    pub bg_color: String,
+    pub bg_color_hover: String,
+    pub border_color: String,
+    pub border_color_hover: String,
+    pub border_width: i32,
+    pub border_radius: i32,
+    pub border_type: String,
+    pub padding: i32,
 }
 
-/// Mirrors the runtime defaults in `src/notifications.rs` (Settings::DEFAULTS).
+/// Server defaults from `src/notifications.rs` (Settings::DEFAULTS) and
+/// popup defaults from `src/main.rs` (PopupStyle::default).
 impl Default for NotificationsCfg {
     fn default() -> Self {
         Self {
             default_timeout_ms: 5_000,
             history_size: 20,
             replace_existing: true,
+            font_size: 12,
+            text_color: "#ffffff".to_string(),
+            text_color_hover: "#ffffff".to_string(),
+            bg_color: "#000000".to_string(),
+            bg_color_hover: "#000000".to_string(),
+            border_color: "#808080".to_string(),
+            border_color_hover: "#808080".to_string(),
+            border_width: 1,
+            border_radius: 10,
+            border_type: "full".to_string(),
+            padding: 12,
         }
     }
 }
@@ -235,6 +260,10 @@ pub enum Message {
     NotificationsTimeoutChanged(u32),
     NotificationsHistoryChanged(u32),
     NotificationsReplaceChanged(bool),
+    /// Popup style of the notifications card, by JSON key: colors and
+    /// `border_type` (strings), font/border/padding (numbers).
+    NotifStyleChanged(String, String),
+    NotifNumberChanged(String, i32),
     SectionAdded,
     SectionRemoved(usize),
     /// Moves a section one position up/down in the panel order.
@@ -431,7 +460,7 @@ impl PiumaSetup {
         panel.insert("thickness".to_string(), JsonValue::Number(self.config.thickness.into()));
 
         // `panel.notifications`: whole block in or out (it gates the D-Bus
-        // server); the editor writes every key explicitly.
+        // server); the editor writes every key explicitly, style included.
         if let Some(n) = &self.config.notifications {
             let mut block = Map::new();
             block.insert(
@@ -440,6 +469,28 @@ impl PiumaSetup {
             );
             block.insert("history_size".to_string(), JsonValue::Number(n.history_size.into()));
             block.insert("replace_existing".to_string(), JsonValue::Bool(n.replace_existing));
+            block.insert(
+                "font_size".to_string(),
+                JsonValue::Number(n.font_size.into()),
+            );
+            for (k, v) in [
+                ("text_color", &n.text_color),
+                ("text_color_hover", &n.text_color_hover),
+                ("bg_color", &n.bg_color),
+                ("bg_color_hover", &n.bg_color_hover),
+                ("border_color", &n.border_color),
+                ("border_color_hover", &n.border_color_hover),
+                ("border_type", &n.border_type),
+            ] {
+                block.insert(k.to_string(), JsonValue::String(v.clone()));
+            }
+            for (k, v) in [
+                ("border_width", n.border_width),
+                ("border_radius", n.border_radius),
+                ("padding", n.padding),
+            ] {
+                block.insert(k.to_string(), JsonValue::Number(v.into()));
+            }
             panel.insert("notifications".to_string(), JsonValue::Object(block));
         }
 
@@ -764,10 +815,16 @@ impl PiumaSetup {
         // Absent thickness resets to 32 (the config was reset at the top).
         self.config.thickness = panel.get("thickness").and_then(|v| v.as_u64()).map(|t| t as u32).unwrap_or(32);
         // `panel.notifications`: block presence gates piuma's D-Bus server;
-        // missing keys resolve to piuma's runtime defaults (5000/20/true).
+        // missing/negative keys resolve to piuma's runtime defaults (server
+        // 5000/20/true, popup white on black with a grey border).
         if let Some(block) = panel.get("notifications") {
             if block.is_object() {
                 let num = |k: &str| block.get(k).and_then(|v| v.as_u64());
+                let sign = |k: &str| block.get(k).and_then(|v| v.as_i64()).map(|v| v as i32);
+                let str_ = |k: &str| block.get(k).and_then(|v| v.as_str()).map(str::to_string);
+                // Absent or negative numerics mean "use the default".
+                let pos = |v: Option<i32>, d: i32| v.filter(|x| *x >= 0).unwrap_or(d);
+                let d = NotificationsCfg::default();
                 self.config.notifications = Some(NotificationsCfg {
                     default_timeout_ms: num("default_timeout_ms")
                         .unwrap_or(5_000)
@@ -777,6 +834,28 @@ impl PiumaSetup {
                         .get("replace_existing")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(true),
+                    font_size: num("font_size")
+                        .filter(|v| (8..=64).contains(v))
+                        .map(|v| v as u32)
+                        .unwrap_or(d.font_size),
+                    text_color: str_("text_color").unwrap_or(d.text_color),
+                    text_color_hover: str_("text_color_hover").unwrap_or(d.text_color_hover),
+                    bg_color: str_("bg_color").unwrap_or(d.bg_color),
+                    bg_color_hover: str_("bg_color_hover").unwrap_or(d.bg_color_hover),
+                    border_color: str_("border_color").unwrap_or(d.border_color),
+                    border_color_hover: str_("border_color_hover")
+                        .unwrap_or(d.border_color_hover),
+                    border_width: pos(sign("border_width"), d.border_width),
+                    border_radius: pos(sign("border_radius"), d.border_radius),
+                    border_type: str_("border_type")
+                        .filter(|t| {
+                            matches!(
+                                t.as_str(),
+                                "full" | "corners" | "underline" | "upperline" | "left" | "right"
+                            )
+                        })
+                        .unwrap_or(d.border_type),
+                    padding: pos(sign("padding"), d.padding),
                 });
             }
         }
@@ -1046,6 +1125,16 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
         Message::NotificationsReplaceChanged(value) => {
             if let Some(n) = &mut state.config.notifications {
                 n.replace_existing = value;
+            }
+        }
+        Message::NotifStyleChanged(key, value) => {
+            if let Some(n) = &mut state.config.notifications {
+                set_notif_style(n, &key, &value);
+            }
+        }
+        Message::NotifNumberChanged(key, value) => {
+            if let Some(n) = &mut state.config.notifications {
+                set_notif_number(n, &key, value);
             }
         }
         Message::SectionAdded => {
@@ -1794,11 +1883,49 @@ fn notifications_settings<'a>(state: &'a PiumaSetup) -> Element<'a, Message> {
                 .spacing(8)
                 .width(Length::Fill)
                 .into()),
-            ("Replace Existing", toggler(replace)
-                .label("Honor replaces_id")
+            ("App Updates", toggler(replace)
+                .label("Update the existing card (no duplicates)")
                 .on_toggle(Message::NotificationsReplaceChanged)
                 .into()),
         ]));
+
+        // Popup style: the same controls as Sensor Defaults (colors, border,
+        // padding) plus the font size; the defaults are white text on black
+        // with a grey border and every key is written out explicitly, like
+        // the server keys above.
+        body = body
+            .push(
+                text("Popup style — how the notification cards look")
+                    .size(10)
+                    .style(|_t: &Theme| TextStyle {
+                        color: Some(Color::from_rgb(0.55, 0.55, 0.6)),
+                        ..TextStyle::default()
+                    }),
+            )
+            .push(form_grid(vec![
+                ("Font Size", slider_control(8..=32, n.font_size as i32, |value| Message::NotifNumberChanged("font_size".to_string(), value))),
+                ("Text", color_control(&n.text_color, |value| Message::NotifStyleChanged("text_color".to_string(), value))),
+                ("Hover Text", color_control(&n.text_color_hover, |value| Message::NotifStyleChanged("text_color_hover".to_string(), value))),
+                ("BG", color_control(&n.bg_color, |value| Message::NotifStyleChanged("bg_color".to_string(), value))),
+                ("Hover BG", color_control(&n.bg_color_hover, |value| Message::NotifStyleChanged("bg_color_hover".to_string(), value))),
+                ("Border", color_control(&n.border_color, |value| Message::NotifStyleChanged("border_color".to_string(), value))),
+                ("Border Hover", color_control(&n.border_color_hover, |value| Message::NotifStyleChanged("border_color_hover".to_string(), value))),
+                ("Border Width", slider_control(0..=10, n.border_width, |value| Message::NotifNumberChanged("border_width".to_string(), value))),
+                ("Border Radius", slider_control(0..=20, n.border_radius, |value| Message::NotifNumberChanged("border_radius".to_string(), value))),
+                ("Padding", slider_control(0..=24, n.padding, |value| Message::NotifNumberChanged("padding".to_string(), value))),
+                ("Border Type", picklist(
+                    vec![
+                        "full".to_string(),
+                        "corners".to_string(),
+                        "underline".to_string(),
+                        "upperline".to_string(),
+                        "left".to_string(),
+                        "right".to_string(),
+                    ],
+                    Some(n.border_type.clone()),
+                    |value| Message::NotifStyleChanged("border_type".to_string(), value),
+                ).width(Length::Fill).into()),
+            ]));
     }
 
     card(
@@ -1891,6 +2018,35 @@ fn section_view<'a>(state: &'a PiumaSetup, index: usize, section: &'a Section) -
 /// Maps a legacy type name to the canonical round-9 name; anything else
 /// (already canonical) passes through. Applied when loading, so the whole
 /// editor — picklist, param inputs, save — only ever sees canonical names.
+/// Apply one string style field of `panel.notifications` by JSON key:
+/// the single place every style control of the card writes through
+/// (unknown keys are ignored).
+fn set_notif_style(n: &mut NotificationsCfg, key: &str, value: &str) {
+    let slot = match key {
+        "text_color" => &mut n.text_color,
+        "text_color_hover" => &mut n.text_color_hover,
+        "bg_color" => &mut n.bg_color,
+        "bg_color_hover" => &mut n.bg_color_hover,
+        "border_color" => &mut n.border_color,
+        "border_color_hover" => &mut n.border_color_hover,
+        "border_type" => &mut n.border_type,
+        _ => return,
+    };
+    *slot = value.to_string();
+}
+
+/// Numeric sibling of `set_notif_style`; the font size clamps to the
+/// readable range its slider offers.
+fn set_notif_number(n: &mut NotificationsCfg, key: &str, value: i32) {
+    match key {
+        "font_size" => n.font_size = value.clamp(8, 64) as u32,
+        "border_width" => n.border_width = value,
+        "border_radius" => n.border_radius = value,
+        "padding" => n.padding = value,
+        _ => {}
+    }
+}
+
 fn canonical_type<'a>(source_type: &'a str) -> &'a str {
     match source_type {
         "ProcCpu" => "perc_cpu",
@@ -2422,7 +2578,7 @@ mod tests {
   "panel": {
     "align": "fill",
     "anchor": "top",
-    "notifications": { "default_timeout_ms": 4000, "history_size": 7, "replace_existing": false },
+    "notifications": { "default_timeout_ms": 4000, "history_size": 7, "replace_existing": false, "font_size": 16, "text_color": "#ffe066", "bg_color": "#101010", "border_width": 2, "border_radius": 16, "border_type": "corners", "padding": 8 },
     "section_layout": "horizontal",
     "sections": [
       { "layout": "horizontal", "name": "sys",
@@ -2438,11 +2594,27 @@ mod tests {
             (n.default_timeout_ms, n.history_size, n.replace_existing),
             (4000, 7, false)
         );
+        assert_eq!(
+            (
+                n.font_size,
+                n.text_color.as_str(),
+                n.bg_color.as_str(),
+                n.border_width,
+                n.border_radius,
+                n.border_type.as_str(),
+                n.padding
+            ),
+            (16, "#ffe066", "#101010", 2, 16, "corners", 8)
+        );
         let saved = state.serialize().expect("serialize must succeed");
         let out: JsonValue = serde_json::from_str(&saved).expect("saved JSON must parse");
         assert_eq!(out["panel"]["notifications"]["default_timeout_ms"], 4000);
         assert_eq!(out["panel"]["notifications"]["history_size"], 7);
         assert_eq!(out["panel"]["notifications"]["replace_existing"], false);
+        assert_eq!(out["panel"]["notifications"]["font_size"], 16);
+        assert_eq!(out["panel"]["notifications"]["text_color"], "#ffe066");
+        assert_eq!(out["panel"]["notifications"]["border_width"], 2);
+        assert_eq!(out["panel"]["notifications"]["border_type"], "corners");
         assert_eq!(
             out["panel"]["sections"][0]["sensors"][0]["source"]["type"],
             "notifications"
@@ -2462,6 +2634,10 @@ mod tests {
         assert_eq!(out["panel"]["notifications"]["default_timeout_ms"], 5000);
         assert_eq!(out["panel"]["notifications"]["history_size"], 20);
         assert_eq!(out["panel"]["notifications"]["replace_existing"], true);
+        assert_eq!(out["panel"]["notifications"]["font_size"], 12);
+        assert_eq!(out["panel"]["notifications"]["text_color"], "#ffffff");
+        assert_eq!(out["panel"]["notifications"]["border_color"], "#808080");
+        assert_eq!(out["panel"]["notifications"]["padding"], 12);
         serde_json::from_str::<config::Config>(&out.to_string())
             .expect("piuma must accept the defaults block");
 
@@ -2470,6 +2646,28 @@ mod tests {
         assert!(
             out["panel"].get("notifications").is_none(),
             "disabled must serialize without the block"
+        );
+    }
+
+    /// Absent or negative style keys resolve to the popup defaults on
+    /// load: the editor then shows (and rewrites) the resolved values,
+    /// exactly like it does for the server keys.
+    #[test]
+    fn notifications_style_defaults_resolve_on_load() {
+        let json = r##"{ "panel": { "notifications": { "padding": -1, "border_type": "kittens" }, "sections": [] } }"##;
+        let mut state = fixture();
+        state.load_from_json(json).expect("config must load");
+        let n = state.config.notifications.as_ref().expect("block must load");
+        assert_eq!(
+            (
+                n.padding,
+                n.font_size,
+                n.text_color.as_str(),
+                n.border_color.as_str(),
+                n.border_type.as_str()
+            ),
+            (12, 12, "#ffffff", "#808080", "full"),
+            "negative padding and an unknown border type fall back"
         );
     }
 }

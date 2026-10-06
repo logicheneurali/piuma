@@ -62,9 +62,10 @@ const ACTION_CLOSE_PANEL: &str = "close_panel";
 // The popup surface is sized to the stack exactly (cards × height +
 // gaps): the region below the stack simply is not surface, so clicks
 // there reach the window underneath with no input-region handling.
+// The card height is style-derived (`popup_card_h`); with the default
+// style (12px font, 12px padding) it is exactly 84px.
 const POPUP_MAX_CARDS: usize = 5;
 const POPUP_WIDTH: u32 = 360;
-const POPUP_CARD_H: u32 = 84;
 const POPUP_CARD_GAP: u32 = 8;
 /// Gap between the screen edges and the popup corner.
 const POPUP_MARGIN: i32 = 8;
@@ -134,6 +135,8 @@ struct Panel {
     popup: Option<iced::window::Id>,
     /// Card count the popup surface is currently sized for.
     popup_cards: usize,
+    /// Card under the cursor (`hover_*` style fields), `None` outside.
+    popup_hover: Option<u32>,
 }
 
 // ── messages ────────────────────────────────────────────────────────
@@ -164,6 +167,10 @@ enum Message {
     PopupCardClicked(u32),
     /// Click on a popup card's ✕: dismiss it only (spec reason 2).
     PopupCardDismissed(u32),
+    /// Cursor entered a popup card (hover styling, both card targets).
+    PopupCardEnter(u32),
+    /// Cursor left the popup card under it.
+    PopupCardLeave,
 }
 
 // ── namespace ───────────────────────────────────────────────────────
@@ -392,7 +399,12 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             // layout/align differ from what is applied, surface geometry).
             let mut geometry_changed = false;
             let mut zone_changed = false;
+            // Any reload re-anchors/resizes the popup too: the popup style
+            // (font/padding) lives in the config without affecting the bar's
+            // own geometry, so its reposition rides on this flag.
+            let mut config_reloaded = false;
             if let Some(reloaded) = maybe_reload(panel) {
+                config_reloaded = true;
                 panel.config = reloaded;
                 let size = panel_size(&panel.config, unsafe { SCREEN_WIDTH }, unsafe { SCREEN_HEIGHT });
                 let anchor = panel_anchor(&panel.config);
@@ -585,7 +597,7 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             }
             // The popup follows the active set (and re-anchors with the
             // bar on a geometry change) — one place drives its window.
-            if let Some(cmd) = sync_popup(panel, geometry_changed) {
+            if let Some(cmd) = sync_popup(panel, geometry_changed || config_reloaded) {
                 cmds.push(cmd);
             }
             if cmds.is_empty() { Command::none() } else { Command::batch(cmds) }
@@ -615,6 +627,14 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             popup_dismiss(panel, id)
         }
         Message::PopupCardDismissed(id) => popup_dismiss(panel, id),
+        Message::PopupCardEnter(id) => {
+            panel.popup_hover = Some(id);
+            Command::none()
+        }
+        Message::PopupCardLeave => {
+            panel.popup_hover = None;
+            Command::none()
+        }
         Message::TrayIconPressed(bus, path, button) => {
             // Foreground thread only queues the D-Bus call (tray.rs spawns
             // its own thread), so the UI never blocks on the item.
@@ -1442,6 +1462,96 @@ fn panel_anchor(config: &config::Config) -> Anchor {
 /// opens it (Overlay layer, opposite the bar's edge, exclusive zone 0)
 /// and a count change resizes the surface to the stack's exact height.
 /// `reposition` forces the resize/anchor message (bar geometry changed).
+// ── popup style ─────────────────────────────────────────────────────
+
+/// Resolved popup card style: `panel.notifications` values, with the
+/// popup defaults for absent/invalid keys — white text on black, grey
+/// border (the bar's own colors are not inherited here).
+#[derive(Debug, PartialEq)]
+struct PopupStyle {
+    /// Base text size (body); the summary is +3 bold, the ✕ +2.
+    font_size: u32,
+    text: Color,
+    text_hover: Color,
+    bg: Color,
+    bg_hover: Color,
+    border: Color,
+    border_hover: Color,
+    border_width: u32,
+    border_radius: u32,
+    border_type: String,
+    padding: u32,
+}
+
+impl Default for PopupStyle {
+    fn default() -> Self {
+        Self {
+            font_size: 12,
+            text: Color::WHITE,
+            text_hover: Color::WHITE,
+            bg: Color::BLACK,
+            bg_hover: Color::BLACK,
+            border: Color::from_rgb(0.5, 0.5, 0.5),
+            border_hover: Color::from_rgb(0.5, 0.5, 0.5),
+            border_width: 1,
+            border_radius: 10,
+            border_type: "full".to_string(),
+            padding: 12,
+        }
+    }
+}
+
+/// The popup style from `panel.notifications`: negative/absent numerics
+/// and unparsable colors fall back to `PopupStyle::default()`, an unknown
+/// `border_type` to `full` (the `styled_box` rule).
+fn popup_style(config: &config::Config) -> PopupStyle {
+    let d = PopupStyle::default();
+    let Some(n) = config.panel.notifications.as_ref() else {
+        return d;
+    };
+    let color = |key: &Option<String>, fallback: Color| {
+        key.as_deref()
+            .and_then(|s| config::parse_color(s).ok())
+            .unwrap_or(fallback)
+    };
+    let num = |key: Option<i32>, fallback: u32| {
+        key.filter(|v| *v >= 0).map(|v| v as u32).unwrap_or(fallback)
+    };
+    PopupStyle {
+        font_size: n
+            .font_size
+            .filter(|v| (8..=64).contains(v))
+            .unwrap_or(d.font_size),
+        text: color(&n.text_color, d.text),
+        text_hover: color(&n.text_color_hover, d.text),
+        bg: color(&n.bg_color, d.bg),
+        bg_hover: color(&n.bg_color_hover, d.bg),
+        border: color(&n.border_color, d.border),
+        border_hover: color(&n.border_color_hover, d.border),
+        border_width: num(n.border_width, d.border_width),
+        border_radius: num(n.border_radius, d.border_radius),
+        border_type: n
+            .border_type
+            .as_deref()
+            .filter(|t| {
+                matches!(
+                    *t,
+                    "full" | "corners" | "underline" | "upperline" | "left" | "right"
+                )
+            })
+            .unwrap_or(&d.border_type)
+            .to_string(),
+        padding: num(n.padding, d.padding),
+    }
+}
+
+/// Card height for the surface math: 2×padding + five lines of font —
+/// the default style gives exactly the F3 geometry (2×12 + 5×12 = 84),
+/// so the stack stays click-exact for every style.
+fn popup_card_h(style: &PopupStyle) -> u32 {
+    2 * style.padding + 5 * style.font_size
+}
+
 fn sync_popup(panel: &mut Panel, reposition: bool) -> Option<Command<Message>> {
     let enabled = panel.config.panel.notifications.is_some();
     let cards = if enabled {
@@ -1449,16 +1559,22 @@ fn sync_popup(panel: &mut Panel, reposition: bool) -> Option<Command<Message>> {
     } else {
         0
     };
+    // A changed set invalidates the hover id: expiry reaches this path
+    // without passing through popup_dismiss.
+    if cards != panel.popup_cards {
+        panel.popup_hover = None;
+    }
     match (panel.popup, cards) {
         (None, 0) => None,
         (Some(id), 0) => {
             panel.popup = None;
             panel.popup_cards = 0;
+            panel.popup_hover = None;
             Some(iced::window::close(id))
         }
         (None, n) => {
             let (id, open) = Message::layershell_open(NewLayerShellSettings {
-                size: popup_size(n),
+                size: popup_size(panel, n),
                 layer: Layer::Overlay,
                 anchor: popup_anchor(&panel.config),
                 exclusive_zone: None,
@@ -1482,7 +1598,7 @@ fn sync_popup(panel: &mut Panel, reposition: bool) -> Option<Command<Message>> {
             Some(Command::done(Message::LayoutChange {
                 id,
                 anchor: popup_anchor(&panel.config),
-                size: popup_size(n),
+                size: popup_size(panel, n),
             }))
         }
         _ => None,
@@ -1490,10 +1606,12 @@ fn sync_popup(panel: &mut Panel, reposition: bool) -> Option<Command<Message>> {
 }
 
 /// Surface size for a stack of `cards`: exact, so there is no dead
-/// (click-blocking) surface below the last card.
-fn popup_size(cards: usize) -> LayerSize {
+/// (click-blocking) surface below the last card. The card height comes
+/// from the configured popup style (see `popup_card_h`).
+fn popup_size(panel: &Panel, cards: usize) -> LayerSize {
     let n = cards as u32;
-    LayerSize::px(POPUP_WIDTH, n * POPUP_CARD_H + n.saturating_sub(1) * POPUP_CARD_GAP)
+    let h = popup_card_h(&popup_style(&panel.config));
+    LayerSize::px(POPUP_WIDTH, n * h + n.saturating_sub(1) * POPUP_CARD_GAP)
 }
 
 /// Right-hand corner opposite to the bar's edge: a bottom bar leaves
@@ -1540,22 +1658,12 @@ fn refresh_notification_sensor(panel: &mut Panel) {
 /// The popup stack: one card per active notification (newest on top).
 /// The content block is one MouseArea (click → `PopupCardClicked` =
 /// default action + dismiss) and the ✕ a separate MouseArea inside the
-/// same card, so the two targets never overlap.
+/// same card, so the two targets never overlap. Both targets also feed
+/// the hover id, and the card's look comes from the configured style
+/// through the shared `styled_box` helper (the sensors' border machinery).
 fn popup_view(panel: &Panel) -> Element<'_, Message> {
-    let bg = panel
-        .config
-        .panel
-        .default_bg_color
-        .as_ref()
-        .and_then(|s| config::parse_color(s).ok())
-        .unwrap_or(DEFAULT_BG_COLOR);
-    let fg = panel
-        .config
-        .panel
-        .default_text_color
-        .as_ref()
-        .and_then(|s| config::parse_color(s).ok())
-        .unwrap_or(DEFAULT_TEXT_COLOR);
+    let st = popup_style(&panel.config);
+    let card_h = popup_card_h(&st);
     let bold = Font {
         weight: iced::font::Weight::Bold,
         ..Font::with_name(DEFAULT_FONT)
@@ -1563,6 +1671,12 @@ fn popup_view(panel: &Panel) -> Element<'_, Message> {
 
     let mut stack: Column<'_, Message> = Column::new().spacing(POPUP_CARD_GAP as f32);
     for card in notifications::active_cards(POPUP_MAX_CARDS) {
+        // Hovered cards swap text/bg/border for their hover counterparts.
+        let (fg, bg, border_c) = if panel.popup_hover == Some(card.id) {
+            (st.text_hover, st.bg_hover, st.border_hover)
+        } else {
+            (st.text, st.bg, st.border)
+        };
         // Icon: image-data wins, a real file path follows; anything else
         // (e.g. a themed icon name) renders without an icon.
         let icon: Option<Image> = match &card.icon {
@@ -1588,9 +1702,9 @@ fn popup_view(panel: &Panel) -> Element<'_, Message> {
         };
         let mut lines: Column<'_, Message> = Column::new()
             .spacing(2)
-            .push(text(card.summary).size(15).font(bold).color(fg).width(Length::Fill));
+            .push(text(card.summary).size(st.font_size + 3).font(bold).color(fg).width(Length::Fill));
         if !card.body.is_empty() {
-            lines = lines.push(text(card.body).size(12).color(fg).width(Length::Fill));
+            lines = lines.push(text(card.body).size(st.font_size).color(fg).width(Length::Fill));
         }
         let mut content = Row::new()
             .spacing(8)
@@ -1604,27 +1718,41 @@ fn popup_view(panel: &Panel) -> Element<'_, Message> {
         let card_row: Row<'_, Message> = Row::new()
             .spacing(8)
             .align_y(Alignment::Center)
-            .push(MouseArea::new(content).on_press(Message::PopupCardClicked(card.id)))
-            // The ✕ gets 8px of padding: a 14px glyph alone is too small
+            .width(Length::Fill)
+            .push(
+                MouseArea::new(content)
+                    .on_press(Message::PopupCardClicked(card.id))
+                    .on_enter(Message::PopupCardEnter(card.id))
+                    .on_exit(Message::PopupCardLeave),
+            )
+            // The ✕ gets 8px of padding: a small glyph alone is too small
             // a target, and its MouseArea must not overlap the card's.
-            .push(MouseArea::new(
-                container(text("✕").size(14).color(fg)).padding(8),
-            ).on_press(Message::PopupCardDismissed(card.id)));
+            .push(
+                MouseArea::new(
+                    container(text("✕").size(st.font_size + 2).color(fg)).padding(8),
+                )
+                .on_press(Message::PopupCardDismissed(card.id))
+                .on_enter(Message::PopupCardEnter(card.id))
+                .on_exit(Message::PopupCardLeave),
+            );
+        let styled = styled_box(
+            card_row.into(),
+            Some(bg),
+            Some(border_c),
+            st.border_width.min(u16::MAX as u32) as u16,
+            st.border_radius.min(u16::MAX as u32) as u16,
+            &st.border_type,
+            st.padding.min(u16::MAX as u32) as u16,
+            Length::Fill,
+            Length::Fixed(card_h as f32),
+        );
+        // The clip keeps an overlong body inside the card box; the outer
+        // size is the same `card_h` the surface math uses.
         stack = stack.push(
-            container(card_row)
+            container(styled)
                 .width(Length::Fill)
-                .height(Length::Fixed(POPUP_CARD_H as f32))
-                .padding(12)
-                .clip(true)
-                .style(move |_theme| ContainerStyle {
-                    background: Some(Background::Color(bg)),
-                    border: iced::Border {
-                        width: 1.0,
-                        color: fg.scale_alpha(0.15),
-                        radius: 10.0.into(),
-                    },
-                    ..ContainerStyle::default()
-                }),
+                .height(Length::Fixed(card_h as f32))
+                .clip(true),
         );
     }
     container(stack)
@@ -1704,6 +1832,7 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         last_cursor: None,
                         popup: None,
                         popup_cards: 0,
+                        popup_hover: None,
                     }
                 },
                 namespace,
@@ -1788,7 +1917,21 @@ fn parse_config_arg() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::tray_icon_target;
+    use super::{popup_card_h, tray_icon_target, PopupStyle};
+
+    /// The default popup style must keep the F3 geometry exactly (84px
+    /// cards): the surface size is computed from it, and any drift would
+    /// leave a dead (click-blocking) strip below the stack.
+    #[test]
+    fn popup_card_h_defaults_to_84_and_scales_with_style() {
+        assert_eq!(popup_card_h(&PopupStyle::default()), 84);
+        let styled = PopupStyle {
+            font_size: 16,
+            padding: 8,
+            ..PopupStyle::default()
+        };
+        assert_eq!(popup_card_h(&styled), 96);
+    }
 
     /// A bare 26px bar: only the section content padding (4px a side).
     #[test]
