@@ -129,6 +129,17 @@ pub struct NotificationsConfig {
     pub border_radius: Option<i32>,
     pub border_type: Option<String>,
     pub padding: Option<i32>,
+    /// Popup screen position (roadmap M4): absent/`auto` (or any unknown
+    /// value) keeps the historic layout — opposite corner of the bar, right
+    /// side; the six explicit keys are `top-left`, `top-center`, `top-right`,
+    /// `bottom-left`, `bottom-center`, `bottom-right`.
+    pub popup_position: Option<String>,
+    /// Horizontal screen-edge margin in px for the popup (roadmap M4),
+    /// absent = 8 (the historic value).
+    pub popup_margin_h: Option<i32>,
+    /// Vertical screen-edge margin in px for the popup (roadmap M4),
+    /// absent = 8 (the historic value).
+    pub popup_margin_v: Option<i32>,
 }
 
 /// Style values applied to every sensor unless the sensor overrides them:

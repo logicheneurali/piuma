@@ -61,6 +61,13 @@ pub struct NotificationsCfg {
     pub border_radius: i32,
     pub border_type: String,
     pub padding: i32,
+    /// Popup screen position (roadmap M4): `auto` reproduces the historic
+    /// opposite-corner layout; the six explicit keys place the cards.
+    pub popup_position: String,
+    /// Horizontal screen-edge margin in px (roadmap M4).
+    pub popup_margin_h: i32,
+    /// Vertical screen-edge margin in px (roadmap M4).
+    pub popup_margin_v: i32,
 }
 
 /// Server defaults from `src/notifications.rs` (Settings::DEFAULTS) and
@@ -82,6 +89,9 @@ impl Default for NotificationsCfg {
             border_radius: 10,
             border_type: "full".to_string(),
             padding: 12,
+            popup_position: "auto".to_string(),
+            popup_margin_h: 8,
+            popup_margin_v: 8,
         }
     }
 }
@@ -270,6 +280,9 @@ pub enum Message {
     /// `border_type` (strings), font/border/padding (numbers).
     NotifStyleChanged(String, String),
     NotifNumberChanged(String, i32),
+    /// Popup screen position picklist (roadmap M4): one of the 6 corners/
+    /// edges or `auto`.
+    NotifPositionChanged(String),
     SectionAdded,
     SectionRemoved(usize),
     /// Moves a section one position up/down in the panel order.
@@ -481,6 +494,18 @@ impl PiumaSetup {
             block.insert(
                 "font_size".to_string(),
                 JsonValue::Number(n.font_size.into()),
+            );
+            block.insert(
+                "popup_position".to_string(),
+                JsonValue::String(n.popup_position.clone()),
+            );
+            block.insert(
+                "popup_margin_h".to_string(),
+                JsonValue::Number(n.popup_margin_h.into()),
+            );
+            block.insert(
+                "popup_margin_v".to_string(),
+                JsonValue::Number(n.popup_margin_v.into()),
             );
             for (k, v) in [
                 ("text_color", &n.text_color),
@@ -868,6 +893,22 @@ impl PiumaSetup {
                         })
                         .unwrap_or(d.border_type),
                     padding: pos(sign("padding"), d.padding),
+                    popup_position: str_("popup_position")
+                        .filter(|p| {
+                            matches!(
+                                p.as_str(),
+                                "auto"
+                                    | "top-left"
+                                    | "top-center"
+                                    | "top-right"
+                                    | "bottom-left"
+                                    | "bottom-center"
+                                    | "bottom-right"
+                            )
+                        })
+                        .unwrap_or(d.popup_position),
+                    popup_margin_h: pos(sign("popup_margin_h"), d.popup_margin_h),
+                    popup_margin_v: pos(sign("popup_margin_v"), d.popup_margin_v),
                 });
             }
         }
@@ -1151,6 +1192,11 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
         Message::NotifNumberChanged(key, value) => {
             if let Some(n) = &mut state.config.notifications {
                 set_notif_number(n, &key, value);
+            }
+        }
+        Message::NotifPositionChanged(value) => {
+            if let Some(n) = &mut state.config.notifications {
+                n.popup_position = value;
             }
         }
         Message::SectionAdded => {
@@ -1909,6 +1955,35 @@ fn notifications_settings<'a>(state: &'a PiumaSetup) -> Element<'a, Message> {
                 .into()),
         ]));
 
+        // Popup placement: where the cards appear on screen (roadmap M4) —
+        // position picklist plus the two screen-edge margins.
+        body = body
+            .push(
+                text("Popup placement — where the cards appear on screen")
+                    .size(10)
+                    .style(|_t: &Theme| TextStyle {
+                        color: Some(Color::from_rgb(0.55, 0.55, 0.6)),
+                        ..TextStyle::default()
+                    }),
+            )
+            .push(form_grid(vec![
+                ("Position", picklist(
+                    vec![
+                        "auto".to_string(),
+                        "top-left".to_string(),
+                        "top-center".to_string(),
+                        "top-right".to_string(),
+                        "bottom-left".to_string(),
+                        "bottom-center".to_string(),
+                        "bottom-right".to_string(),
+                    ],
+                    Some(n.popup_position.clone()),
+                    |value| Message::NotifPositionChanged(value),
+                ).width(Length::Fill).into()),
+                ("Margin H", slider_control(0..=100, n.popup_margin_h, |value| Message::NotifNumberChanged("popup_margin_h".to_string(), value))),
+                ("Margin V", slider_control(0..=100, n.popup_margin_v, |value| Message::NotifNumberChanged("popup_margin_v".to_string(), value))),
+            ]));
+
         // Popup style: the same controls as Sensor Defaults (colors, border,
         // padding) plus the font size; the defaults are white text on black
         // with a grey border and every key is written out explicitly, like
@@ -2056,13 +2131,15 @@ fn set_notif_style(n: &mut NotificationsCfg, key: &str, value: &str) {
 }
 
 /// Numeric sibling of `set_notif_style`; the font size clamps to the
-/// readable range its slider offers.
+/// readable range its slider offers, the margins to 0..=500 px.
 fn set_notif_number(n: &mut NotificationsCfg, key: &str, value: i32) {
     match key {
         "font_size" => n.font_size = value.clamp(8, 64) as u32,
         "border_width" => n.border_width = value,
         "border_radius" => n.border_radius = value,
         "padding" => n.padding = value,
+        "popup_margin_h" => n.popup_margin_h = value.clamp(0, 500),
+        "popup_margin_v" => n.popup_margin_v = value.clamp(0, 500),
         _ => {}
     }
 }

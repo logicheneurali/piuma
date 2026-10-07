@@ -248,13 +248,17 @@ registers, the sensor renders nothing at all (no empty box):
 With the `panel.notifications` block present, piuma claims
 `org.freedesktop.Notifications` on the session bus (a freedesktop
 notification server like mako/dunst) and pops the notifications up as a
-card stack on the overlay layer, in the corner opposite the bar:
+card stack on the overlay layer, in the corner opposite the bar (or
+wherever `popup_position` places it):
 
 ```json
 "notifications": {
   "default_timeout_ms": 5000,
   "history_size": 20,
   "replace_existing": true,
+  "popup_position": "auto",
+  "popup_margin_h": 8,
+  "popup_margin_v": 8,
   "font_size": 12,
   "text_color": "#ffffff", "text_color_hover": "#ffffff",
   "bg_color": "#000000", "bg_color_hover": "#000000",
@@ -276,6 +280,14 @@ no popup); its keys are optional and fall back to the values above:
   notification, show it on the **existing card** instead of adding a
   duplicate (same id, new content, fresh timer); `false` records every
   call as a new notification instead.
+- `popup_position` – where the card stack appears (roadmap M4):
+  `auto` (default) keeps the historic layout — the corner opposite the
+  bar on the right; the explicit keys are `top-left`, `top-center`,
+  `top-right`, `bottom-left`, `bottom-center`, `bottom-right`. Unknown
+  values fall back to `auto`.
+- `popup_margin_h` / `popup_margin_v` – horizontal and vertical margin
+  from the screen edges in px (default `8`), applied to the two sides of
+  an explicit `popup_position`.
 - The style keys (`font_size`, `text_color[_hover]`, `bg_color[_hover]`,
   `border_color[_hover]`, `border_width`, `border_radius`, `border_type`,
   `padding`) dress the popup cards with the same fields as

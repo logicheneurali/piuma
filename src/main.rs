@@ -1638,17 +1638,13 @@ fn sync_popup(panel: &mut Panel, reposition: bool) -> Option<Command<Message>> {
             Some(iced::window::close(id))
         }
         (None, n) => {
+            let (anchor, margin) = popup_placement(&panel.config);
             let (id, open) = Message::layershell_open(NewLayerShellSettings {
                 size: popup_size(panel, n),
                 layer: Layer::Overlay,
-                anchor: popup_anchor(&panel.config),
+                anchor,
                 exclusive_zone: None,
-                margin: Some(Margin {
-                    top: POPUP_MARGIN,
-                    right: POPUP_MARGIN,
-                    bottom: 0,
-                    left: 0,
-                }),
+                margin: Some(margin),
                 keyboard_interactivity: KeyboardInteractivity::None,
                 output_option: OutputOption::LastOutput,
                 namespace: Some("piuma-notifications".to_string()),
@@ -1660,11 +1656,17 @@ fn sync_popup(panel: &mut Panel, reposition: bool) -> Option<Command<Message>> {
         }
         (Some(id), n) if reposition || n != panel.popup_cards => {
             panel.popup_cards = n;
-            Some(Command::done(Message::LayoutChange {
-                id,
-                anchor: popup_anchor(&panel.config),
-                size: popup_size(panel, n),
-            }))
+            let (anchor, margin) = popup_placement(&panel.config);
+            // The margin rides along: position and margins are config keys
+            // (roadmap M4) and a reload can change them at any time.
+            Some(Command::batch([
+                Command::done(Message::LayoutChange {
+                    id,
+                    anchor,
+                    size: popup_size(panel, n),
+                }),
+                Command::done(Message::MarginChange { id, margin }),
+            ]))
         }
         _ => None,
     }
@@ -1687,6 +1689,54 @@ fn popup_anchor(config: &config::Config) -> Anchor {
         Anchor::Bottom | Anchor::Right
     } else {
         Anchor::Top | Anchor::Right
+    }
+}
+
+/// Anchor + screen-edge margins for the notification popup (roadmap M4),
+/// from `panel.notifications.popup_position` / `popup_margin_h` /
+/// `popup_margin_v`. `auto` (absent/unknown key) reproduces the historic
+/// layout: opposite the bar on the right, 8px from the top/right edges.
+fn popup_placement(config: &config::Config) -> (Anchor, Margin) {
+    let notify = config.panel.notifications.as_ref();
+    let margin_h = notify.and_then(|n| n.popup_margin_h).unwrap_or(POPUP_MARGIN);
+    let margin_v = notify.and_then(|n| n.popup_margin_v).unwrap_or(POPUP_MARGIN);
+    let position = notify
+        .and_then(|n| n.popup_position.as_deref())
+        .unwrap_or("auto");
+    // Margins on the two sides of a corner position (the others stay 0).
+    let corner = |top: bool, left: bool| Margin {
+        top: if top { margin_v } else { 0 },
+        bottom: if top { 0 } else { margin_v },
+        left: if left { margin_h } else { 0 },
+        right: if left { 0 } else { margin_h },
+    };
+    // Centered positions anchor both horizontal edges (the compositor
+    // centres the fixed-width surface); equal margins keep it centred.
+    let center = |top: bool| Margin {
+        top: if top { margin_v } else { 0 },
+        bottom: if top { 0 } else { margin_v },
+        left: margin_h,
+        right: margin_h,
+    };
+    match position {
+        "top-left" => (Anchor::Top | Anchor::Left, corner(true, true)),
+        "top-center" => (Anchor::Top | Anchor::Left | Anchor::Right, center(true)),
+        "top-right" => (Anchor::Top | Anchor::Right, corner(true, false)),
+        "bottom-left" => (Anchor::Bottom | Anchor::Left, corner(false, true)),
+        "bottom-center" => {
+            (Anchor::Bottom | Anchor::Left | Anchor::Right, center(false))
+        }
+        "bottom-right" => (Anchor::Bottom | Anchor::Right, corner(false, false)),
+        // `auto` and anything unknown keep the historic layout.
+        _ => (
+            popup_anchor(config),
+            Margin {
+                top: POPUP_MARGIN,
+                right: POPUP_MARGIN,
+                bottom: 0,
+                left: 0,
+            },
+        ),
     }
 }
 
@@ -1997,7 +2047,8 @@ fn parse_config_arg() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{popup_card_h, tray_icon_target, PopupStyle};
+    use super::{popup_card_h, popup_placement, tray_icon_target, PopupStyle};
+    use iced_exwlshell::reexport::Anchor;
 
     /// The default popup style must keep the F3 geometry exactly (84px
     /// cards): the surface size is computed from it, and any drift would
@@ -2011,6 +2062,64 @@ mod tests {
             ..PopupStyle::default()
         };
         assert_eq!(popup_card_h(&styled), 96);
+    }
+
+    /// `auto` (no `popup_position`) keeps the historic layout exactly: the
+    /// corner opposite the bar on the right, 8px from the top/right edges.
+    #[test]
+    fn popup_placement_auto_keeps_the_original_layout() {
+        let cfg = crate::config::default_config(); // horizontal bar, top
+        let (anchor, margin) = popup_placement(&cfg);
+        assert_eq!(anchor, Anchor::Bottom | Anchor::Right);
+        assert_eq!(
+            (margin.top, margin.right, margin.bottom, margin.left),
+            (8, 8, 0, 0)
+        );
+    }
+
+    /// An explicit position anchors the popup on that corner and only the
+    /// two relevant margins carry the configured values (roadmap M4).
+    #[test]
+    fn popup_placement_honours_explicit_position_and_margins() {
+        let cfg: crate::config::Config = serde_json::from_str(
+            r##"{
+                "panel": {
+                    "anchor": "top",
+                    "section_layout": "horizontal",
+                    "notifications": {
+                        "popup_position": "bottom-left",
+                        "popup_margin_h": 20,
+                        "popup_margin_v": 4
+                    },
+                    "sections": []
+                }
+            }"##,
+        )
+        .expect("config must parse");
+        let (anchor, margin) = popup_placement(&cfg);
+        assert_eq!(anchor, Anchor::Bottom | Anchor::Left);
+        assert_eq!(
+            (margin.top, margin.right, margin.bottom, margin.left),
+            (0, 0, 4, 20)
+        );
+    }
+
+    /// An unknown position key falls back to `auto` (bar-opposite layout).
+    #[test]
+    fn popup_placement_falls_back_to_auto_on_unknown_keys() {
+        let cfg: crate::config::Config = serde_json::from_str(
+            r##"{
+                "panel": {
+                    "anchor": "top",
+                    "section_layout": "horizontal",
+                    "notifications": { "popup_position": "diagonal" },
+                    "sections": []
+                }
+            }"##,
+        )
+        .expect("config must parse");
+        let (anchor, _) = popup_placement(&cfg);
+        assert_eq!(anchor, Anchor::Bottom | Anchor::Right);
     }
 
     /// A bare 26px bar: only the section content padding (4px a side).
