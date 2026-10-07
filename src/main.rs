@@ -33,6 +33,7 @@ mod config;
 mod notifications;
 mod sensor_runner;
 mod sensors;
+mod text_width;
 mod tray;
 
 // ── globals ────────────────────────────────────────────────────────
@@ -92,6 +93,9 @@ struct SensorValue {
     /// Tray icons when the source is a `tray` sensor (`None` otherwise);
     /// the icons themselves live in `tray.rs`.
     tray: Option<Vec<tray::TrayIcon>>,
+    /// Pinned pixel width of the value text (roadmap M5): net rate sensors
+    /// keep a stable box so the row never resizes with the content.
+    fixed_width: Option<u16>,
 }
 
 /// Rendered section data.
@@ -517,6 +521,26 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                                 .unwrap_or(0) as u16,
                             action: s.action.clone(),
                             tray: tray_icons,
+                            // Only the net rate sensors pin their width
+                            // (roadmap M5); the measurement is cached per
+                            // font/size, so the per-tick rebuild pays nothing
+                            // after the first run.
+                            fixed_width: if matches!(
+                                &s.source,
+                                config::SensorSource::UsedNetup { .. }
+                                    | config::SensorSource::UsedNetdown { .. }
+                            ) {
+                                let font = panel_font(&panel.config);
+                                let size =
+                                    panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
+                                Some(text_width::widest(
+                                    &font,
+                                    size,
+                                    &sensors::net_rate_samples(),
+                                ))
+                            } else {
+                                None
+                            },
                         }
                     })
                     .collect();
@@ -871,10 +895,19 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
                 sensor_text_color
             };
 
-            let value_widget = text(&s.value)
+            // The value text of net rates pins its box width (roadmap M5):
+            // the container carries the fixed width so the text itself never
+            // wraps, whatever the content.
+            let value_text = text(&s.value)
                 .color(text_color)
                 .size(font_size)
                 .font(font_obj);
+            let value_widget: Element<'a, Message> = match s.fixed_width {
+                Some(width) => container(value_text)
+                    .width(Length::Fixed(f32::from(width)))
+                    .into(),
+                None => value_text.into(),
+            };
 
             // Name and value side by side, separated by a small gap (the
             // colon separator was removed on request); an empty name (e.g.

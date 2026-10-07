@@ -322,6 +322,19 @@ pub fn get_date() -> String {
     }
 }
 
+/// Longest window title the sensor shows (roadmap M1): longer text is cut
+/// at a char boundary (multibyte-safe) and marked with a trailing "...".
+const WINDOW_TITLE_MAX: usize = 80;
+
+/// Cut `title` to [`WINDOW_TITLE_MAX`] chars, appending "..." when cut.
+fn truncate_title(title: &str) -> String {
+    if title.chars().count() <= WINDOW_TITLE_MAX {
+        return title.to_string();
+    }
+    let cut: String = title.chars().take(WINDOW_TITLE_MAX).collect();
+    format!("{cut}...")
+}
+
 /// Get the current focused window title (Hyprland specific).
 pub fn get_window_title() -> String {
     let output = Command::new("hyprctl")
@@ -334,7 +347,7 @@ pub fn get_window_title() -> String {
             // Example output: {"id":1234,"title":"Firefox","class":"firefox","initialClass":"firefox","workspace":{"id":1,"name":"1"}}
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
                 if let Some(title) = json.get("title") {
-                    return title.as_str().unwrap_or("No Title").to_string();
+                    return truncate_title(title.as_str().unwrap_or("No Title"));
                 }
             }
             "No Title".to_string()
@@ -667,23 +680,59 @@ fn net_rate(interface: &str, up: bool) -> Option<f64> {
     Some((cur - prev) as f64 / dt)
 }
 
-/// Format a byte rate: `812 B/s`, `1.4 KB/s`, `12.3 MB/s`.
+/// Figure space (U+2007): by Unicode definition as wide as one digit of the
+/// font — padding the integer part with it keeps every formatted rate at the
+/// same pixel width whatever figures the configured font uses (roadmap M5).
+const FIGURE_SPACE: char = '\u{2007}';
+
+/// Integer-part slots of a formatted rate: wide enough for the largest value
+/// any tier can show (`1023.9`).
+const RATE_INT_SLOTS: usize = 4;
+
+/// Rate labels, one per order of magnitude.
+const RATE_UNITS: [&str; 5] = ["B/s", "KB/s", "MB/s", "GB/s", "TB/s"];
+
+/// Format a byte rate with a FIXED composition (roadmap M5): a
+/// [`RATE_INT_SLOTS`]-slot integer part padded with figure spaces, one
+/// decimal digit, a space and the tier unit. The string's pixel width can't
+/// change with the value, so the sensor box never resizes ("dances") while
+/// the rate changes.
 fn fmt_rate(bytes_per_sec: f64) -> String {
-    if bytes_per_sec < 1024.0 {
-        format!("{:.0} B/s", bytes_per_sec)
-    } else if bytes_per_sec < 1024.0 * 1024.0 {
-        format!("{:.1} KB/s", bytes_per_sec / 1024.0)
-    } else {
-        format!("{:.1} MB/s", bytes_per_sec / (1024.0 * 1024.0))
+    let mut value = bytes_per_sec;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < RATE_UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
     }
+    let shaped = format!("{value:.1}");
+    let (int, dec) = shaped.split_once('.').unwrap_or((shaped.as_str(), "0"));
+    let pad = std::iter::repeat_n(FIGURE_SPACE, RATE_INT_SLOTS.saturating_sub(int.len()))
+        .collect::<String>();
+    format!("{pad}{int}.{dec} {}", RATE_UNITS[unit])
 }
 
-/// Get network download rate (e.g. `1.4 MB/s`); `N/A` on the first tick.
+/// Formatting samples covering every tier's narrow and wide shapes (roadmap
+/// M5): the view pins the net sensor's width to the widest of them, so the
+/// box stays stable even when the tier label changes.
+pub fn net_rate_samples() -> Vec<String> {
+    let mut samples = vec![fmt_rate(0.0), "N/A".to_string()];
+    for tier in 0..RATE_UNITS.len() {
+        let scale = 1024f64.powi(tier as i32);
+        for value in [1.0, 777.7, 1023.9] {
+            samples.push(fmt_rate(value * scale));
+        }
+    }
+    samples
+}
+
+/// Get network download rate (fixed-width format, e.g. `   1.4 MB/s`);
+/// `N/A` on the first tick.
 pub fn net_down(interface: &str) -> String {
     net_rate(interface, false).map(fmt_rate).unwrap_or_else(|| "N/A".to_string())
 }
 
-/// Get network upload rate (e.g. `12.3 KB/s`); `N/A` on the first tick.
+/// Get network upload rate (fixed-width format, e.g. ` 812.0 B/s`);
+/// `N/A` on the first tick.
 pub fn net_up(interface: &str) -> String {
     net_rate(interface, true).map(fmt_rate).unwrap_or_else(|| "N/A".to_string())
 }
@@ -713,5 +762,51 @@ mod tests {
     fn volume_device_defaults_to_master() {
         assert_eq!(volume_device(""), "Master");
         assert_eq!(volume_device(" Speaker "), "Speaker");
+    }
+
+    /// Every formatted sample keeps the fixed composition (four-slot integer
+    /// part of digits/figure spaces, dot, one decimal digit): the shape that
+    /// makes the pixel width independent of the value. Spot checks included.
+    #[test]
+    fn net_rate_format_is_fixed_composition() {
+        for sample in net_rate_samples() {
+            if sample == "N/A" {
+                continue;
+            }
+            let (int, rest) = sample
+                .split_once('.')
+                .unwrap_or_else(|| panic!("missing decimal dot in {sample}"));
+            assert_eq!(int.chars().count(), RATE_INT_SLOTS, "{sample}");
+            assert!(
+                int.chars()
+                    .all(|c| c.is_ascii_digit() || c == FIGURE_SPACE),
+                "{sample}"
+            );
+            assert!(rest.starts_with(|c: char| c.is_ascii_digit()), "{sample}");
+        }
+        let f = FIGURE_SPACE;
+        assert_eq!(fmt_rate(0.0), format!("{f}{f}{f}0.0 B/s"));
+        assert_eq!(fmt_rate(1023.9), "1023.9 B/s");
+        assert_eq!(fmt_rate(1024.0), format!("{f}{f}{f}1.0 KB/s"));
+        assert_eq!(fmt_rate(2_000_000.0), format!("{f}{f}{f}1.9 MB/s"));
+    }
+
+    /// Titles of 80 chars stay intact; longer ones are cut at exactly 80
+    /// chars and marked with "..."; multibyte titles cut at a char boundary
+    /// (no panic, no split byte).
+    #[test]
+    fn window_title_truncation() {
+        let exact: String = "a".repeat(WINDOW_TITLE_MAX);
+        assert_eq!(truncate_title(&exact), exact);
+        let over: String = format!("{}bb", exact);
+        let cut = truncate_title(&over);
+        assert_eq!(cut.len(), WINDOW_TITLE_MAX + 3);
+        assert!(cut.ends_with("..."));
+        assert_eq!(cut.trim_end_matches('.').len(), WINDOW_TITLE_MAX);
+        // Multibyte: 81 two-byte chars -> cut stays valid UTF-8.
+        let wide: String = "é".repeat(WINDOW_TITLE_MAX + 1);
+        let cut = truncate_title(&wide);
+        assert_eq!(cut.chars().count(), WINDOW_TITLE_MAX + 3);
+        assert!(cut.ends_with("..."));
     }
 }

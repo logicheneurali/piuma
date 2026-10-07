@@ -179,8 +179,8 @@ Each sensor's `source` object has a `type` plus the parameters listed
 | `used_swap` | swap used (`0 MB`) | — |
 | `used_disk` | root fs used (`619G`) | — |
 | `used_battery` | battery energy (`64.0 Wh`) | — |
-| `used_netdown` | interface download rate (`1.6 KB/s`) | `interface` |
-| `used_netup` | interface upload rate (`66 B/s`) | `interface` |
+| `used_netdown` | interface download rate (`   1.6 KB/s`) | `interface` |
+| `used_netup` | interface upload rate (` 66.0 B/s`) | `interface` |
 | `total_mem` | RAM total (`31807 MB`) | — |
 | `total_swap` | swap total (`31806 MB`) | — |
 | `total_disk` | root fs size (`950G`) | — |
@@ -192,7 +192,7 @@ Each sensor's `source` object has a `type` plus the parameters listed
 | `net_state` | interface state (`connected`) | `interface` |
 | `uptime` | uptime (`up 2 hours, 30 minutes`) | — |
 | `clock` | time (`10:12:42`); `format: "date"` = date only | `format` |
-| `window` | focused window title | — |
+| `window` | focused window title (cut at 80 chars + `...`) | — |
 | `workspace` | current workspace | — |
 | `command` | shell command stdout | `command` |
 | `env_var` | environment variable value | `env_var` |
@@ -202,7 +202,11 @@ Each sensor's `source` object has a `type` plus the parameters listed
 
 Network rates and the CPU percentage are computed from consecutive
 counter samples (`/proc/net/dev`, `/proc/stat`): the very first refresh
-can show `N/A` until the second sample arrives.
+can show `N/A` until the second sample arrives. The rate text has a
+**fixed composition** (a 4-slot integer part padded with figure spaces
+U+2007, one decimal digit, a space, the tier unit) and the sensor pins
+its pixel width for the configured font, so a changing value or unit
+never makes the sensor box — or its neighbours — resize (roadmap M5).
 
 ### System tray
 

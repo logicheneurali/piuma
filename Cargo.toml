@@ -17,6 +17,9 @@ dirs = "5.0"
 zbus = "5"
 # Freedesktop icon-name → file lookup for tray items.
 freedesktop-icons = "0.4"
+# Text width measurement for pinned sensor values (M5): the same shaper
+# iced renders with, already in the tree through iced_graphics.
+cosmic-text = "0.15"
 
 [profile.release]
 opt-level = "z"
