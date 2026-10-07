@@ -85,6 +85,8 @@ pub struct Config {
 pub struct PanelConfig {
     pub font: Option<String>,
     pub font_size: Option<u32>,
+    /// Bold panel text (roadmap M2); absent = false.
+    pub bold: Option<bool>,
     pub section_layout: Option<String>,
     pub default_section_weight: Option<u32>,
     pub default_bg_color: Option<String>,
@@ -317,6 +319,7 @@ pub fn default_config() -> Config {
         panel: PanelConfig {
             font: Some("Noto Sans".to_string()),
             font_size: Some(14),
+            bold: None,
             section_layout: Some("horizontal".to_string()),
             default_section_weight: Some(1),
             default_bg_color: None,

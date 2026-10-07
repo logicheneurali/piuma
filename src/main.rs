@@ -784,15 +784,47 @@ fn subscription(panel: &Panel) -> Subscription<Message> {
 /// surfaces are registered — the multi-surface runtime keys actions by id.
 static BAR_ID: std::sync::OnceLock<iced::window::Id> = std::sync::OnceLock::new();
 
+/// Configured family name kept alive for [`Font::Name`]'s `'static` bound:
+/// leaked once per name actually used, so reloads don't accumulate leaks.
+static FONT_NAME: std::sync::Mutex<Option<(&'static str, String)>> =
+    std::sync::Mutex::new(None);
+
+/// The `'static` family name of the configured font (roadmap M2).
+fn font_name_static(config: &config::Config) -> &'static str {
+    let name = config.panel.font.as_deref().unwrap_or(DEFAULT_FONT);
+    let mut slot = FONT_NAME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((leaked, original)) = slot.as_ref() {
+        if original == name {
+            return *leaked;
+        }
+    }
+    let leaked = Box::leak(name.to_string().into_boxed_str());
+    *slot = Some((leaked, name.to_string()));
+    leaked
+}
+
+/// The panel font exactly as configured: family from `panel.font` (default
+/// [`DEFAULT_FONT`]) and the `panel.bold` flag as the weight (roadmap M2).
+/// Single source for every bar text and for the M5 width measurement.
+fn panel_font(config: &config::Config) -> Font {
+    let weight = if config.panel.bold.unwrap_or(false) {
+        iced::font::Weight::Bold
+    } else {
+        iced::font::Weight::Normal
+    };
+    Font { weight, ..Font::with_name(font_name_static(config)) }
+}
+
 fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> {
     // The popup window renders its own tree; only bar calls feed BAR_ID.
     if panel.popup == Some(window) {
         return popup_view(panel);
     }
     let _ = BAR_ID.set(window);
-    let font_name = panel.config.panel.font.as_ref().map(|s| s.to_string()).unwrap_or(DEFAULT_FONT.to_string());
+    let font_obj = panel_font(&panel.config);
     let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
-    let _ = &font_name;
 
     // Panel orientation: the `thickness` axis (the "cross" axis of the panel)
     // is the height for a horizontal panel and the width for a vertical one.
@@ -812,7 +844,6 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
         let section_text = section.text_color;
         let has_title = !section.name.is_empty();
         let title_color = section.title_color;
-        let font_obj = Font::with_name(DEFAULT_FONT);
 
         // Sensor boxes fill the `thickness` axis only when the section arranges
         // them *across* it (section cross axis == panel cross axis); stacked
@@ -857,6 +888,7 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
                 tray::row(
                     icons,
                     font_size,
+                    font_obj,
                     &tray::Style {
                         bg_color: s.bg_color.or(Some(section_bg)),
                         text_color: s.text_color,
@@ -1664,9 +1696,12 @@ fn refresh_notification_sensor(panel: &mut Panel) {
 fn popup_view(panel: &Panel) -> Element<'_, Message> {
     let st = popup_style(&panel.config);
     let card_h = popup_card_h(&st);
+    // Font audit (roadmap M2): every popup text takes the configured family;
+    // the summary renders bold on top of it, body and ✕ as configured.
+    let font = panel_font(&panel.config);
     let bold = Font {
         weight: iced::font::Weight::Bold,
-        ..Font::with_name(DEFAULT_FONT)
+        ..font
     };
 
     let mut stack: Column<'_, Message> = Column::new().spacing(POPUP_CARD_GAP as f32);
@@ -1704,7 +1739,13 @@ fn popup_view(panel: &Panel) -> Element<'_, Message> {
             .spacing(2)
             .push(text(card.summary).size(st.font_size + 3).font(bold).color(fg).width(Length::Fill));
         if !card.body.is_empty() {
-            lines = lines.push(text(card.body).size(st.font_size).color(fg).width(Length::Fill));
+            lines = lines.push(
+                text(card.body)
+                    .size(st.font_size)
+                    .color(fg)
+                    .font(font)
+                    .width(Length::Fill),
+            );
         }
         let mut content = Row::new()
             .spacing(8)
@@ -1729,7 +1770,13 @@ fn popup_view(panel: &Panel) -> Element<'_, Message> {
             // a target, and its MouseArea must not overlap the card's.
             .push(
                 MouseArea::new(
-                    container(text("✕").size(st.font_size + 2).color(fg)).padding(8),
+                    container(
+                        text("✕")
+                            .size(st.font_size + 2)
+                            .color(fg)
+                            .font(font),
+                    )
+                    .padding(8),
                 )
                 .on_press(Message::PopupCardDismissed(card.id))
                 .on_enter(Message::PopupCardEnter(card.id))

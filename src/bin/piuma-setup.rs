@@ -22,6 +22,9 @@ mod config;
 pub struct PiumaConfig {
     pub font: Option<String>,
     pub font_size: u32,
+    /// Bold panel text (roadmap M2): `None` = key absent (the bar reads
+    /// false) — written only when set, so a save never injects the key.
+    pub bold: Option<bool>,
     pub section_layout: String,
     pub default_section_weight: u32,
     pub default_bg_color: Option<String>,
@@ -161,6 +164,7 @@ impl Default for PiumaConfig {
         PiumaConfig {
             font: Some("Noto Sans".to_string()),
             font_size: 12,
+            bold: None,
             section_layout: "horizontal".to_string(),
             default_section_weight: 1,
             default_bg_color: Some("#1a1b26".to_string()),
@@ -234,6 +238,8 @@ impl Default for SourceConfig {
 pub enum Message {
     FontChanged(String),
     FontSizeChanged(u32),
+    /// Bold panel text toggle (roadmap M2).
+    BoldChanged(bool),
     ThicknessChanged(u32),
     /// Sensor style defaults: (field name, value) and (field name, number)
     /// for the fields of `panel.sensor_defaults`.
@@ -442,6 +448,9 @@ impl PiumaSetup {
             panel.insert("font".to_string(), JsonValue::String(font.clone()));
         }
         panel.insert("font_size".to_string(), JsonValue::Number(self.config.font_size.into()));
+        if let Some(b) = self.config.bold {
+            panel.insert("bold".to_string(), JsonValue::Bool(b));
+        }
         panel.insert("section_layout".to_string(), JsonValue::String(self.config.section_layout.clone()));
         panel.insert("default_section_weight".to_string(), JsonValue::Number(self.config.default_section_weight.into()));
 
@@ -775,6 +784,7 @@ impl PiumaSetup {
         self.config = PiumaConfig {
             font: None,
             font_size: 14,
+            bold: None,
             section_layout: "horizontal".to_string(),
             default_section_weight: 1,
             default_bg_color: None,
@@ -794,6 +804,8 @@ impl PiumaSetup {
         if let Some(fs_) = panel.get("font_size").and_then(|v| v.as_u64()) {
             self.config.font_size = fs_ as u32;
         }
+        // Absent `bold` stays `None` (reset default): the bar reads false.
+        self.config.bold = panel.get("bold").and_then(|v| v.as_bool());
         if let Some(sl) = panel.get("section_layout").and_then(|v| v.as_str()) {
             self.config.section_layout = sl.to_string();
         }
@@ -1031,6 +1043,10 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
     match message {
         Message::FontChanged(value) => state.config.font = if value.is_empty() { None } else { Some(value) },
         Message::FontSizeChanged(value) => state.config.font_size = value,
+        Message::BoldChanged(value) => {
+            // On = explicit true; off drops back to absent (≈ false).
+            state.config.bold = value.then_some(true);
+        }
         Message::ThicknessChanged(value) => state.config.thickness = value,
         Message::DefaultsStyleChanged(field, value) => {
             let d = &mut state.config.sensor_defaults;
@@ -1817,6 +1833,10 @@ fn panel_settings(state: &PiumaSetup) -> Element<Message> {
             .push(text(format!("{}pt", font_size)).size(BODY).width(40))
             .spacing(8)
             .width(Length::Fill)
+            .into()),
+        ("Bold", toggler(state.config.bold.unwrap_or(false))
+            .label("Bold text")
+            .on_toggle(Message::BoldChanged)
             .into()),
         ("Thickness", Row::new()
             .push(Slider::new(8..=64, thickness, Message::ThicknessChanged).width(Length::Fill))

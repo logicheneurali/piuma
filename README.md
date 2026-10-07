@@ -87,6 +87,7 @@ Example configuration:
   "panel": {
     "font": "Noto Sans",
     "font_size": 12,
+    "bold": false,
     "section_layout": "horizontal",
     "default_section_weight": 1,
     "default_bg_color": "#1a1b26",
@@ -134,6 +135,10 @@ Example configuration:
   }
 }
 ```
+
+`panel.font` is the family of **every** text the bar draws — sensor
+names, values and descriptions, section titles, tray tooltips and the
+notification popup; `panel.bold: true` renders all of it bold.
 
 Numeric style fields — `border_width`, `border_width_hover`, `border_radius`
 and `padding` (on sensors, on sections, and on `panel.sensor_defaults` /

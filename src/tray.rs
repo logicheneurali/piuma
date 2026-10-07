@@ -894,7 +894,12 @@ pub struct Style {
 /// never an index that could go stale before the click lands.
 /// `style` is the sensor's own look; the tooltip reuses it via
 /// `crate::styled_box` (the 5px tooltip wrapper gap stays outside it).
-pub fn row<'a>(icons: &'a [TrayIcon], font_size: u32, style: &Style) -> Element<'a, Message> {
+pub fn row<'a>(
+    icons: &'a [TrayIcon],
+    font_size: u32,
+    font: iced::font::Font,
+    style: &Style,
+) -> Element<'a, Message> {
     let mut row = Row::new().spacing(4);
     for icon in icons {
         let size = Length::Fixed(f32::from(icon_target()));
@@ -963,6 +968,7 @@ pub fn row<'a>(icons: &'a [TrayIcon], font_size: u32, style: &Style) -> Element<
                     text(&icon.tooltip)
                         .size(font_size)
                         .color_maybe(style.text_color)
+                        .font(font)
                         .into(),
                     style.bg_color,
                     style.border_color,
