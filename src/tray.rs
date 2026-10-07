@@ -975,6 +975,7 @@ pub fn row<'a>(
                     style.border_width,
                     style.border_radius,
                     &style.border_type,
+                    [false, false, false, false],
                     style.padding,
                     Length::Shrink,
                     Length::Shrink,

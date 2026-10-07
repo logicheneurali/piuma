@@ -158,7 +158,19 @@ precedence rule as `panel.sensor_defaults`: a section owns the border group
 only when it sets `border_color`, otherwise the whole group comes from
 `panel.section_defaults`. `bg_color`/`text_color` are single keys: the
 section value when set, otherwise the defaults, the panel
-`default_bg_color`/`default_text_color`, then the built-in ones.
+`default_bg_color`/`default_text_color`, then the built-in ones. A
+`border_color` fully transparent (`#rrggbbaa` with alpha `00`) draws no
+border at all: the border ring would otherwise punch a transparent
+groove through the background.
+
+`panel.section_defaults.respect_screen_edges: true` squares the section
+corners that sit flush with a screen edge (roadmap M3): the bar's
+anchored side always touches the screen, and on the length axis the
+panel ends count as touching when `align` parks a section there
+(`fill` = both ends, `left`/`top` = first section, `right`/`bottom` =
+last one, `center` = none). Touching sides (corner included) render
+square — background and border flush with the screen — only the sides
+*away* from the edge keep the rounded corners.
 
 ### Sensor sources
 

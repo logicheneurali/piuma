@@ -122,6 +122,9 @@ pub struct SectionDefaults {
     pub border_width: Option<i32>,
     pub border_radius: Option<i32>,
     pub border_type: Option<String>,
+    /// Only sides NOT flush with a screen edge get rounded borders
+    /// (roadmap M3); `None` (absent) = false.
+    pub respect_screen_edges: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -265,6 +268,8 @@ pub enum Message {
     /// for the fields of `panel.section_defaults`.
     SecDefaultsStyleChanged(String, String),
     SecDefaultsNumberChanged(String, i32),
+    /// "Borders respect screen edges" toggle of Section Defaults (M3).
+    SecDefaultsRespectEdges(bool),
     SectionLayoutChanged(String),
     DefaultSectionWeightChanged(u32),
     DefaultBgColorChanged(String),
@@ -575,6 +580,9 @@ impl PiumaSetup {
             if let Some(v) = val {
                 sec_map.insert(key.to_string(), JsonValue::Number((*v).into()));
             }
+        }
+        if let Some(v) = sd.respect_screen_edges {
+            sec_map.insert("respect_screen_edges".to_string(), JsonValue::Bool(v));
         }
         if !sec_map.is_empty() {
             panel.insert("section_defaults".to_string(), JsonValue::Object(sec_map));
@@ -958,6 +966,10 @@ impl PiumaSetup {
                     *field = Some(v as i32);
                 }
             }
+            // Roadmap M3: absent key stays `None` = false (reset default).
+            d.respect_screen_edges = obj
+                .get("respect_screen_edges")
+                .and_then(|v| v.as_bool());
         }
 
         if let Some(sections) = panel.get("sections").and_then(|v| v.as_array()) {
@@ -1153,6 +1165,11 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                 "border_radius" => d.border_radius = Some(value),
                 _ => {}
             }
+        }
+        Message::SecDefaultsRespectEdges(value) => {
+            // Off = absent key (the bar reads false), on = explicit true.
+            state.config.section_defaults.respect_screen_edges =
+                value.then_some(true);
         }
         Message::SectionLayoutChanged(value) => state.config.section_layout = value,
         Message::DefaultSectionWeightChanged(value) => state.config.default_section_weight = value,
@@ -2431,6 +2448,12 @@ fn section_defaults_view(state: &PiumaSetup) -> Element<Message> {
                 Some(d.border_type.clone().unwrap_or_else(|| "full".to_string())),
                 |value| Message::SecDefaultsStyleChanged("border_type".to_string(), value),
             ).width(Length::Fill).into()),
+            // Roadmap M3: only sides NOT flush with a screen edge get the
+            // rounded corners; the flag comes from these defaults alone.
+            ("Screen Edges", toggler(d.respect_screen_edges.unwrap_or(false))
+                .label("Borders respect screen edges")
+                .on_toggle(Message::SecDefaultsRespectEdges)
+                .into()),
         ];
         root = root.push(form_grid(fields));
     }
@@ -2716,6 +2739,46 @@ mod tests {
             out["panel"]["sections"][0]["sensors"][0]["source"]["type"],
             "notifications"
         );
+        serde_json::from_str::<config::Config>(&saved)
+            .expect("piuma must accept the saved config (pre-save validation)");
+    }
+
+    /// The roadmap M2–M4 keys (`bold`, `respect_screen_edges`,
+    /// `popup_position` + margins) roundtrip load→save with their values,
+    /// and the result still parses as piuma's own schema.
+    #[test]
+    fn roadmap_keys_roundtrip() {
+        let json = r##"{
+  "panel": {
+    "align": "fill",
+    "anchor": "top",
+    "bold": true,
+    "notifications": { "popup_position": "bottom-left", "popup_margin_h": 20, "popup_margin_v": 4 },
+    "section_defaults": { "respect_screen_edges": true },
+    "section_layout": "horizontal",
+    "sections": [],
+    "thickness": 26
+  }
+}"##;
+        let mut state = fixture();
+        state.load_from_json(json).expect("config must load");
+        assert_eq!(state.config.bold, Some(true));
+        let n = state.config.notifications.as_ref().expect("block must load");
+        assert_eq!(
+            (n.popup_position.as_str(), n.popup_margin_h, n.popup_margin_v),
+            ("bottom-left", 20, 4)
+        );
+        assert_eq!(
+            state.config.section_defaults.respect_screen_edges,
+            Some(true)
+        );
+        let saved = state.serialize().expect("serialize must succeed");
+        let out: JsonValue = serde_json::from_str(&saved).expect("saved JSON must parse");
+        assert_eq!(out["panel"]["bold"], true);
+        assert_eq!(out["panel"]["notifications"]["popup_position"], "bottom-left");
+        assert_eq!(out["panel"]["notifications"]["popup_margin_h"], 20);
+        assert_eq!(out["panel"]["notifications"]["popup_margin_v"], 4);
+        assert_eq!(out["panel"]["section_defaults"]["respect_screen_edges"], true);
         serde_json::from_str::<config::Config>(&saved)
             .expect("piuma must accept the saved config (pre-save validation)");
     }

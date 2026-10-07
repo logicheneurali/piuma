@@ -112,6 +112,10 @@ struct SectionData {
     border_width: u16,
     border_radius: u16,
     border_type: String,
+    /// Which sides `[top, right, bottom, left]` sit flush on a screen edge
+    /// with `section_defaults.respect_screen_edges` active (roadmap M3):
+    /// those sides render square instead of rounded.
+    touch: [bool; 4],
     weight: f32,
     sensors: Vec<SensorValue>,
 }
@@ -241,6 +245,9 @@ pub(crate) fn styled_box<'a>(
     border_width: u16,
     border_radius: u16,
     border_type: &str,
+    // Sides `[top, right, bottom, left]` flush with a screen edge: they
+    // render square instead of rounded (roadmap M3; `[false; 4]` elsewhere).
+    touch: [bool; 4],
     padding: u16,
     width: Length,
     height: Length,
@@ -250,6 +257,18 @@ pub(crate) fn styled_box<'a>(
         border_type,
         "underline" | "upperline" | "left" | "right" | "corners"
     );
+
+    let bw_px = Length::Fixed(border_width as f32);
+
+    // Positions a border bar anywhere inside the box bounds.
+    let place = |bar: Element<'a, Message>, x: Alignment, y: Alignment| -> Element<'a, Message> {
+        container(bar)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(x)
+            .align_y(y)
+            .into()
+    };
 
     // `width`/`height` carry the panel's thickness axis (Fill when the boxes
     // stretch, Shrink otherwise); the content stays content-sized and is
@@ -268,13 +287,29 @@ pub(crate) fn styled_box<'a>(
             if !partial {
                 if let Some(c) = border_color {
                     style.border.color = c;
-                    style.border.width = border_width as f32;
-                    style.border.radius = (border_radius as f32).into();
+                    // The native border carves the innermost `border_width`
+                    // px of the quad: with an α=0 colour that ring renders as
+                    // a hole (premultiplied to nothing) showing the panel
+                    // behind — a transparent border draws no border at all.
+                    style.border.width = if c.a == 0.0 {
+                        0.0
+                    } else {
+                        border_width as f32
+                    };
+                    // Roadmap M3: the native border (line *and* background
+                    // shape) rounds only the corners away from screen edges;
+                    // touching ones render square. Radius is set here — the
+                    // renderer composes background and border once, so a
+                    // translucent colour shows no seams and nothing is ever
+                    // drawn over the sensors.
+                    style.border.radius = corner_radius(touch, border_radius as f32);
                 }
             }
             style
         });
 
+    // Full border: the per-corner radius above is all M3 needs — no overlay
+    // strips (they used to sit over the content and double-blend the bg).
     if !partial {
         return base.into();
     }
@@ -285,18 +320,6 @@ pub(crate) fn styled_box<'a>(
     if bw == 0 {
         return base.into();
     }
-
-    let bw_px = Length::Fixed(bw as f32);
-
-    // Positions a border bar anywhere inside the box bounds.
-    let place = |bar: Element<'a, Message>, x: Alignment, y: Alignment| -> Element<'a, Message> {
-        container(bar)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(x)
-            .align_y(y)
-            .into()
-    };
 
     let mut layers: Vec<Element<'a, Message>> = vec![base.into()];
     match border_type {
@@ -425,7 +448,7 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             }
 
             let mut sections: Vec<SectionData> = Vec::new();
-            for section_cfg in panel.config.panel.sections.iter() {
+            for (section_idx, section_cfg) in panel.config.panel.sections.iter().enumerate() {
                 let section_default_txt = panel.config.panel.default_text_color
                     .as_ref()
                     .map(|s| config::parse_color(s).ok())
@@ -588,6 +611,21 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                     border_width: bw_val as u16,
                     border_radius: br_val as u16,
                     border_type: bt_str.to_string(),
+                    // Roadmap M3: the edge rule is a layout hint coming from
+                    // the defaults only (a section's own border group
+                    // doesn't carry it).
+                    touch: if sdefaults
+                        .and_then(|sd| sd.respect_screen_edges)
+                        .unwrap_or(false)
+                    {
+                        section_touch(
+                            &panel.config,
+                            section_idx,
+                            panel.config.panel.sections.len(),
+                        )
+                    } else {
+                        [false; 4]
+                    },
                     weight: panel.config.panel.default_section_weight.as_ref().map(|w| (*w as u32) as f32).unwrap_or(1.0),
                     sensors,
                 });
@@ -973,6 +1011,8 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
                 s.border_width,
                 s.border_radius,
                 &s.border_type,
+                // Sensors sit inside sections: never on a screen edge.
+                [false, false, false, false],
                 pad,
                 box_w,
                 box_h,
@@ -1060,6 +1100,7 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
             section.border_width,
             section.border_radius,
             &section.border_type,
+            section.touch,
             0,
             if vertical { Length::Fill } else { Length::Shrink },
             if vertical { Length::Shrink } else { Length::Fill },
@@ -1520,6 +1561,57 @@ fn panel_anchor(config: &config::Config) -> Anchor {
     }
 }
 
+/// Which sides `[top, right, bottom, left]` of the section at `idx` sit
+/// flush on a screen edge (roadmap M3): the bar's anchored side touches for
+/// every section (the sections span the full thickness and the surface has
+/// no root padding); on the length axis the flush ends follow `align` —
+/// `fill` keeps the first/last section at the panel ends (both flush when a
+/// single section fills the row), `left`/`top` parks only the first one
+/// there, `right`/`bottom` only the last, `center` none.
+fn section_touch(config: &config::Config, idx: usize, count: usize) -> [bool; 4] {
+    let vertical = config.panel.section_layout.as_deref() == Some("vertical");
+    let anchor = panel_anchor(config);
+    let mut touch = [
+        anchor.contains(Anchor::Top),
+        anchor.contains(Anchor::Right),
+        anchor.contains(Anchor::Bottom),
+        anchor.contains(Anchor::Left),
+    ];
+    let align = config.panel.align.as_deref().unwrap_or("center");
+    let at_start = if vertical { align == "top" } else { align == "left" };
+    let at_end = if vertical { align == "bottom" } else { align == "right" };
+    let (start, end) = if align == "fill" {
+        (idx == 0, idx + 1 == count)
+    } else if at_start {
+        (idx == 0, false)
+    } else if at_end {
+        (false, idx + 1 == count)
+    } else {
+        (false, false)
+    };
+    if vertical {
+        touch[0] |= start;
+        touch[2] |= end;
+    } else {
+        touch[3] |= start;
+        touch[1] |= end;
+    }
+    touch
+}
+
+/// Border radius per corner for roadmap M3: `touch = [top, right, bottom,
+/// left]`; a corner renders square when **either** of its two sides is flush
+/// with a screen edge, rounded to `radius` otherwise.
+fn corner_radius(touch: [bool; 4], radius: f32) -> iced::border::Radius {
+    let corner = |flush: bool| if flush { 0.0 } else { radius };
+    iced::border::Radius {
+        top_left: corner(touch[0] || touch[3]),
+        top_right: corner(touch[0] || touch[1]),
+        bottom_right: corner(touch[2] || touch[1]),
+        bottom_left: corner(touch[2] || touch[3]),
+    }
+}
+
 // ── popup window (F3) ───────────────────────────────────────────────
 
 /// Keep the popup window in step with the active notifications: no
@@ -1872,6 +1964,7 @@ fn popup_view(panel: &Panel) -> Element<'_, Message> {
             st.border_width.min(u16::MAX as u32) as u16,
             st.border_radius.min(u16::MAX as u32) as u16,
             &st.border_type,
+            [false, false, false, false],
             st.padding.min(u16::MAX as u32) as u16,
             Length::Fill,
             Length::Fixed(card_h as f32),
@@ -2047,7 +2140,10 @@ fn parse_config_arg() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{popup_card_h, popup_placement, tray_icon_target, PopupStyle};
+    use super::{
+        corner_radius, popup_card_h, popup_placement, section_touch,
+        tray_icon_target, PopupStyle,
+    };
     use iced_exwlshell::reexport::Anchor;
 
     /// The default popup style must keep the F3 geometry exactly (84px
@@ -2120,6 +2216,44 @@ mod tests {
         .expect("config must parse");
         let (anchor, _) = popup_placement(&cfg);
         assert_eq!(anchor, Anchor::Bottom | Anchor::Right);
+    }
+
+    /// Touching sides `[top, right, bottom, left]` (roadmap M3): the bar's
+    /// anchored side always touches; on the length axis `fill` flushes the
+    /// first/last section (a single one on both ends), `center` none, and a
+    /// vertical bar parked at the top gives its first section the top side.
+    #[test]
+    fn section_touch_follows_anchor_and_align() {
+        let mut cfg = crate::config::default_config(); // horizontal, top, center
+        assert_eq!(section_touch(&cfg, 0, 3), [true, false, false, false]);
+        assert_eq!(section_touch(&cfg, 2, 3), [true, false, false, false]);
+
+        cfg.panel.align = Some("fill".to_string());
+        assert_eq!(section_touch(&cfg, 0, 2), [true, false, false, true]);
+        assert_eq!(section_touch(&cfg, 1, 2), [true, true, false, false]);
+        assert_eq!(section_touch(&cfg, 0, 1), [true, true, false, true]);
+
+        cfg.panel.section_layout = Some("vertical".to_string());
+        cfg.panel.align = Some("top".to_string());
+        assert_eq!(section_touch(&cfg, 0, 2), [true, false, false, true]);
+        assert_eq!(section_touch(&cfg, 1, 2), [false, false, false, true]);
+    }
+
+    /// A corner squares when either of its sides touches (roadmap M3): a
+    /// top-anchored row's first section keeps only the bottom-right rounding,
+    /// and a section touching nothing keeps the pre-M3 look on all corners.
+    #[test]
+    fn corner_radius_squares_only_corners_by_touching_sides() {
+        let r = corner_radius([true, false, false, true], 12.0);
+        assert_eq!(r.top_left, 0.0); // top AND left touch
+        assert_eq!(r.top_right, 0.0); // top touches (right does not)
+        assert_eq!(r.bottom_left, 0.0); // left touches (bottom does not)
+        assert_eq!(r.bottom_right, 12.0); // neither side touches
+        let none = corner_radius([false; 4], 12.0);
+        assert_eq!(
+            (none.top_left, none.top_right, none.bottom_right, none.bottom_left),
+            (12.0, 12.0, 12.0, 12.0)
+        );
     }
 
     /// A bare 26px bar: only the section content padding (4px a side).

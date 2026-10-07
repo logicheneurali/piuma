@@ -172,6 +172,9 @@ pub struct SectionDefaults {
     pub border_width: Option<i32>,
     pub border_radius: Option<i32>,
     pub border_type: Option<String>,
+    /// When true only the sides NOT flush with a screen edge get rounded
+    /// borders (roadmap M3); absent = false.
+    pub respect_screen_edges: Option<bool>,
 }
 
 #[derive(Deserialize, serde::Serialize, Clone)]
