@@ -275,6 +275,8 @@ pub enum Message {
     AutostartChanged(bool),
     /// GTK theme bridge toggle (roadmap N3).
     AppThemeChanged(bool),
+    /// Sidebar category switch (roadmap N4).
+    TabSelected(Tab),
     ThicknessChanged(u32),
     /// Sensor style defaults: (field name, value) and (field name, number)
     /// for the fields of `panel.sensor_defaults`.
@@ -424,8 +426,43 @@ fn sanitize_file_name(raw: &str) -> Result<String, String> {
 }
 
 // Application state
+/// The setup categories, shown one at a time behind the sidebar tabs
+/// (roadmap N4). `Panel` is the startup tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tab {
+    Panel,
+    Notifications,
+    SensorDefaults,
+    SectionDefaults,
+    Sections,
+}
+
+impl Tab {
+    /// Sidebar order.
+    const ALL: [Tab; 5] = [
+        Tab::Panel,
+        Tab::Notifications,
+        Tab::SensorDefaults,
+        Tab::SectionDefaults,
+        Tab::Sections,
+    ];
+
+    /// Label shown on the sidebar button.
+    fn label(self) -> &'static str {
+        match self {
+            Tab::Panel => "Panel",
+            Tab::Notifications => "Notifications",
+            Tab::SensorDefaults => "Sensor Defaults",
+            Tab::SectionDefaults => "Section Defaults",
+            Tab::Sections => "Sections",
+        }
+    }
+}
+
 pub struct PiumaSetup {
     config: PiumaConfig,
+    /// Sidebar tab currently shown (roadmap N4): only its card renders.
+    active_tab: Tab,
     status_message: Option<String>,
     status_is_error: bool,
     /// Whether the collapsible "Sensor Defaults" card is open.
@@ -448,6 +485,7 @@ impl PiumaSetup {
     fn new() -> Self {
         let mut state = PiumaSetup {
             config: PiumaConfig::default(),
+            active_tab: Tab::Panel,
             status_message: None,
             status_is_error: false,
             defaults_expanded: false,
@@ -1165,6 +1203,7 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
             // On = explicit true; off drops back to absent (≈ false).
             state.config.app_theme = value.then_some(true);
         }
+        Message::TabSelected(tab) => state.active_tab = tab,
         Message::ThicknessChanged(value) => state.config.thickness = value,
         Message::DefaultsStyleChanged(field, value) => {
             let d = &mut state.config.sensor_defaults;
@@ -1771,21 +1810,24 @@ fn style_summary(colors: &[(&str, &Option<String>)], numbers: &[(&str, &Option<i
 /// Root view: the scrollable column of nested cards with the action bar
 /// underneath; a modal, when open, is stacked over everything on a dimmed layer.
 fn view(state: &PiumaSetup) -> Element<Message> {
-    let content = column![
-        config_header(state),
-        panel_settings(state),
-        notifications_settings(state),
-        sensor_defaults_view(state),
-        section_defaults_view(state),
-        sections_list(state),
-    ]
-    .padding(20)
-    .spacing(15)
-    .width(Length::Fill);
+    // Roadmap N4: a left tab rail picks the category and only that
+    // category's card renders — the header (file info) and the footer
+    // (Load/Save/status) stay visible on every tab.
+    let content = column![config_header(state)]
+        .push(active_card(state))
+        .padding(20)
+        .spacing(15)
+        .width(Length::Fill);
 
     let base = container(
         column![
-            container(scrollable(content).width(Length::Fill).height(Length::Fill))
+            Row::new()
+                .push(sidebar(state))
+                .push(
+                    container(scrollable(content).width(Length::Fill).height(Length::Fill))
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                )
                 .width(Length::Fill)
                 .height(Length::Fill),
             footer(state),
@@ -1804,6 +1846,56 @@ fn view(state: &PiumaSetup) -> Element<Message> {
         Some(_) => stack![base, modal_overlay(state)].into(),
         None => base.into(),
     }
+}
+
+/// The one card belonging to the active tab (roadmap N4).
+fn active_card(state: &PiumaSetup) -> Element<'_, Message> {
+    match state.active_tab {
+        Tab::Panel => panel_settings(state),
+        Tab::Notifications => notifications_settings(state),
+        Tab::SensorDefaults => sensor_defaults_view(state),
+        Tab::SectionDefaults => section_defaults_view(state),
+        Tab::Sections => sections_list(state),
+    }
+}
+
+/// Left tab rail (roadmap N4): one button per category, the active one
+/// highlighted; edits live in `state.config`, so switching tabs never
+/// loses unsaved work.
+fn sidebar(state: &PiumaSetup) -> Element<'_, Message> {
+    let mut rail = Column::new().spacing(4).padding(Padding {
+        top: 20.0,
+        right: 10.0,
+        bottom: 10.0,
+        left: 10.0,
+    });
+    for tab in Tab::ALL {
+        let selected = state.active_tab == tab;
+        rail = rail.push(
+            button(text(tab.label()).size(BODY))
+                .on_press(Message::TabSelected(tab))
+                .padding(8)
+                .width(Length::Fill)
+                .style(if selected {
+                    button::primary as fn(&Theme, button::Status) -> button::Style
+                } else {
+                    button::secondary as fn(&Theme, button::Status) -> button::Style
+                }),
+        );
+    }
+    container(rail)
+        .width(Length::Fixed(170.0))
+        .height(Length::Fill)
+        .style(|_t| container::Style {
+            background: Some(Background::Color(Color::from_rgb8(0x16, 0x16, 0x19))),
+            border: Border {
+                width: 1.0,
+                color: Color::from_rgb8(0x38, 0x38, 0x3e),
+                radius: 0.0.into(),
+            },
+            ..container::Style::default()
+        })
+        .into()
 }
 
 /// Fixed bottom bar: edited file + status on the left, actions on the right.
@@ -2682,6 +2774,7 @@ mod tests {
     fn fixture() -> PiumaSetup {
         PiumaSetup {
             config: PiumaConfig::default(),
+            active_tab: Tab::Panel,
             status_message: None,
             status_is_error: false,
             defaults_expanded: false,
@@ -2968,6 +3061,25 @@ mod tests {
         let bare: JsonValue =
             serde_json::from_str(&state.serialize().expect("serialize must succeed")).unwrap();
         assert!(bare["panel"].get("app_theme").is_none());
+    }
+
+    /// Roadmap N4: the sidebar switches the visible category while the
+    /// edited config is carried over untouched (edits live in
+    /// `state.config`, not in the cards, so no tab loses work).
+    #[test]
+    fn sidebar_tab_selection_switches_the_active_tab() {
+        let mut state = fixture();
+        let before = state.serialize().expect("serialize must succeed");
+        assert_eq!(state.active_tab, Tab::Panel);
+        let _ = update(&mut state, Message::TabSelected(Tab::Sections));
+        assert_eq!(state.active_tab, Tab::Sections);
+        let _ = update(&mut state, Message::TabSelected(Tab::Notifications));
+        assert_eq!(state.active_tab, Tab::Notifications);
+        assert_eq!(
+            state.serialize().expect("serialize must succeed"),
+            before,
+            "switching tabs must not change the edited config"
+        );
     }
 
     /// The editor writes all three keys when enabled (defaults on a fresh

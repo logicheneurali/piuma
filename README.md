@@ -411,8 +411,12 @@ For a visual configuration tool, you can use:
 2. Or use the command-line configuration wizard
 3. Or manually edit the configuration file
 
-`piuma-setup` loads `~/.config/piuma/piuma.json` on startup. The bottom bar
-offers:
+`piuma-setup` loads `~/.config/piuma/piuma.json` on startup. The
+categories sit behind **side tabs** on the left — Panel, Notifications,
+Sensor Defaults, Section Defaults, Sections — and only the selected
+category's card is shown, so the growing configuration stays readable;
+unsaved edits live in memory, so switching tabs never loses work. The
+bottom bar offers:
 
 - **Load…** – edit any `*.json` file from `~/.config/piuma/` (different styles
   can live side by side);
