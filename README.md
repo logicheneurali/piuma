@@ -286,14 +286,32 @@ registers, the sensor renders nothing at all (no empty box):
   `NeedsAttention` swap to their attention icon and get a red frame;
   `NewIcon` / `NewStatus` / `NewToolTip` refresh the icon immediately,
   and a dead tray app removes its icon at once.
+- **Menus**: the press methods are read from each item's introspection
+  when it registers, so the behavior follows the item — no app is
+  special-cased. Items that implement `Activate`/`ContextMenu`
+  (KDE-style) keep them on the left/middle press; a right press opens
+  piuma's own `com.canonical.dbusmenu` window next to the icon
+  whenever the item exposes a menu, because its `ContextMenu` is often
+  a silent no-op (OpenRGB answers and does nothing), and items that
+  expose neither method (appindicator style — Steam, …) open it on
+  both presses: the layout is fetched on open
+  (`AboutToShow` + `GetLayout`), submenus are always shown expanded
+  with indentation, toggles carry ✓ and disabled entries are dimmed.
+  Long labels stay on one line and end with an ellipsis instead of
+  overlapping the next row; hovering an enabled row turns the pointer
+  into a hand and, when the hover colors equal the base ones (nothing
+  would visibly change), puts an underline under its label. Clicking
+  a row reports `Event(id, "clicked", …)` to the app and
+  closes the menu — as do re-clicking the icon and moving the cursor
+  off the menu.
 - **Sizing**: icons scale to the usable height of their sensor box —
   thickness minus section/sensor padding and borders (and the section
   title where sensors stack vertically) — clamped to 4–48px, so they
   fill the sensor and never overflow it.
 - **Limitations (v1)**: the legacy XEmbed tray and `OverlayIcon*`
-  overlays are not implemented; menus are not rendered host-side — the
-  wheel/right-click are forwarded to the item instead (a `dbusmenu`
-  host would be needed to draw them); in observer mode registrations
+  overlays are not implemented; menus are rendered with rows only —
+  no per-row icons, no collapsed submenu view (everything stays
+  expanded) and no keyboard navigation; in observer mode registrations
   that carry only an object path (no bus name) cannot be resolved and
   are skipped with a log line.
 

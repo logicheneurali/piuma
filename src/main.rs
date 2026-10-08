@@ -33,6 +33,7 @@ use iced_exwlshell::to_layer_message;
 mod app_theme;
 mod autostart;
 mod config;
+mod dbusmenu;
 mod icons;
 mod notifications;
 mod sensor_runner;
@@ -74,6 +75,19 @@ const POPUP_WIDTH: u32 = 360;
 const POPUP_CARD_GAP: u32 = 8;
 /// Gap between the screen edges and the popup corner.
 const POPUP_MARGIN: i32 = 8;
+
+// ── tray menu geometry ──────────────────────────────────────────────
+// One row per entry, sized exactly (`menu_row_h` × count + 2× pad, see
+// `menu_size`): like the popup, the surface ends where the list ends,
+// so a stray click below it reaches the window underneath.
+/// Padding around the entry list (all four sides).
+const MENU_PAD: u32 = 6;
+/// Indent per submenu level (rows and the width estimate agree on it).
+const MENU_INDENT: u32 = 14;
+/// Width bounds: a one-item menu stays grabbable, a long label does
+/// not take half the screen (it gets clipped instead).
+const MENU_MIN_W: u32 = 120;
+const MENU_MAX_W: u32 = 420;
 
 // ── model ───────────────────────────────────────────────────────────
 
@@ -152,6 +166,26 @@ struct Panel {
     popup_cards: usize,
     /// Card under the cursor (`hover_*` style fields), `None` outside.
     popup_hover: Option<u32>,
+    /// Open tray DBusMenu window: id + the menu it renders, `None`
+    /// while hidden (see `dbusmenu`).
+    tray_menu: Option<(iced::window::Id, TrayMenu)>,
+    /// Menu row under the cursor (`TrayMenuEnter`/`TrayMenuLeave`),
+    /// `None` outside every row.
+    tray_menu_hover: Option<i32>,
+    /// Bumped by every tray press: a `TrayMenuLoaded` carrying an older
+    /// generation belongs to a superseded press and must not open.
+    tray_menu_gen: u64,
+}
+
+/// One open tray menu: which item it belongs to (the item's bus + path
+/// tell us when it dies), the menu object path events go to, and the
+/// flattened rows the view renders.
+#[derive(Clone)]
+struct TrayMenu {
+    bus: String,
+    path: String,
+    menu_path: String,
+    entries: Vec<dbusmenu::MenuEntry>,
 }
 
 // ── messages ────────────────────────────────────────────────────────
@@ -178,6 +212,24 @@ enum Message {
     /// Wheel over a tray icon: (bus, path, scroll units + orientation);
     /// `None` for deltas that carry no usable delta.
     TrayIconScrolled(String, String, Option<(i32, bool)>),
+    /// The DBusMenu of a pressed tray icon arrived: open the menu
+    /// window at the output-relative point `at` — unless `gen` is stale
+    /// (a newer press superseded this fetch) or the item is gone.
+    TrayMenuLoaded {
+        bus: String,
+        path: String,
+        menu_path: String,
+        at: (i32, i32),
+        gen: u64,
+        entries: Result<Vec<dbusmenu::MenuEntry>, String>,
+    },
+    /// A menu row was clicked: report it to the app and close the menu.
+    TrayMenuClicked(i32),
+    /// Cursor entered/left a clickable menu row (hover styling).
+    TrayMenuEnter(i32),
+    TrayMenuLeave(i32),
+    /// The cursor left the menu surface: dismiss it.
+    TrayMenuClosed,
     /// Click on a popup card: run its spec `default` action, dismiss it.
     PopupCardClicked(u32),
     /// Click on a popup card's ✕: dismiss it only (spec reason 2).
@@ -710,7 +762,21 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
         Message::TrayItemsChanged => {
             // An item appeared/vanished/was updated: rebuild the sections at
             // once instead of waiting for the next tick (same full path).
-            update(panel, Message::Tick(Instant::now()))
+            // A menu open for a vanished item closes with it — its rows
+            // would only emit failing events now.
+            let mut cmds: Vec<Command<Message>> = Vec::new();
+            if let Some((_, menu)) = panel.tray_menu.as_ref() {
+                let alive = tray::items()
+                    .iter()
+                    .any(|i| i.bus == menu.bus && i.path == menu.path);
+                if !alive {
+                    let (id, _) = panel.tray_menu.take().unwrap();
+                    panel.tray_menu_hover = None;
+                    cmds.push(iced::window::close(id));
+                }
+            }
+            cmds.push(update(panel, Message::Tick(Instant::now())));
+            Command::batch(cmds)
         }
         Message::NotificationsChanged => {
             // A notification arrived, was replaced, expired or closed:
@@ -732,12 +798,157 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             Command::none()
         }
         Message::TrayIconPressed(bus, path, button) => {
-            // Foreground thread only queues the D-Bus call (tray.rs spawns
-            // its own thread), so the UI never blocks on the item.
-            if let Some((x, y)) = tray::hint_point(panel) {
-                tray::spawn_action(&bus, &path, button, x, y);
+            // Foreground thread only queues the D-Bus work (tray.rs /
+            // dbusmenu spawn their own threads), so the UI never blocks
+            // on the item.
+            let target = tray::click_target(&bus, &path, button);
+            let mut cmds: Vec<Command<Message>> = Vec::new();
+            panel.tray_menu_gen += 1;
+            let gen = panel.tray_menu_gen;
+            // Any open menu closes on this press; pressing the SAME icon
+            // in menu mode just toggles it (reopen-on-the-next-press).
+            if let Some((id, menu)) = panel.tray_menu.take() {
+                panel.tray_menu_hover = None;
+                cmds.push(iced::window::close(id));
+                if menu.bus == bus
+                    && menu.path == path
+                    && target == tray::ClickTarget::Menu
+                {
+                    return if cmds.is_empty() {
+                        Command::none()
+                    } else {
+                        Command::batch(cmds)
+                    };
+                }
+            }
+            match target {
+                tray::ClickTarget::Action => {
+                    if let Some((x, y)) = tray::hint_point(panel) {
+                        tray::spawn_action(&bus, &path, button, x, y);
+                    }
+                }
+                tray::ClickTarget::Menu => {
+                    // Menu path or cursor missing → the spec call is the
+                    // only fallback left (its failure gets logged).
+                    match (tray::menu_path(&bus, &path), tray::menu_point(panel)) {
+                        (Some(menu_path), Some(at)) => {
+                            let (b, p, m) = (bus.clone(), path.clone(), menu_path.clone());
+                            cmds.push(Command::perform(
+                                dbusmenu::fetch(bus.clone(), menu_path),
+                                move |entries| Message::TrayMenuLoaded {
+                                    bus: b.clone(),
+                                    path: p.clone(),
+                                    menu_path: m.clone(),
+                                    at,
+                                    gen,
+                                    entries,
+                                },
+                            ));
+                        }
+                        _ => {
+                            if let Some((x, y)) = tray::hint_point(panel) {
+                                tray::spawn_action(&bus, &path, button, x, y);
+                            }
+                        }
+                    }
+                }
+            }
+            if cmds.is_empty() {
+                Command::none()
+            } else {
+                Command::batch(cmds)
+            }
+        }
+        Message::TrayMenuLoaded {
+            bus,
+            path,
+            menu_path,
+            at,
+            gen,
+            entries,
+        } => {
+            // Superseded by a newer press while the layout was in flight.
+            if gen != panel.tray_menu_gen {
+                return Command::none();
+            }
+            let mut entries = match entries {
+                Ok(entries) => entries,
+                Err(e) => {
+                    eprintln!("[piuma] tray: menu fetch failed: {e}");
+                    return Command::none();
+                }
+            };
+            if entries.is_empty() {
+                eprintln!("[piuma] tray: {bus} returned an empty menu");
+                return Command::none();
+            }
+            // The item may have died while its layout was in flight: an
+            // open menu for a gone item would only emit failing events.
+            if !tray::items().iter().any(|i| i.bus == bus && i.path == path) {
+                return Command::none();
+            }
+            let font = panel_font(&panel.config);
+            let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
+            let (w, h) = menu_size(&entries, &font, font_size);
+            // The surface width is final now: overlong labels are cut to
+            // their row budget (single line + ellipsis in the view).
+            fit_menu_labels(&mut entries, w, &font, font_size);
+            let (sw, sh) = unsafe { (SCREEN_WIDTH as i32, SCREEN_HEIGHT as i32) };
+            let (anchor, margin) = menu_placement(at.0, at.1, w, h, sw, sh);
+            let (id, open) = Message::layershell_open(NewLayerShellSettings {
+                size: LayerSize::px(w, h),
+                layer: Layer::Overlay,
+                anchor,
+                exclusive_zone: None,
+                margin: Some(margin),
+                keyboard_interactivity: KeyboardInteractivity::None,
+                output_option: OutputOption::LastOutput,
+                namespace: Some("piuma-tray-menu".to_string()),
+                ..Default::default()
+            });
+            panel.tray_menu = Some((
+                id,
+                TrayMenu {
+                    bus,
+                    path,
+                    menu_path,
+                    entries,
+                },
+            ));
+            open
+        }
+        Message::TrayMenuClicked(entry_id) => {
+            if let Some((id, menu)) = panel.tray_menu.take() {
+                panel.tray_menu_hover = None;
+                dbusmenu::spawn_event(&menu.bus, &menu.menu_path, entry_id);
+                iced::window::close(id)
+            } else {
+                Command::none()
+            }
+        }
+        Message::TrayMenuEnter(entry_id) => {
+            panel.tray_menu_hover = Some(entry_id);
+            Command::none()
+        }
+        Message::TrayMenuLeave(entry_id) => {
+            // Only the row still under the cursor may clear: the list
+            // dispatches top-down, so entering the row above is applied
+            // before the row below leaves — an unguarded clear dropped
+            // the hover whenever the cursor moved upward.
+            if panel.tray_menu_hover == Some(entry_id) {
+                panel.tray_menu_hover = None;
             }
             Command::none()
+        }
+        Message::TrayMenuClosed => {
+            // The surface only exists with its state (and a press
+            // already bumps the generation before this can fire).
+            if let Some((id, _)) = panel.tray_menu.take() {
+                panel.tray_menu_hover = None;
+                iced::window::close(id)
+            } else {
+                Command::none()
+            }
         }
         Message::TrayIconScrolled(bus, path, delta) => {
             if let Some((units, horizontal)) = delta {
@@ -934,7 +1145,12 @@ fn panel_font(config: &config::Config) -> Font {
 }
 
 fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> {
-    // The popup window renders its own tree; only bar calls feed BAR_ID.
+    // Side windows render their own trees; only bar calls feed BAR_ID.
+    if let Some((id, _)) = panel.tray_menu.as_ref() {
+        if *id == window {
+            return tray_menu_view(panel);
+        }
+    }
     if panel.popup == Some(window) {
         return popup_view(panel);
     }
@@ -2042,6 +2258,232 @@ fn popup_view(panel: &Panel) -> Element<'_, Message> {
         .into()
 }
 
+// ── tray menu window ────────────────────────────────────────────────
+
+/// Vertical rhythm of one menu row: the text line (~1.2× the font)
+/// plus a little air, so centered rows never clip at any font size.
+fn menu_row_h(font_size: u32) -> u32 {
+    font_size + font_size / 2 + 4
+}
+
+/// Surface size for `entries`: the height is exact (one `menu_row_h`
+/// per row plus padding — nothing clips, every row stays hit-exact);
+/// the width measures the widest label with the same shaper iced
+/// renders with (`text_width::widest`), adds the deepest indent and
+/// the horizontal margins on both sides — two `MENU_PAD` layers per
+/// side (the list container's and each row's own) — and is clamped so
+/// a one-item menu is still grabbable and a long label does not take
+/// half the screen.
+fn menu_size(entries: &[dbusmenu::MenuEntry], font: &Font, font_size: u32) -> (u32, u32) {
+    let patterns: Vec<String> = entries
+        .iter()
+        .map(|e| format!("{}{}", dbusmenu::toggle_glyph(e), e.label))
+        .collect();
+    let text_w = u32::from(text_width::widest(font, font_size, &patterns));
+    let max_depth = entries.iter().map(|e| e.depth).max().unwrap_or(0);
+    let w = text_w
+        .saturating_add(max_depth * MENU_INDENT)
+        .saturating_add(4 * MENU_PAD)
+        .clamp(MENU_MIN_W, MENU_MAX_W);
+    let h = entries.len() as u32 * menu_row_h(font_size) + 2 * MENU_PAD;
+    (w, h)
+}
+
+/// Cut every label to its row budget inside the finished surface width `w`
+/// (the deepest indent narrows the text area of its own row, and the
+/// budget keeps both `MENU_PAD` layers per side — the list container's
+/// and the row's own — so a cut label ends with the same margin as a
+/// short one): the toggle glyph measures with the label, so it is fitted
+/// too and then stripped back off. Runs once when the menu loads —
+/// [`tray_menu_view`] renders the result on a single line, so a too-long
+/// label ends with an ellipsis instead of spilling over the next row.
+fn fit_menu_labels(entries: &mut [dbusmenu::MenuEntry], w: u32, font: &Font, font_size: u32) {
+    let jobs: Vec<(String, u32)> = entries
+        .iter()
+        .map(|e| {
+            (
+                format!("{}{}", dbusmenu::toggle_glyph(e), e.label),
+                w.saturating_sub(4 * MENU_PAD + e.depth * MENU_INDENT),
+            )
+        })
+        .collect();
+    for (entry, fitted) in entries.iter_mut().zip(text_width::fit(font, font_size, &jobs)) {
+        let glyph = dbusmenu::toggle_glyph(entry);
+        entry.label = fitted.strip_prefix(glyph).unwrap_or_default().to_string();
+    }
+}
+
+/// Anchor + edge margins for the menu at the output-relative point
+/// (x, y): it opens right/down from the cursor — the natural quadrant
+/// under a top/left bar — and flips to the opposite side when the
+/// surface would leave the output (margins clamp at 0, so an oversized
+/// menu gets cut at the top rather than flying off). The caller uses
+/// `OutputOption::LastOutput`, the same output `SCREEN_WIDTH/HEIGHT`
+/// and `tray::menu_point` refer to.
+fn menu_placement(x: i32, y: i32, w: u32, h: u32, sw: i32, sh: i32) -> (Anchor, Margin) {
+    let (w, h) = (w as i32, h as i32);
+    let (anchor_h, left, right) = if x + w <= sw {
+        (Anchor::Left, x, 0)
+    } else {
+        (Anchor::Right, 0, (sw - x).max(0))
+    };
+    let (anchor_v, top, bottom) = if y + h <= sh {
+        (Anchor::Top, y, 0)
+    } else {
+        (Anchor::Bottom, 0, (sh - y).max(0))
+    };
+    (
+        anchor_h | anchor_v,
+        Margin {
+            top,
+            right,
+            bottom,
+            left,
+        },
+    )
+}
+
+/// The tray menu surface: one row per entry inside the styled box
+/// (shared with the sensors and the notification cards), the whole list
+/// wrapped in a MouseArea whose exit dismisses the menu (the approved
+/// auto-close). Clickable rows carry their own MouseArea — press reports
+/// the entry, enter/leave drive the hover style.
+fn tray_menu_view(panel: &Panel) -> Element<'_, Message> {
+    let Some((_, menu)) = panel.tray_menu.as_ref() else {
+        // The window id exists only together with its state.
+        return container(text(""))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+    };
+    let st = popup_style(&panel.config);
+    let font = panel_font(&panel.config);
+    let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
+    let row_h = menu_row_h(font_size) as f32;
+    let dim = Color::from_rgba(st.text.r, st.text.g, st.text.b, 0.45);
+    // The configured hover colors equal the base ones — a color swap on
+    // hover would be invisible, so the feedback is an underline bar under
+    // the label (plus a hand pointer on the row itself).
+    let underline_hover = st.text_hover == st.text && st.bg_hover == st.bg;
+    let mut list: Column<'_, Message> = Column::new();
+    for entry in &menu.entries {
+        let padding = iced::Padding {
+            top: 0.0,
+            right: MENU_PAD as f32,
+            bottom: 0.0,
+            left: (MENU_PAD + entry.depth * MENU_INDENT) as f32,
+        };
+        let row: Element<'_, Message> = match entry.kind {
+            dbusmenu::EntryKind::Separator => container(
+                container(Space::new().width(Length::Fill).height(1))
+                    .style(move |_theme| ContainerStyle {
+                        background: Some(Background::Color(st.border)),
+                        ..ContainerStyle::default()
+                    }),
+            )
+            .width(Length::Fill)
+            .height(Length::Fixed(row_h))
+            .align_y(Alignment::Center)
+            .padding(padding)
+            .into(),
+            // A submenu header is a section label, never a target.
+            dbusmenu::EntryKind::Header => container(
+                text(&entry.label)
+                    .size(font_size)
+                    .color(st.text)
+                    .font(font)
+                    .width(Length::Fill)
+                    .wrapping(iced::widget::text::Wrapping::None),
+            )
+            .width(Length::Fill)
+            .height(Length::Fixed(row_h))
+            .align_y(Alignment::Center)
+            .padding(padding)
+            .into(),
+            dbusmenu::EntryKind::Item => {
+                let hovered = entry.enabled && panel.tray_menu_hover == Some(entry.id);
+                let fg = if !entry.enabled {
+                    dim
+                } else if hovered {
+                    st.text_hover
+                } else {
+                    st.text
+                };
+                let label = text(format!(
+                    "{}{}",
+                    dbusmenu::toggle_glyph(entry),
+                    entry.label
+                ))
+                .size(font_size)
+                .color(fg)
+                .font(font)
+                .wrapping(iced::widget::text::Wrapping::None);
+                // In underline mode the column shrinks to the label and the
+                // bar fills it — the text's exact width without measuring,
+                // and the bar is laid out even while transparent (only its
+                // color changes on hover), so nothing jumps.
+                let inner: Element<'_, Message> = if underline_hover {
+                    Column::new()
+                        .push(label.width(Length::Shrink))
+                        .push(
+                            container(Space::new().width(Length::Fill).height(Length::Fixed(2.0)))
+                                .style(move |_theme| ContainerStyle {
+                                    background: hovered.then(|| Background::Color(fg)),
+                                    ..ContainerStyle::default()
+                                }),
+                        )
+                        .spacing(1)
+                        .into()
+                } else {
+                    label.width(Length::Fill).into()
+                };
+                let body = container(inner)
+                    .width(Length::Fill)
+                    .height(Length::Fixed(row_h))
+                    .align_y(Alignment::Center)
+                    .padding(padding);
+                let styled = if hovered {
+                    body.style(move |_theme| ContainerStyle {
+                        background: Some(Background::Color(st.bg_hover)),
+                        ..ContainerStyle::default()
+                    })
+                } else {
+                    body.style(move |_theme| ContainerStyle::default())
+                };
+                if entry.enabled {
+                    MouseArea::new(styled)
+                        .on_press(Message::TrayMenuClicked(entry.id))
+                        .on_enter(Message::TrayMenuEnter(entry.id))
+                        .on_exit(Message::TrayMenuLeave(entry.id))
+                        .interaction(iced::mouse::Interaction::Pointer)
+                        .into()
+                } else {
+                    styled.into()
+                }
+            }
+        };
+        list = list.push(row);
+    }
+    let surface = styled_box(
+        container(list)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(iced::Padding::from(MENU_PAD as f32))
+            .into(),
+        Some(st.bg),
+        Some(st.border),
+        st.border_width.min(u16::MAX as u32) as u16,
+        st.border_radius.min(u16::MAX as u32) as u16,
+        &st.border_type,
+        [false, false, false, false],
+        // The list carries the padding; the box only draws its border.
+        0,
+        Length::Fill,
+        Length::Fill,
+    );
+    MouseArea::new(surface).on_exit(Message::TrayMenuClosed).into()
+}
+
 // ── style ───────────────────────────────────────────────────────────
 
 fn style(_panel: &Panel, _theme: &iced::Theme) -> iced::theme::Style {
@@ -2124,6 +2566,9 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         popup: None,
                         popup_cards: 0,
                         popup_hover: None,
+                        tray_menu: None,
+                        tray_menu_hover: None,
+                        tray_menu_gen: 0,
                     }
                 },
                 namespace,
@@ -2209,9 +2654,11 @@ fn parse_config_arg() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        corner_radius, icons_theme, popup_card_h, popup_placement, section_touch,
-        tray_icon_target, PopupStyle,
+        corner_radius, dbusmenu, fit_menu_labels, icons_theme, menu_placement, menu_row_h,
+        menu_size, popup_card_h, popup_placement, section_touch, text_width, tray_icon_target,
+        PopupStyle, MENU_INDENT, MENU_MAX_W, MENU_MIN_W, MENU_PAD,
     };
+    use iced::font::Font;
     use iced_exwlshell::reexport::Anchor;
 
     /// The default popup style must keep the F3 geometry exactly (84px
@@ -2361,5 +2808,102 @@ mod tests {
     fn tray_icon_target_clamps() {
         assert_eq!(tray_icon_target(10, 0, 0, 0, 0), 4);
         assert_eq!(tray_icon_target(400, 0, 0, 0, 0), 48);
+    }
+
+    /// The height is exact (rows × row height + padding — the surface
+    /// must match the view pixel for pixel) and the width honours the
+    /// minimum/maximum bounds whatever the labels are.
+    #[test]
+    fn menu_size_is_exact_and_width_stays_in_bounds() {
+        let font = Font::with_name("Noto Sans");
+        let entry = |depth: u32, label: &str| dbusmenu::MenuEntry {
+            id: 1,
+            label: label.to_string(),
+            enabled: true,
+            toggle: 0,
+            depth,
+            kind: dbusmenu::EntryKind::Item,
+        };
+        let rows = vec![entry(0, "one"), entry(1, "two"), entry(2, "three")];
+        let (_, h) = menu_size(&rows, &font, 14);
+        assert_eq!(h, 3 * menu_row_h(14) + 2 * MENU_PAD);
+        // A tiny menu never shrinks below the minimum…
+        let (w, _) = menu_size(&[entry(0, "x")], &font, 14);
+        assert_eq!(w, MENU_MIN_W);
+        // …nor a huge label past the maximum.
+        let (w, _) = menu_size(&[entry(0, &"l".repeat(400))], &font, 14);
+        assert_eq!(w, MENU_MAX_W);
+    }
+
+    /// Labels are cut to their row budget inside the finished surface (the
+    /// toggle glyph measures with them and comes back stripped off), while
+    /// short labels pass through untouched.
+    #[test]
+    fn fit_menu_labels_cuts_long_and_keeps_short_labels() {
+        let font = Font::with_name("Noto Sans");
+        let entry = |label: &str, toggle: i32| dbusmenu::MenuEntry {
+            id: 1,
+            label: label.to_string(),
+            enabled: true,
+            toggle,
+            depth: 0,
+            kind: dbusmenu::EntryKind::Item,
+        };
+        // The narrowest legal surface: the long label cannot fit it.
+        let w = MENU_MIN_W;
+        let mut rows = vec![entry("Short", 0), entry(&"L".repeat(400), 1)];
+        fit_menu_labels(&mut rows, w, &font, 12);
+        assert_eq!(rows[0].label, "Short");
+        assert!(rows[1].label.ends_with('…'), "{}", rows[1].label);
+        // The drawn string (glyph included) measures within the budget,
+        // which carries both MENU_PAD layers per side (list + row).
+        let drawn = format!("{}{}", dbusmenu::toggle_glyph(&rows[1]), rows[1].label);
+        let budget = w - 4 * MENU_PAD;
+        assert!(text_width::widest(&font, 12, &[drawn]) <= budget as u16);
+    }
+
+    /// In the unclamped middle of the range, depth costs exactly
+    /// `MENU_INDENT` per level (the rows' indent and the estimate agree).
+    #[test]
+    fn menu_size_prices_submenus_by_indent() {
+        let font = Font::with_name("Noto Sans");
+        let entry = |depth: u32| dbusmenu::MenuEntry {
+            id: 1,
+            label: "Clickable menu entry row".to_string(),
+            enabled: true,
+            toggle: 0,
+            depth,
+            kind: dbusmenu::EntryKind::Item,
+        };
+        let (flat, _) = menu_size(&[entry(0)], &font, 14);
+        let (deep, _) = menu_size(&[entry(3)], &font, 14);
+        // Both widths must sit in the unclamped middle for the diff to
+        // be exact (guards against a pathological font measure).
+        assert!(flat > MENU_MIN_W && deep < MENU_MAX_W, "{flat} / {deep}");
+        assert_eq!(deep - flat, 3 * MENU_INDENT);
+    }
+
+    /// Down-right from the cursor; flips to the opposite edge when the
+    /// surface would leave the output (margins never go negative).
+    #[test]
+    fn menu_placement_opens_down_right_and_flips_on_overflow() {
+        let (anchor, m) = menu_placement(100, 50, 200, 100, 1920, 1080);
+        assert_eq!(anchor, Anchor::Left | Anchor::Top);
+        assert_eq!((m.left, m.top, m.right, m.bottom), (100, 50, 0, 0));
+
+        // Near the right edge → the menu opens to the cursor's left…
+        let (anchor, m) = menu_placement(1850, 50, 200, 100, 1920, 1080);
+        assert_eq!(anchor, Anchor::Right | Anchor::Top);
+        assert_eq!((m.right, m.left), (1920 - 1850, 0));
+
+        // …near the bottom → above it; an oversized surface still lands
+        // on-screen (clamped margins).
+        let (anchor, m) = menu_placement(100, 1050, 200, 100, 1920, 1080);
+        assert_eq!(anchor, Anchor::Left | Anchor::Bottom);
+        assert_eq!((m.bottom, m.top), (1080 - 1050, 0));
+
+        let (anchor, m) = menu_placement(10, 10, 4000, 4000, 1920, 1080);
+        assert_eq!(anchor, Anchor::Right | Anchor::Bottom);
+        assert_eq!((m.right, m.bottom), (1920 - 10, 1080 - 10));
     }
 }

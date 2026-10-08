@@ -13,7 +13,10 @@
 //!   IconPixmap, AttentionIcon*, ToolTip), listen to the `New*` signals to
 //!   re-read immediately, and drop the item when its bus name dies;
 //! * clicks and the wheel are forwarded as `Activate` / `SecondaryActivate` /
-//!   `ContextMenu` / `Scroll` with screen-coordinate hints.
+//!   `ContextMenu` / `Scroll` with screen-coordinate hints; an item that
+//!   exposes none of the press methods (appindicator style: Steam,
+//!   OpenRGB, …) opens its `com.canonical.dbusmenu` menu instead — see
+//!   `dbusmenu` and the registration probe (`probe_click`).
 //!
 //! Item state lives in `STATE`; the view takes a snapshot through `items()`
 //! and is poked with `Message::TrayItemsChanged` so changes show up at once.
@@ -128,6 +131,25 @@ pub enum TrayButton {
     Right,
 }
 
+/// What a press on an item must do: the item's DBusMenu first when the
+/// press is the right button and a menu exists, else the spec method
+/// when the item implements it, else the menu (appindicator items
+/// expose neither `Activate` nor `ContextMenu` — see `dbusmenu`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClickTarget {
+    Action,
+    Menu,
+}
+
+/// Click-related methods an item actually exposes, read once from its
+/// introspection at registration (methods never appear or disappear on
+/// a live item).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Caps {
+    pub activate: bool,
+    pub context_menu: bool,
+}
+
 // ── state ──────────────────────────────────────────────────────────
 
 /// A tracked item's raw state; `image`/`tooltip` are the resolved forms.
@@ -140,6 +162,10 @@ struct Item {
     status: String,
     image: Option<TrayImage>,
     tooltip: String,
+    /// Spec methods this item implements (introspection probe).
+    caps: Caps,
+    /// Its `com.canonical.dbusmenu` object path, when it has one.
+    menu_path: Option<String>,
 }
 
 static STATE: RwLock<Vec<Item>> = RwLock::new(Vec::new());
@@ -182,6 +208,11 @@ fn upsert(items: &mut Vec<Item>, reg: &str, bus: &str, path: &str) -> bool {
                 status: String::new(),
                 image: None,
                 tooltip: String::new(),
+                // Filled by the registration probe right after; until
+                // then a click falls back to the spec methods (their
+                // failure is logged, exactly like before the probe).
+                caps: Caps::default(),
+                menu_path: None,
             });
             true
         }
@@ -350,6 +381,126 @@ async fn refresh_item(conn: &Connection, bus: &str, path: &str) -> Option<()> {
     .then_some(())
 }
 
+// ── click capability probe ─────────────────────────────────────────
+
+/// The item's own `Introspect` document, or "" when unreadable (the
+/// probe then simply reports "no methods", i.e. the pre-probe behavior).
+async fn introspect_xml(conn: &Connection, bus: &str, path: &str) -> String {
+    let Ok(builder) = Builder::<Proxy>::new(conn)
+        .destination(bus)
+        .and_then(|b| b.path(path))
+        .and_then(|b| b.interface("org.freedesktop.DBus.Introspectable"))
+        .map(|b| b.cache_properties(CacheProperties::No))
+    else {
+        return String::new();
+    };
+    let Ok(proxy) = builder.build().await else {
+        return String::new();
+    };
+    proxy
+        .call_method("Introspect", &())
+        .await
+        .ok()
+        .and_then(|msg| msg.body().deserialize::<String>().ok())
+        .unwrap_or_default()
+}
+
+/// The slice of an introspection document that belongs to one
+/// interface: method names of other interfaces on the same object must
+/// not count as the item's. Empty when the interface is absent.
+fn iface_block<'a>(xml: &'a str, iface: &str) -> &'a str {
+    let open = format!("<interface name=\"{iface}\">");
+    let Some(start) = xml.find(&open) else {
+        return "";
+    };
+    let rest = &xml[start + open.len()..];
+    match rest.find("</interface>") {
+        Some(end) => &rest[..end],
+        None => "",
+    }
+}
+
+/// Read what a press can do on this item: the spec methods it exposes
+/// (introspection) and its DBusMenu path (the `Menu` property — "/" or
+/// an error means the item has no menu of its own). Runs on the
+/// connection executor from `track_recorded`, never inline in a method
+/// handler (the same rule as `refresh_item`).
+async fn probe_click(conn: &Connection, bus: &str, path: &str) {
+    let Some((proxy, _)) = item_proxy(conn, bus, path).await else {
+        return;
+    };
+    // `Menu` is an ObjectPath (`o`): zvariant refuses to decode it into
+    // String, so take the typed form and stringify after.
+    let menu_path = proxy
+        .get_property::<zbus::zvariant::OwnedObjectPath>("Menu")
+        .await
+        .ok()
+        .map(|p| p.to_string())
+        .filter(|m| m != "/" && !m.is_empty());
+    let xml = introspect_xml(conn, bus, path).await;
+    let kde = iface_block(&xml, ITEM_IFACE);
+    // The freedesktop spelling is an identical interface: either block
+    // proves the method (an item serving only it still counts).
+    let freed = if kde.is_empty() {
+        iface_block(&xml, ITEM_IFACE_FALLBACK)
+    } else {
+        kde
+    };
+    let caps = Caps {
+        activate: freed.contains("name=\"Activate\""),
+        context_menu: freed.contains("name=\"ContextMenu\""),
+    };
+    with_items(|items| {
+        if let Some(item) = items.iter_mut().find(|i| i.bus == bus && i.path == path) {
+            item.caps = caps;
+            item.menu_path = menu_path;
+        }
+    });
+}
+
+/// How a press must be handled (see `ClickTarget`): a right press
+/// opens the item's own menu whenever it has one (its `ContextMenu` is
+/// often a silent no-op — OpenRGB answers `()` and does nothing, while
+/// its dbusmenu carries the whole UI); otherwise the spec method when
+/// the item exposes it, its DBusMenu when it has one, and a plain spec
+/// call as the last resort (whose `UnknownMethod` failure is logged —
+/// still the best guess while the probe has not run yet).
+pub fn click_target(bus: &str, path: &str, button: TrayButton) -> ClickTarget {
+    with_items(|items| {
+        let Some(item) = items.iter().find(|i| i.bus == bus && i.path == path) else {
+            return ClickTarget::Action;
+        };
+        // The right press prefers the item's own menu: apps serving
+        // their whole UI from the dbusmenu leave the spec's
+        // `ContextMenu` as a dead end, which made the icon look menuless.
+        if item.menu_path.is_some() && matches!(button, TrayButton::Right) {
+            return ClickTarget::Menu;
+        }
+        let method_exists = match button {
+            TrayButton::Left => item.caps.activate,
+            TrayButton::Right => item.caps.context_menu,
+            // Middle is `SecondaryActivate` with no menu fallback: the
+            // wheel-middle press has no "open the menu" tradition.
+            TrayButton::Middle => true,
+        };
+        if method_exists || item.menu_path.is_none() {
+            ClickTarget::Action
+        } else {
+            ClickTarget::Menu
+        }
+    })
+}
+
+/// The item's `com.canonical.dbusmenu` object path, when it has one.
+pub fn menu_path(bus: &str, path: &str) -> Option<String> {
+    with_items(|items| {
+        items
+            .iter()
+            .find(|i| i.bus == bus && i.path == path)
+            .and_then(|i| i.menu_path.clone())
+    })
+}
+
 // ── D-Bus tasks (run on the connection's own executor) ─────────────
 
 /// Per-item task: any `New*` signal means "re-read me now" (spec).
@@ -464,6 +615,9 @@ async fn track_recorded(
         notify(&sender);
         return;
     }
+    // Methods + menu path before the first notify, so a click landing
+    // the instant the icon shows already finds the probe's result.
+    probe_click(&conn, &bus, &path).await;
     notify(&sender);
     if is_new {
         conn.executor()
@@ -982,10 +1136,10 @@ pub fn row<'a>(
     row.into()
 }
 
-/// Screen coordinates for an SNI activation hint (hints are advisory in
-/// the spec): window-relative cursor + the bar's offset inside its output
-/// (from the anchor) + the output's position in the global layout.
-pub fn hint_point(panel: &crate::Panel) -> Option<(i32, i32)> {
+/// The cursor point for tray surfaces in output-relative coordinates
+/// (what layer-shell margins need): window-relative cursor + the bar's
+/// offset inside its output (from the anchor).
+pub fn menu_point(panel: &crate::Panel) -> Option<(i32, i32)> {
     let (cx, cy) = panel.last_cursor?;
     let thickness = crate::panel_thickness(&panel.config) as i32;
     let (sw, sh) = (
@@ -1001,8 +1155,16 @@ pub fn hint_point(panel: &crate::Panel) -> Option<(i32, i32)> {
     } else {
         (0, 0)
     };
+    Some((wx + cx as i32, wy + cy as i32))
+}
+
+/// Screen coordinates for an SNI activation hint (hints are advisory in
+/// the spec): the global form of `menu_point` — the output's position
+/// in the global layout added on top.
+pub fn hint_point(panel: &crate::Panel) -> Option<(i32, i32)> {
+    let (mx, my) = menu_point(panel)?;
     let (ox, oy) = output_origin();
-    Some((ox + wx + cx as i32, oy + wy + cy as i32))
+    Some((ox + mx, oy + my))
 }
 
 /// The output the bar sits on in global layout coordinates: the last
@@ -1104,5 +1266,40 @@ mod tests {
             None
         );
         assert_eq!(scroll_units(iced::mouse::ScrollDelta::Pixels { x: -0.0, y: -0.0 }), None);
+    }
+
+    /// A right press opens the item's own menu even when the spec's
+    /// `ContextMenu` exists (OpenRGB answers the method and does
+    /// nothing); left/middle keep the spec-first rule, and without a
+    /// menu the right press falls back to the spec call.
+    #[test]
+    fn right_press_prefers_the_items_menu() {
+        let _g = TEST_LOCK.lock().unwrap();
+        with_items(|items| {
+            items.clear();
+            assert!(upsert(items, ":1.99", ":1.99", "/StatusNotifierItem"));
+            items[0].caps = Caps { activate: true, context_menu: true };
+            items[0].menu_path = Some("/MenuBar".to_string());
+        });
+        let path = "/StatusNotifierItem";
+        assert_eq!(click_target(":1.99", path, TrayButton::Right), ClickTarget::Menu);
+        assert_eq!(click_target(":1.99", path, TrayButton::Left), ClickTarget::Action);
+        assert_eq!(click_target(":1.99", path, TrayButton::Middle), ClickTarget::Action);
+        with_items(|items| items[0].menu_path = None);
+        assert_eq!(click_target(":1.99", path, TrayButton::Right), ClickTarget::Action);
+        with_items(|items| items.clear());
+    }
+
+    /// Only the named interface's slice comes back, so a method another
+    /// interface declares (or a missing interface) never counts as the
+    /// item's own capability.
+    #[test]
+    fn iface_block_scopes_methods_to_one_interface() {
+        let xml = "<node>\n  <interface name=\"org.freedesktop.DBus.Introspectable\">\n    <method name=\"Introspect\"/>\n  </interface>\n  <interface name=\"org.kde.StatusNotifierItem\">\n    <method name=\"Activate\"/>\n    <property name=\"Id\" type=\"s\" access=\"read\"/>\n  </interface>\n</node>";
+        let block = iface_block(xml, "org.kde.StatusNotifierItem");
+        assert!(block.contains("Activate"));
+        assert!(!block.contains("Introspect"), "leaks past </interface>");
+        // An interface the document doesn't carry yields nothing.
+        assert_eq!(iface_block(xml, "org.freedesktop.StatusNotifierItem"), "");
     }
 }
