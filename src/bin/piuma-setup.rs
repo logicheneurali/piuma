@@ -25,6 +25,9 @@ pub struct PiumaConfig {
     /// Bold panel text (roadmap M2): `None` = key absent (the bar reads
     /// false) — written only when set, so a save never injects the key.
     pub bold: Option<bool>,
+    /// Theme resolving the sensors' `icon` names (roadmap N1): `None` =
+    /// key absent (the bar falls back to the system icon-theme setting).
+    pub icon_theme: Option<String>,
     pub section_layout: String,
     pub default_section_weight: u32,
     pub default_bg_color: Option<String>,
@@ -146,6 +149,9 @@ pub struct Section {
 pub struct Sensor {
     pub name: Option<String>,
     pub description: Option<String>,
+    /// Freedesktop icon name rendered before the sensor (roadmap N1):
+    /// `None` = key absent (text only).
+    pub icon: Option<String>,
     pub source_type: String,
     pub source_config: SourceConfig,
     pub text_color: Option<String>,
@@ -178,6 +184,7 @@ impl Default for PiumaConfig {
             font: Some("Noto Sans".to_string()),
             font_size: 12,
             bold: None,
+            icon_theme: None,
             section_layout: "horizontal".to_string(),
             default_section_weight: 1,
             default_bg_color: Some("#1a1b26".to_string()),
@@ -215,6 +222,7 @@ impl Default for Sensor {
         Sensor {
             name: Some("CPU".to_string()),
             description: None,
+            icon: None,
             source_type: "perc_cpu".to_string(),
             source_config: SourceConfig::default(),
             text_color: None,
@@ -253,6 +261,8 @@ pub enum Message {
     FontSizeChanged(u32),
     /// Bold panel text toggle (roadmap M2).
     BoldChanged(bool),
+    /// Icon theme of the panel (roadmap N1); empty = absent.
+    IconThemeChanged(String),
     ThicknessChanged(u32),
     /// Sensor style defaults: (field name, value) and (field name, number)
     /// for the fields of `panel.sensor_defaults`.
@@ -305,6 +315,8 @@ pub enum Message {
     SensorMoveDown(usize, usize),
     SensorNameChanged(usize, usize, String),
     SensorDescriptionChanged(usize, usize, String),
+    /// Icon name of the sensor (roadmap N1); empty = absent.
+    SensorIconChanged(usize, usize, String),
     SensorSourceTypeChanged(usize, usize, String),
     SensorSourceTypeConfigChanged(usize, usize, String, String),
     SensorTextColorChanged(usize, usize, String),
@@ -468,6 +480,9 @@ impl PiumaSetup {
         panel.insert("font_size".to_string(), JsonValue::Number(self.config.font_size.into()));
         if let Some(b) = self.config.bold {
             panel.insert("bold".to_string(), JsonValue::Bool(b));
+        }
+        if let Some(theme) = &self.config.icon_theme {
+            panel.insert("icon_theme".to_string(), JsonValue::String(theme.clone()));
         }
         panel.insert("section_layout".to_string(), JsonValue::String(self.config.section_layout.clone()));
         panel.insert("default_section_weight".to_string(), JsonValue::Number(self.config.default_section_weight.into()));
@@ -647,6 +662,9 @@ impl PiumaSetup {
         if let Some(desc) = &sensor.description {
             map.insert("description".to_string(), JsonValue::String(desc.clone()));
         }
+        if let Some(icon) = &sensor.icon {
+            map.insert("icon".to_string(), JsonValue::String(icon.clone()));
+        }
         map.insert("source".to_string(), self.source_to_json(sensor));
 
         for (key, opt) in [
@@ -818,6 +836,7 @@ impl PiumaSetup {
             font: None,
             font_size: 14,
             bold: None,
+            icon_theme: None,
             section_layout: "horizontal".to_string(),
             default_section_weight: 1,
             default_bg_color: None,
@@ -839,6 +858,12 @@ impl PiumaSetup {
         }
         // Absent `bold` stays `None` (reset default): the bar reads false.
         self.config.bold = panel.get("bold").and_then(|v| v.as_bool());
+        // Absent `icon_theme` stays `None`: the bar falls back to the
+        // system icon-theme setting (roadmap N1).
+        self.config.icon_theme = panel
+            .get("icon_theme")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
         if let Some(sl) = panel.get("section_layout").and_then(|v| v.as_str()) {
             self.config.section_layout = sl.to_string();
         }
@@ -1026,6 +1051,9 @@ impl PiumaSetup {
         if let Some(desc) = obj.get("description").and_then(|v| v.as_str()) {
             sensor.description = Some(desc.to_string());
         }
+        if let Some(icon) = obj.get("icon").and_then(|v| v.as_str()) {
+            sensor.icon = Some(icon.to_string());
+        }
         if let Some(source) = obj.get("source").and_then(|v| v.as_object()) {
             if let Some(type_) = source.get("type").and_then(|v| v.as_str()) {
                 // Single conversion point: legacy names (ProcCpu, Network…)
@@ -1099,6 +1127,9 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
         Message::BoldChanged(value) => {
             // On = explicit true; off drops back to absent (≈ false).
             state.config.bold = value.then_some(true);
+        }
+        Message::IconThemeChanged(value) => {
+            state.config.icon_theme = if value.is_empty() { None } else { Some(value) };
         }
         Message::ThicknessChanged(value) => state.config.thickness = value,
         Message::DefaultsStyleChanged(field, value) => {
@@ -1297,6 +1328,14 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                 let section = &mut state.config.sections[section_index];
                 if sensor_index < section.sensors.len() {
                     section.sensors[sensor_index].description = if value.is_empty() { None } else { Some(value) };
+                }
+            }
+        }
+        Message::SensorIconChanged(section_index, sensor_index, value) => {
+            if section_index < state.config.sections.len() {
+                let section = &mut state.config.sections[section_index];
+                if sensor_index < section.sensors.len() {
+                    section.sensors[sensor_index].icon = if value.is_empty() { None } else { Some(value) };
                 }
             }
         }
@@ -1901,6 +1940,9 @@ fn panel_settings(state: &PiumaSetup) -> Element<Message> {
             .label("Bold text")
             .on_toggle(Message::BoldChanged)
             .into()),
+        ("Icon Theme", input("system icon theme", state.config.icon_theme.as_deref().unwrap_or(""), Message::IconThemeChanged)
+            .width(Length::Fill)
+            .into()),
         ("Thickness", Row::new()
             .push(Slider::new(8..=64, thickness, Message::ThicknessChanged).width(Length::Fill))
             .push(text(format!("{}px", thickness)).size(BODY).width(40))
@@ -2299,6 +2341,10 @@ fn sensor_view(section_index: usize, sensor_index: usize, sensor_count: usize, s
         .width(Length::Fill)
         .into());
 
+    let icon = form_cell("Icon", input("icon name (theme)", sensor.icon.as_deref().unwrap_or(""), move |value| Message::SensorIconChanged(section_index, sensor_index, value))
+        .width(Length::Fill)
+        .into());
+
     let action = form_cell("Action", input("close_panel / command / ...", sensor.action.as_deref().unwrap_or(""), move |value| Message::SensorActionChanged(section_index, sensor_index, value))
         .width(Length::Fill)
         .into());
@@ -2320,7 +2366,7 @@ fn sensor_view(section_index: usize, sensor_index: usize, sensor_count: usize, s
         Message::ToggleSensorStyle(section_index, sensor_index),
     );
 
-    let mut root = column![header, source, action, style_header]
+    let mut root = column![header, source, icon, action, style_header]
         .spacing(6)
         .width(Length::Fill);
 
@@ -2781,6 +2827,45 @@ mod tests {
         assert_eq!(out["panel"]["section_defaults"]["respect_screen_edges"], true);
         serde_json::from_str::<config::Config>(&saved)
             .expect("piuma must accept the saved config (pre-save validation)");
+    }
+
+    /// The roadmap N1 keys (`panel.icon_theme` and the per-sensor `icon`)
+    /// roundtrip load→save with their values, and the result still parses
+    /// as piuma's own schema.
+    #[test]
+    fn icon_keys_roundtrip() {
+        let json = r##"{
+  "panel": {
+    "align": "fill",
+    "anchor": "top",
+    "icon_theme": "Papirus",
+    "section_layout": "horizontal",
+    "sections": [
+      { "name": "sys", "sensors": [ { "name": "CPU", "icon": "cpu", "source": { "type": "perc_cpu" } } ] }
+    ],
+    "thickness": 26
+  }
+}"##;
+        let mut state = fixture();
+        state.load_from_json(json).expect("config must load");
+        assert_eq!(state.config.icon_theme.as_deref(), Some("Papirus"));
+        assert_eq!(
+            state.config.sections[0].sensors[0].icon.as_deref(),
+            Some("cpu")
+        );
+        let saved = state.serialize().expect("serialize must succeed");
+        let out: JsonValue = serde_json::from_str(&saved).expect("saved JSON must parse");
+        assert_eq!(out["panel"]["icon_theme"], "Papirus");
+        assert_eq!(out["panel"]["sections"][0]["sensors"][0]["icon"], "cpu");
+        serde_json::from_str::<config::Config>(&saved)
+            .expect("piuma must accept the saved config (pre-save validation)");
+        // A save never injects the keys when they were absent.
+        state.config.icon_theme = None;
+        state.config.sections[0].sensors[0].icon = None;
+        let bare: JsonValue =
+            serde_json::from_str(&state.serialize().expect("serialize must succeed")).unwrap();
+        assert!(bare["panel"].get("icon_theme").is_none());
+        assert!(bare["panel"]["sections"][0]["sensors"][0].get("icon").is_none());
     }
 
     /// The editor writes all three keys when enabled (defaults on a fresh

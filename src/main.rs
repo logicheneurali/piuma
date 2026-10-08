@@ -5,6 +5,7 @@
 //! Configuration is loaded from a JSON file (CLI arg or default path).
 //! See `src/config.rs` for the config schema.
 
+use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
 
 use iced::widget::{container, text, Column, Row, MouseArea, Space, Stack};
@@ -30,6 +31,7 @@ use iced_exwlshell::settings::{LayerShellSettings, LayerSize, StartMode};
 use iced_exwlshell::to_layer_message;
 
 mod config;
+mod icons;
 mod notifications;
 mod sensor_runner;
 mod sensors;
@@ -96,6 +98,9 @@ struct SensorValue {
     /// Pinned pixel width of the value text (roadmap M5): net rate sensors
     /// keep a stable box so the row never resizes with the content.
     fixed_width: Option<u16>,
+    /// Resolved theme file for the sensor's `icon` name (roadmap N1);
+    /// `None` = no icon configured or the theme has no such icon.
+    icon: Option<PathBuf>,
 }
 
 /// Rendered section data.
@@ -447,6 +452,11 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                 }
             }
 
+            // Roadmap N1: with no icon-declaring sensor the whole icon path
+            // stays dormant — `icons_theme` is `None`, so no theme lookup
+            // (it spawns `gsettings`), no file resolution, no cache entries.
+            let icon_theme = icons_theme(&panel.config);
+
             let mut sections: Vec<SectionData> = Vec::new();
             for (section_idx, section_cfg) in panel.config.panel.sections.iter().enumerate() {
                 let section_default_txt = panel.config.panel.default_text_color
@@ -474,6 +484,23 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                         // (tray.rs) instead of text.
                         let tray_icons =
                             matches!(s.source, config::SensorSource::Tray {}).then(tray::items);
+                        // Roadmap N1: theme file for the sensor's icon, at the
+                        // panel's font size. The lookup is memoized, so the
+                        // per-second rebuild only clones the cached path; with
+                        // `icon_theme == None` (gate) this arm never runs.
+                        let icon = match (icon_theme, s.icon.as_deref()) {
+                            (Some(theme), Some(icon_name)) => icons::resolve(
+                                theme,
+                                icon_name,
+                                panel
+                                    .config
+                                    .panel
+                                    .font_size
+                                    .unwrap_or(DEFAULT_FONT_SIZE)
+                                    .min(u32::from(u16::MAX)) as u16,
+                            ),
+                            _ => None,
+                        };
                         // Style precedence, per style GROUP: a sensor takes a
                         // group over only when it defines the group's key
                         // colour (`border_color`, `bg_color`, `text_color`).
@@ -544,6 +571,7 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                                 .unwrap_or(0) as u16,
                             action: s.action.clone(),
                             tray: tray_icons,
+                            icon,
                             // Only the net rate sensors pin their width
                             // (roadmap M5); the measurement is cached per
                             // font/size, so the per-tick rebuild pays nothing
@@ -799,6 +827,26 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
     }
 }
 
+/// The theme to resolve sensor icons under, or `None` while no sensor of
+/// the config declares one (roadmap N1): the gate keeps the whole icon
+/// machinery — theme parsing, file lookups, cache — dormant otherwise, and
+/// it fires before the first `resolve` even happens. `panel.icon_theme`
+/// wins; without it the tray's GTK rule applies.
+fn icons_theme(config: &config::Config) -> Option<&str> {
+    let declares_icon = config
+        .panel
+        .sections
+        .iter()
+        .flat_map(|section| section.sensors.iter())
+        .any(|sensor| sensor.icon.is_some());
+    if !declares_icon {
+        return None;
+    }
+    // A closure, not the fn item: `unwrap_or_else` would otherwise unify
+    // `T` with the item's `&'static str` and demand `config: 'static`.
+    Some(config.panel.icon_theme.as_deref().unwrap_or_else(|| icons::icon_theme()))
+}
+
 // ── subscription (timer + iced events) ──────────────────────────────
 
 fn subscription(panel: &Panel) -> Subscription<Message> {
@@ -970,14 +1018,18 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
                         padding: s.padding,
                     },
                 )
-            } else if s.name.is_empty() {
-                Row::new().push(value_widget).into()
             } else {
-                Row::new()
-                    .push(text(&s.name).color(text_color).size(font_size).font(font_obj))
-                    .push(value_widget)
-                    .spacing(6)
-                    .into()
+                // Icon first when the sensor declares one (roadmap N1), then
+                // the optional name, then the value: an empty name still
+                // renders the value alone, without a gap.
+                let mut row = Row::new().spacing(6);
+                if let Some(path) = &s.icon {
+                    row = row.push(icons::widget(path, font_size as f32));
+                }
+                if !s.name.is_empty() {
+                    row = row.push(text(&s.name).color(text_color).size(font_size).font(font_obj));
+                }
+                row.push(value_widget).into()
             };
 
             let desc_str: String = s.description.clone();
@@ -2141,7 +2193,7 @@ fn parse_config_arg() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        corner_radius, popup_card_h, popup_placement, section_touch,
+        corner_radius, icons_theme, popup_card_h, popup_placement, section_touch,
         tray_icon_target, PopupStyle,
     };
     use iced_exwlshell::reexport::Anchor;
@@ -2254,6 +2306,20 @@ mod tests {
             (none.top_left, none.top_right, none.bottom_right, none.bottom_left),
             (12.0, 12.0, 12.0, 12.0)
         );
+    }
+
+    /// Roadmap N1 gate: no declared icon = no theme, even with
+    /// `panel.icon_theme` set — the icon machinery stays dormant. One
+    /// icon activates it, config value over the GTK fallback (that path
+    /// spawns `gsettings`, so it is deliberately not exercised here).
+    #[test]
+    fn icon_gate_runs_only_with_a_sensor_icon() {
+        let mut cfg = crate::config::default_config();
+        assert!(icons_theme(&cfg).is_none());
+        cfg.panel.icon_theme = Some("Papirus".to_string());
+        assert!(icons_theme(&cfg).is_none()); // still dormant
+        cfg.panel.sections[0].sensors[0].icon = Some("cpu".to_string());
+        assert_eq!(icons_theme(&cfg), Some("Papirus"));
     }
 
     /// A bare 26px bar: only the section content padding (4px a side).

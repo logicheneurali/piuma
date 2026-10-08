@@ -87,6 +87,9 @@ pub struct PanelConfig {
     pub font_size: Option<u32>,
     /// Bold panel text (roadmap M2); absent = false.
     pub bold: Option<bool>,
+    /// Theme used to resolve the sensors' `icon` names (roadmap N1);
+    /// absent = the tray's rule (GTK icon-theme setting, then `hicolor`).
+    pub icon_theme: Option<String>,
     pub section_layout: Option<String>,
     pub default_section_weight: Option<u32>,
     pub default_bg_color: Option<String>,
@@ -205,6 +208,11 @@ pub struct SensorConfig {
     #[serde(default)]
     pub name: String,
     pub description: Option<String>,
+    /// Freedesktop icon name rendered before the sensor (roadmap N1);
+    /// `None` = text only. The whole icon machinery stays dormant while
+    /// no sensor of the config declares one (see `icons_theme`).
+    #[serde(default)]
+    pub icon: Option<String>,
     pub source: SensorSource,
     pub text_color: Option<String>,
     pub bg_color: Option<String>,
@@ -321,11 +329,11 @@ pub fn default_config() -> Config {
         border_radius: None,
         border_type: None,
         sensors: vec![
-            SensorConfig { name: "CPU".to_string(), description: None, source: SensorSource::PercCpu {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None },
-            SensorConfig { name: "GPU".to_string(), description: None, source: SensorSource::PercGpu {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None },
-            SensorConfig { name: "MEM".to_string(), description: None, source: SensorSource::DetailMem {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None },
-            SensorConfig { name: "DISK".to_string(), description: None, source: SensorSource::PercDisk {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None },
-            SensorConfig { name: "UPTIME".to_string(), description: None, source: SensorSource::Uptime {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None },
+            SensorConfig { name: "CPU".to_string(), description: None, icon: None, source: SensorSource::PercCpu {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None },
+            SensorConfig { name: "GPU".to_string(), description: None, icon: None, source: SensorSource::PercGpu {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None },
+            SensorConfig { name: "MEM".to_string(), description: None, icon: None, source: SensorSource::DetailMem {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None },
+            SensorConfig { name: "DISK".to_string(), description: None, icon: None, source: SensorSource::PercDisk {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None },
+            SensorConfig { name: "UPTIME".to_string(), description: None, icon: None, source: SensorSource::Uptime {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None },
         ],
     };
 
@@ -334,6 +342,7 @@ pub fn default_config() -> Config {
             font: Some("Noto Sans".to_string()),
             font_size: Some(14),
             bold: None,
+            icon_theme: None,
             section_layout: Some("horizontal".to_string()),
             default_section_weight: Some(1),
             default_bg_color: None,
@@ -441,6 +450,24 @@ mod tests {
         // The type name must come back unchanged (setup writes it verbatim).
         let out = serde_json::to_string(&cfg).expect("config must serialize");
         assert!(out.contains(r#""type":"tray""#), "got: {out}");
+    }
+
+    /// Roadmap N1: `panel.icon_theme` and the per-sensor `icon` parse and
+    /// roundtrip — exactly the validation piuma-setup runs before saving.
+    #[test]
+    fn icon_keys_parse_and_roundtrip() {
+        let json = r#"{"panel":{"icon_theme":"Papirus","sections":[{"name":"sys","sensors":[{"name":"CPU","icon":"cpu","source":{"type":"perc_cpu"}}]}]}}"#;
+        let cfg: Config = serde_json::from_str(json).expect("icon keys must parse");
+        assert_eq!(cfg.panel.icon_theme.as_deref(), Some("Papirus"));
+        assert_eq!(cfg.panel.sections[0].sensors[0].icon.as_deref(), Some("cpu"));
+        let out = serde_json::to_string(&cfg).expect("config must serialize");
+        assert!(out.contains(r#""icon":"cpu""#), "got: {out}");
+        assert!(out.contains(r#""icon_theme":"Papirus""#), "got: {out}");
+        // Absent keys deserialize as `None` (setup never writes them).
+        let bare: Config =
+            serde_json::from_str(r#"{"panel":{"sections":[]}}"#).expect("bare config parses");
+        assert!(bare.panel.icon_theme.is_none());
+        assert!(bare.panel.sections.is_empty());
     }
 
     /// `panel.notifications`: presence gates the D-Bus server, missing

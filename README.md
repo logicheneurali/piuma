@@ -140,6 +140,13 @@ Example configuration:
 names, values and descriptions, section titles, tray tooltips and the
 notification popup; `panel.bold: true` renders all of it bold.
 
+A sensor can declare `"icon"`: a freedesktop icon **name** (e.g. `"cpu"`)
+drawn before its text, sized to the font and resolved under
+`panel.icon_theme` (absent = the system icon-theme setting, then
+`hicolor` — the same rule as the tray). Lookups are cached and the whole
+icon machinery stays dormant — no theme parsing, no file resolution, no
+memory — until at least one sensor declares an icon.
+
 Numeric style fields — `border_width`, `border_width_hover`, `border_radius`
 and `padding` (on sensors, on sections, and on `panel.sensor_defaults` /
 `panel.section_defaults`) use the range `-1..=N`:

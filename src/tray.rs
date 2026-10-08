@@ -207,13 +207,8 @@ fn notify(sender: &Sender<Message>) {
 
 // ── icon / tooltip resolution ──────────────────────────────────────
 
-/// User icon theme, resolved once (the lookup spawns `gsettings`).
-fn icon_theme() -> &'static str {
-    static THEME: OnceLock<String> = OnceLock::new();
-    THEME
-        .get_or_init(|| freedesktop_icons::default_theme_gtk().unwrap_or_else(|| "hicolor".to_string()))
-        .as_str()
-}
+// The icon theme rule itself lives with the sensors' icons in
+// `icons::icon_theme` (one rule, one `gsettings` spawn per process).
 
 /// ARGB32 in network byte order (the spec's wire format) → RGBA bytes.
 pub fn argb_to_rgba(data: &[u8]) -> Vec<u8> {
@@ -264,7 +259,7 @@ fn resolve_image(name: &str, pixmaps: &[(i32, i32, Vec<u8>)]) -> Option<TrayImag
     if !name.is_empty() {
         if let Some(path) = freedesktop_icons::lookup(name)
             .with_size(icon_target())
-            .with_theme(icon_theme())
+            .with_theme(crate::icons::icon_theme())
             .find()
         {
             return Some(TrayImage::File(path));
