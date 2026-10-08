@@ -30,6 +30,7 @@ use iced_exwlshell::reexport::{
 use iced_exwlshell::settings::{LayerShellSettings, LayerSize, StartMode};
 use iced_exwlshell::to_layer_message;
 
+mod app_theme;
 mod autostart;
 mod config;
 mod icons;
@@ -393,13 +394,14 @@ fn config_file_state() -> Option<(SystemTime, u64)> {
     Some((meta.modified().ok()?, meta.len()))
 }
 
-/// Hot reload of the config file: returns the parsed config only when the
-/// file changed on disk since the last attempt (mtime + length check, so an
-/// unchanged file is not re-read every tick). The attempt is recorded
-/// regardless of the outcome; a parse failure (e.g. a half-written file)
-/// logs once per change and keeps the previous config, retrying when the
-/// file changes again.
-fn maybe_reload(panel: &mut Panel) -> Option<config::Config> {
+/// Hot reload of the config file: returns `(parsed config, config path)`
+/// only when the file changed on disk since the last attempt (mtime +
+/// length check, so an unchanged file is not re-read every tick). The
+/// attempt is recorded regardless of the outcome; a parse failure (e.g.
+/// a half-written file) logs once per change and keeps the previous
+/// config, retrying when the file changes again. The path rides along so
+/// callers do not touch `CONFIG_PATH` again (one static ref per reload).
+fn maybe_reload(panel: &mut Panel) -> Option<(config::Config, String)> {
     let state = config_file_state()?;
     if panel.last_reload == Some(state) {
         return None;
@@ -411,7 +413,7 @@ fn maybe_reload(panel: &mut Panel) -> Option<config::Config> {
     match serde_json::from_str::<config::Config>(&contents) {
         Ok(cfg) => {
             eprintln!("[piuma] config reloaded: {}", path);
-            Some(cfg)
+            Some((cfg, path))
         }
         Err(e) => {
             eprintln!("[piuma] config changed but failed to parse ({}), keeping previous", e);
@@ -436,9 +438,12 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             // (font/padding) lives in the config without affecting the bar's
             // own geometry, so its reposition rides on this flag.
             let mut config_reloaded = false;
-            if let Some(reloaded) = maybe_reload(panel) {
+            if let Some((reloaded, path)) = maybe_reload(panel) {
                 config_reloaded = true;
                 panel.config = reloaded;
+                // Roadmap N3: keep the generated GTK bridge in step with
+                // hot reloads (rewritten only when its content changes).
+                app_theme::sync(std::path::Path::new(&path), &panel.config.panel);
                 let size = panel_size(&panel.config, unsafe { SCREEN_WIDTH }, unsafe { SCREEN_HEIGHT });
                 let anchor = panel_anchor(&panel.config);
                 let zone = panel_thickness(&panel.config) as i32;
@@ -2077,6 +2082,10 @@ fn main() -> Result<(), iced_exwlshell::Error> {
     if config.panel.autostart.unwrap_or(false) {
         autostart::spawn();
     }
+
+    // Roadmap N3: render the GTK theme bridge from the bar's own style
+    // (writes/removes only piuma's own file; off = untouched).
+    app_theme::sync(&resolved_config_path, &config.panel);
 
     // Best-effort primary monitor dimensions for screen-wide surface sizing.
     unsafe {

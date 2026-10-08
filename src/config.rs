@@ -93,6 +93,9 @@ pub struct PanelConfig {
     /// Launch the freedesktop autostart applications with the bar
     /// (roadmap N2); absent = false (nothing is scanned or spawned).
     pub autostart: Option<bool>,
+    /// Generate the GTK theme bridge from the bar's style (roadmap N3);
+    /// absent = false (no file is written or removed).
+    pub app_theme: Option<bool>,
     pub section_layout: Option<String>,
     pub default_section_weight: Option<u32>,
     pub default_bg_color: Option<String>,
@@ -347,6 +350,7 @@ pub fn default_config() -> Config {
             bold: None,
             icon_theme: None,
             autostart: None,
+            app_theme: None,
             section_layout: Some("horizontal".to_string()),
             default_section_weight: Some(1),
             default_bg_color: None,
@@ -486,6 +490,20 @@ mod tests {
         let bare: Config =
             serde_json::from_str(r#"{"panel":{"sections":[]}}"#).expect("bare config parses");
         assert!(bare.panel.autostart.is_none());
+    }
+
+    /// Roadmap N3: `panel.app_theme` parses and roundtrips; absent stays
+    /// `None` — the GTK theme bridge stays off by default.
+    #[test]
+    fn app_theme_key_parse_and_roundtrip() {
+        let json = r#"{"panel":{"app_theme":true,"sections":[]}}"#;
+        let cfg: Config = serde_json::from_str(json).expect("app_theme must parse");
+        assert_eq!(cfg.panel.app_theme, Some(true));
+        let out = serde_json::to_string(&cfg).expect("config must serialize");
+        assert!(out.contains(r#""app_theme":true"#), "got: {out}");
+        let bare: Config =
+            serde_json::from_str(r#"{"panel":{"sections":[]}}"#).expect("bare config parses");
+        assert!(bare.panel.app_theme.is_none());
     }
 
     /// `panel.notifications`: presence gates the D-Bus server, missing

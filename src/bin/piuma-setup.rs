@@ -31,6 +31,9 @@ pub struct PiumaConfig {
     /// Freedesktop autostart launch with the bar (roadmap N2): `None` =
     /// key absent (the bar never scans or spawns anything).
     pub autostart: Option<bool>,
+    /// GTK theme bridge generation (roadmap N3): `None` = key absent (no
+    /// file written or removed).
+    pub app_theme: Option<bool>,
     pub section_layout: String,
     pub default_section_weight: u32,
     pub default_bg_color: Option<String>,
@@ -189,6 +192,7 @@ impl Default for PiumaConfig {
             bold: None,
             icon_theme: None,
             autostart: None,
+            app_theme: None,
             section_layout: "horizontal".to_string(),
             default_section_weight: 1,
             default_bg_color: Some("#1a1b26".to_string()),
@@ -269,6 +273,8 @@ pub enum Message {
     IconThemeChanged(String),
     /// Freedesktop autostart toggle (roadmap N2).
     AutostartChanged(bool),
+    /// GTK theme bridge toggle (roadmap N3).
+    AppThemeChanged(bool),
     ThicknessChanged(u32),
     /// Sensor style defaults: (field name, value) and (field name, number)
     /// for the fields of `panel.sensor_defaults`.
@@ -492,6 +498,9 @@ impl PiumaSetup {
         }
         if let Some(a) = self.config.autostart {
             panel.insert("autostart".to_string(), JsonValue::Bool(a));
+        }
+        if let Some(t) = self.config.app_theme {
+            panel.insert("app_theme".to_string(), JsonValue::Bool(t));
         }
         panel.insert("section_layout".to_string(), JsonValue::String(self.config.section_layout.clone()));
         panel.insert("default_section_weight".to_string(), JsonValue::Number(self.config.default_section_weight.into()));
@@ -847,6 +856,7 @@ impl PiumaSetup {
             bold: None,
             icon_theme: None,
             autostart: None,
+            app_theme: None,
             section_layout: "horizontal".to_string(),
             default_section_weight: 1,
             default_bg_color: None,
@@ -877,6 +887,9 @@ impl PiumaSetup {
         // Absent `autostart` stays `None` (reset default): the bar reads
         // false and never scans the autostart directories (roadmap N2).
         self.config.autostart = panel.get("autostart").and_then(|v| v.as_bool());
+        // Absent `app_theme` stays `None`: no bridge file is written or
+        // removed (roadmap N3).
+        self.config.app_theme = panel.get("app_theme").and_then(|v| v.as_bool());
         if let Some(sl) = panel.get("section_layout").and_then(|v| v.as_str()) {
             self.config.section_layout = sl.to_string();
         }
@@ -1147,6 +1160,10 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
         Message::AutostartChanged(value) => {
             // On = explicit true; off drops back to absent (≈ false).
             state.config.autostart = value.then_some(true);
+        }
+        Message::AppThemeChanged(value) => {
+            // On = explicit true; off drops back to absent (≈ false).
+            state.config.app_theme = value.then_some(true);
         }
         Message::ThicknessChanged(value) => state.config.thickness = value,
         Message::DefaultsStyleChanged(field, value) => {
@@ -1963,6 +1980,10 @@ fn panel_settings(state: &PiumaSetup) -> Element<Message> {
         ("Autostart", toggler(state.config.autostart.unwrap_or(false))
             .label("Launch freedesktop autostart apps")
             .on_toggle(Message::AutostartChanged)
+            .into()),
+        ("App Theme", toggler(state.config.app_theme.unwrap_or(false))
+            .label("Generate GTK theme bridge")
+            .on_toggle(Message::AppThemeChanged)
             .into()),
         ("Thickness", Row::new()
             .push(Slider::new(8..=64, thickness, Message::ThicknessChanged).width(Length::Fill))
@@ -2917,6 +2938,36 @@ mod tests {
         let bare: JsonValue =
             serde_json::from_str(&state.serialize().expect("serialize must succeed")).unwrap();
         assert!(bare["panel"].get("autostart").is_none());
+    }
+
+    /// The roadmap N3 key (`panel.app_theme`) roundtrips load→save with
+    /// its value, the result still parses as piuma's own schema, and a
+    /// save never injects the key when it was absent.
+    #[test]
+    fn app_theme_key_roundtrip() {
+        let json = r##"{
+  "panel": {
+    "align": "fill",
+    "anchor": "top",
+    "app_theme": true,
+    "section_layout": "horizontal",
+    "sections": [],
+    "thickness": 26
+  }
+}"##;
+        let mut state = fixture();
+        state.load_from_json(json).expect("config must load");
+        assert_eq!(state.config.app_theme, Some(true));
+        let saved = state.serialize().expect("serialize must succeed");
+        let out: JsonValue = serde_json::from_str(&saved).expect("saved JSON must parse");
+        assert_eq!(out["panel"]["app_theme"], true);
+        serde_json::from_str::<config::Config>(&saved)
+            .expect("piuma must accept the saved config (pre-save validation)");
+        // Toggle off = key absent.
+        state.config.app_theme = None;
+        let bare: JsonValue =
+            serde_json::from_str(&state.serialize().expect("serialize must succeed")).unwrap();
+        assert!(bare["panel"].get("app_theme").is_none());
     }
 
     /// The editor writes all three keys when enabled (defaults on a fresh

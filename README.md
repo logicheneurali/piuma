@@ -159,6 +159,29 @@ and piuma never launches itself. Absent (the default) the feature is
 dormant — nothing is scanned or spawned. The toggle lives in
 piuma-setup's *Panel Settings* card.
 
+`panel.app_theme: true` generates `<config dir>/theme/gtk.css` — a
+small GTK stylesheet carrying the bar's **character** (`panel.font`,
+`font_size`, `bold`), its **background/colours**
+(`default_bg_color`, `default_text_color`) and its **borders**
+(`sensor_defaults` / `section_defaults` border colour and radius) for
+GTK applications. The file lives inside piuma's own directory, is
+rewritten on config reload only when its content changes, and is
+removed when the toggle goes off; piuma never edits your `gtk.css`,
+`gtk-4.0/gtk.css` or `settings.ini`. Opt in once by adding
+`@import url("file:///home/you/.config/piuma/theme/gtk.css");` at the
+top of your `~/.config/gtk-3.0/gtk.css` (and `gtk-4.0/gtk.css`).
+
+Coexistence: the bridge declares its own `@piuma_bg` / `@piuma_fg` /
+`@piuma_border` names and joins your cascade additively, so an existing
+customisation — a KDE/Breeze setup, or a hand-made palette like
+`window_bg_color` — keeps winning wherever it sets the same property;
+the bridge only fills the gaps. To let piuma win on a property, point
+your own rule at it (`@define-color window_bg_color @piuma_bg;`).
+Disabling the toggle removes only piuma's generated file. Qt
+applications are not themed (that would require qt6ct/kvantum); they
+keep their current style. The effect is best-effort — it follows each
+app's CSS cascade.
+
 Numeric style fields — `border_width`, `border_width_hover`, `border_radius`
 and `padding` (on sensors, on sections, and on `panel.sensor_defaults` /
 `panel.section_defaults`) use the range `-1..=N`:
