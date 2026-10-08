@@ -28,6 +28,9 @@ pub struct PiumaConfig {
     /// Theme resolving the sensors' `icon` names (roadmap N1): `None` =
     /// key absent (the bar falls back to the system icon-theme setting).
     pub icon_theme: Option<String>,
+    /// Freedesktop autostart launch with the bar (roadmap N2): `None` =
+    /// key absent (the bar never scans or spawns anything).
+    pub autostart: Option<bool>,
     pub section_layout: String,
     pub default_section_weight: u32,
     pub default_bg_color: Option<String>,
@@ -185,6 +188,7 @@ impl Default for PiumaConfig {
             font_size: 12,
             bold: None,
             icon_theme: None,
+            autostart: None,
             section_layout: "horizontal".to_string(),
             default_section_weight: 1,
             default_bg_color: Some("#1a1b26".to_string()),
@@ -263,6 +267,8 @@ pub enum Message {
     BoldChanged(bool),
     /// Icon theme of the panel (roadmap N1); empty = absent.
     IconThemeChanged(String),
+    /// Freedesktop autostart toggle (roadmap N2).
+    AutostartChanged(bool),
     ThicknessChanged(u32),
     /// Sensor style defaults: (field name, value) and (field name, number)
     /// for the fields of `panel.sensor_defaults`.
@@ -483,6 +489,9 @@ impl PiumaSetup {
         }
         if let Some(theme) = &self.config.icon_theme {
             panel.insert("icon_theme".to_string(), JsonValue::String(theme.clone()));
+        }
+        if let Some(a) = self.config.autostart {
+            panel.insert("autostart".to_string(), JsonValue::Bool(a));
         }
         panel.insert("section_layout".to_string(), JsonValue::String(self.config.section_layout.clone()));
         panel.insert("default_section_weight".to_string(), JsonValue::Number(self.config.default_section_weight.into()));
@@ -837,6 +846,7 @@ impl PiumaSetup {
             font_size: 14,
             bold: None,
             icon_theme: None,
+            autostart: None,
             section_layout: "horizontal".to_string(),
             default_section_weight: 1,
             default_bg_color: None,
@@ -864,6 +874,9 @@ impl PiumaSetup {
             .get("icon_theme")
             .and_then(|v| v.as_str())
             .map(str::to_string);
+        // Absent `autostart` stays `None` (reset default): the bar reads
+        // false and never scans the autostart directories (roadmap N2).
+        self.config.autostart = panel.get("autostart").and_then(|v| v.as_bool());
         if let Some(sl) = panel.get("section_layout").and_then(|v| v.as_str()) {
             self.config.section_layout = sl.to_string();
         }
@@ -1130,6 +1143,10 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
         }
         Message::IconThemeChanged(value) => {
             state.config.icon_theme = if value.is_empty() { None } else { Some(value) };
+        }
+        Message::AutostartChanged(value) => {
+            // On = explicit true; off drops back to absent (≈ false).
+            state.config.autostart = value.then_some(true);
         }
         Message::ThicknessChanged(value) => state.config.thickness = value,
         Message::DefaultsStyleChanged(field, value) => {
@@ -1942,6 +1959,10 @@ fn panel_settings(state: &PiumaSetup) -> Element<Message> {
             .into()),
         ("Icon Theme", input("system icon theme", state.config.icon_theme.as_deref().unwrap_or(""), Message::IconThemeChanged)
             .width(Length::Fill)
+            .into()),
+        ("Autostart", toggler(state.config.autostart.unwrap_or(false))
+            .label("Launch freedesktop autostart apps")
+            .on_toggle(Message::AutostartChanged)
             .into()),
         ("Thickness", Row::new()
             .push(Slider::new(8..=64, thickness, Message::ThicknessChanged).width(Length::Fill))
@@ -2866,6 +2887,36 @@ mod tests {
             serde_json::from_str(&state.serialize().expect("serialize must succeed")).unwrap();
         assert!(bare["panel"].get("icon_theme").is_none());
         assert!(bare["panel"]["sections"][0]["sensors"][0].get("icon").is_none());
+    }
+
+    /// The roadmap N2 key (`panel.autostart`) roundtrips load→save with
+    /// its value, the result still parses as piuma's own schema, and a
+    /// save never injects the key when it was absent.
+    #[test]
+    fn autostart_key_roundtrip() {
+        let json = r##"{
+  "panel": {
+    "align": "fill",
+    "anchor": "top",
+    "autostart": true,
+    "section_layout": "horizontal",
+    "sections": [],
+    "thickness": 26
+  }
+}"##;
+        let mut state = fixture();
+        state.load_from_json(json).expect("config must load");
+        assert_eq!(state.config.autostart, Some(true));
+        let saved = state.serialize().expect("serialize must succeed");
+        let out: JsonValue = serde_json::from_str(&saved).expect("saved JSON must parse");
+        assert_eq!(out["panel"]["autostart"], true);
+        serde_json::from_str::<config::Config>(&saved)
+            .expect("piuma must accept the saved config (pre-save validation)");
+        // Toggle off = key absent (the bar reads false).
+        state.config.autostart = None;
+        let bare: JsonValue =
+            serde_json::from_str(&state.serialize().expect("serialize must succeed")).unwrap();
+        assert!(bare["panel"].get("autostart").is_none());
     }
 
     /// The editor writes all three keys when enabled (defaults on a fresh

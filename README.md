@@ -147,6 +147,18 @@ drawn before its text, sized to the font and resolved under
 icon machinery stays dormant — no theme parsing, no file resolution, no
 memory — until at least one sensor declares an icon.
 
+`panel.autostart: true` makes the bar launch, once at startup, the
+applications marked as autostart under the standard XDG directories —
+`$XDG_CONFIG_HOME/autostart` (default `~/.config/autostart`) and the
+system `$XDG_CONFIG_DIRS/autostart` (default `/etc/xdg/autostart`) —
+following the freedesktop Autostart spec: `Hidden`,
+`X-GNOME-Autostart-enabled`, `OnlyShowIn`/`NotShowIn`, `TryExec`,
+`Path`, `Exec` field codes, and a user file overriding the system file
+with the same name. A program already running is never started twice,
+and piuma never launches itself. Absent (the default) the feature is
+dormant — nothing is scanned or spawned. The toggle lives in
+piuma-setup's *Panel Settings* card.
+
 Numeric style fields — `border_width`, `border_width_hover`, `border_radius`
 and `padding` (on sensors, on sections, and on `panel.sensor_defaults` /
 `panel.section_defaults`) use the range `-1..=N`:

@@ -30,6 +30,7 @@ use iced_exwlshell::reexport::{
 use iced_exwlshell::settings::{LayerShellSettings, LayerSize, StartMode};
 use iced_exwlshell::to_layer_message;
 
+mod autostart;
 mod config;
 mod icons;
 mod notifications;
@@ -2070,6 +2071,12 @@ fn main() -> Result<(), iced_exwlshell::Error> {
         config.panel.sections.len(),
         resolved_config_path.display()
     );
+
+    // Roadmap N2: launch the freedesktop autostart applications with the
+    // bar (background thread; dormant unless the config enables it).
+    if config.panel.autostart.unwrap_or(false) {
+        autostart::spawn();
+    }
 
     // Best-effort primary monitor dimensions for screen-wide surface sizing.
     unsafe {

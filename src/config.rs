@@ -90,6 +90,9 @@ pub struct PanelConfig {
     /// Theme used to resolve the sensors' `icon` names (roadmap N1);
     /// absent = the tray's rule (GTK icon-theme setting, then `hicolor`).
     pub icon_theme: Option<String>,
+    /// Launch the freedesktop autostart applications with the bar
+    /// (roadmap N2); absent = false (nothing is scanned or spawned).
+    pub autostart: Option<bool>,
     pub section_layout: Option<String>,
     pub default_section_weight: Option<u32>,
     pub default_bg_color: Option<String>,
@@ -343,6 +346,7 @@ pub fn default_config() -> Config {
             font_size: Some(14),
             bold: None,
             icon_theme: None,
+            autostart: None,
             section_layout: Some("horizontal".to_string()),
             default_section_weight: Some(1),
             default_bg_color: None,
@@ -468,6 +472,20 @@ mod tests {
             serde_json::from_str(r#"{"panel":{"sections":[]}}"#).expect("bare config parses");
         assert!(bare.panel.icon_theme.is_none());
         assert!(bare.panel.sections.is_empty());
+    }
+
+    /// Roadmap N2: `panel.autostart` parses and roundtrips; absent stays
+    /// `None` — the bar never autostarts anything by default.
+    #[test]
+    fn autostart_key_parse_and_roundtrip() {
+        let json = r#"{"panel":{"autostart":true,"sections":[]}}"#;
+        let cfg: Config = serde_json::from_str(json).expect("autostart must parse");
+        assert_eq!(cfg.panel.autostart, Some(true));
+        let out = serde_json::to_string(&cfg).expect("config must serialize");
+        assert!(out.contains(r#""autostart":true"#), "got: {out}");
+        let bare: Config =
+            serde_json::from_str(r#"{"panel":{"sections":[]}}"#).expect("bare config parses");
+        assert!(bare.panel.autostart.is_none());
     }
 
     /// `panel.notifications`: presence gates the D-Bus server, missing
