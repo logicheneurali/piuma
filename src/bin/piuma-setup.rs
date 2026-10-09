@@ -17,6 +17,13 @@ use std::path::{Path, PathBuf};
 #[path = "../config.rs"]
 mod config;
 
+// Freedesktop autostart listing and the per-app switch (roadmap2 #2):
+// the bar-only runner (spawn/launch) is not this bin's job — the
+// module-wide allow keeps it out of the warning baseline.
+#[allow(dead_code)]
+#[path = "../autostart.rs"]
+mod autostart;
+
 /// The `panel.wallpaper` block (roadmap2 #1): whether the bar draws the
 /// desktop background itself and which image covers the output.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -285,6 +292,9 @@ pub enum Message {
     IconThemeChanged(String),
     /// Freedesktop autostart toggle (roadmap N2).
     AutostartChanged(bool),
+    /// One autostart app switched in its tab: (file name, enable) — the
+    /// write lands in the user's override file (roadmap2 #2).
+    AutostartAppToggled(String, bool),
     /// GTK theme bridge toggle (roadmap N3).
     AppThemeChanged(bool),
     /// Wallpaper enable toggle (roadmap2 #1).
@@ -453,17 +463,19 @@ pub enum Tab {
     SectionDefaults,
     Sections,
     Wallpaper,
+    AutostartApps,
 }
 
 impl Tab {
     /// Sidebar order.
-    const ALL: [Tab; 6] = [
+    const ALL: [Tab; 7] = [
         Tab::Panel,
         Tab::Notifications,
         Tab::SensorDefaults,
         Tab::SectionDefaults,
         Tab::Sections,
         Tab::Wallpaper,
+        Tab::AutostartApps,
     ];
 
     /// Label shown on the sidebar button.
@@ -475,6 +487,7 @@ impl Tab {
             Tab::SectionDefaults => "Section Defaults",
             Tab::Sections => "Sections",
             Tab::Wallpaper => "Wallpaper",
+        Tab::AutostartApps => "Autostart apps",
         }
     }
 }
@@ -500,6 +513,10 @@ pub struct PiumaSetup {
     /// Images found under the freedesktop wallpaper folders (roadmap2 #1),
     /// scanned once at startup for the Wallpaper tab's list.
     wallpaper_files: Vec<PathBuf>,
+    /// Autostart `.desktop` files found under the freedesktop dirs
+    /// (roadmap2 #2), scanned once at startup for the "Autostart apps"
+    /// tab and re-read after every switch.
+    autostart_apps: Vec<autostart::editor::App>,
 }
 
 impl PiumaSetup {
@@ -518,6 +535,7 @@ impl PiumaSetup {
             snapshot: String::new(),
             modal: None,
             wallpaper_files: scan_wallpaper_dirs(&wallpaper_dirs()),
+            autostart_apps: autostart::editor::apps(),
         };
         match fs::read_to_string(file_path(&state.current_file)) {
             Ok(content) => match state.load_from_json(&content) {
@@ -1240,6 +1258,19 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
             // On = explicit true; off drops back to absent (≈ false).
             state.config.autostart = value.then_some(true);
         }
+        Message::AutostartAppToggled(file, enabled) => {
+            // The write goes to the user's override file; the list is
+            // re-read from disk right after, so the tab always shows
+            // what the bar will read at its next start.
+            match autostart::editor::set_app_enabled(&file, enabled) {
+                Ok(()) => {
+                    state.autostart_apps = autostart::editor::apps();
+                    let verb = if enabled { "enabled" } else { "disabled" };
+                    state.set_status(format!("{} {}", verb, file), false);
+                }
+                Err(e) => state.set_status(format!("{}: {}", file, e), true),
+            }
+        }
         Message::AppThemeChanged(value) => {
             // On = explicit true; off drops back to absent (≈ false).
             state.config.app_theme = value.then_some(true);
@@ -1908,6 +1939,7 @@ fn active_card(state: &PiumaSetup) -> Element<'_, Message> {
         Tab::SectionDefaults => section_defaults_view(state),
         Tab::Sections => sections_list(state),
         Tab::Wallpaper => wallpaper_settings(state),
+        Tab::AutostartApps => autostart_apps_settings(state),
     }
 }
 
@@ -2268,6 +2300,48 @@ fn wallpaper_settings(state: &PiumaSetup) -> Element<'_, Message> {
     .into()
 }
 
+/// The dedicated "Autostart apps" tab (roadmap2 #2): the global launch
+/// switch moved here from Panel Settings, plus one row per freedesktop
+/// autostart `.desktop` with its own switch — disabling writes the
+/// user's override file (`Hidden=true` on a full copy), enabling takes
+/// the off-switch out of it again. Saving is the global Save; the bar
+/// reads the directories on its next start.
+fn autostart_apps_settings(state: &PiumaSetup) -> Element<'_, Message> {
+    let mut apps = column![].spacing(4).width(Length::Fill);
+    if state.autostart_apps.is_empty() {
+        apps = apps.push(text("No autostart .desktop files found.").size(BODY));
+    }
+    for app in &state.autostart_apps {
+        apps = apps.push(
+            Row::new()
+                .push(text(&app.label).size(BODY).width(Length::Fill))
+                .push(
+                    toggler(app.enabled)
+                        .on_toggle(move |value| Message::AutostartAppToggled(app.file.clone(), value)),
+                )
+                .align_y(Alignment::Center)
+                .spacing(8)
+                .width(Length::Fill),
+        );
+    }
+
+    card(
+        column![
+            text("Autostart apps").size(16).style(|_t: &Theme| TextStyle {
+                color: Some(Color::from_rgb(0.8, 0.8, 0.8)),
+                ..TextStyle::default()
+            }),
+            toggler(state.config.autostart.unwrap_or(false))
+                .label("Launch freedesktop autostart apps")
+                .on_toggle(Message::AutostartChanged),
+            apps,
+        ]
+        .spacing(10)
+        .width(Length::Fill),
+    )
+    .into()
+}
+
 /// Panel-wide settings as a two-column form grid inside a card.
 fn panel_settings(state: &PiumaSetup) -> Element<Message> {
     let font_size = state.config.font_size;
@@ -2294,10 +2368,7 @@ fn panel_settings(state: &PiumaSetup) -> Element<Message> {
         ("Icon Theme", input("system icon theme", state.config.icon_theme.as_deref().unwrap_or(""), Message::IconThemeChanged)
             .width(Length::Fill)
             .into()),
-        ("Autostart", toggler(state.config.autostart.unwrap_or(false))
-            .label("Launch freedesktop autostart apps")
-            .on_toggle(Message::AutostartChanged)
-            .into()),
+        // Autostart lives in its own tab now (roadmap2 #2).
         ("App Theme", toggler(state.config.app_theme.unwrap_or(false))
             .label("Generate GTK theme bridge")
             .on_toggle(Message::AppThemeChanged)
@@ -2582,8 +2653,8 @@ fn canonical_type<'a>(source_type: &'a str) -> &'a str {
 }
 
 /// Canonical source types for the picklist, grouped by naming convention:
-/// prefixed categories first (perc_/used_/total_/detail_/temp_), plain
-/// lowercase (no numeric category) last.
+/// Every canonical source type; the combo shows them sorted
+/// alphabetically (see [`available_source_types`]).
 const SOURCE_TYPES: &[&str] = &[
     // perc_ — percentages
     "perc_cpu", "perc_gpu", "perc_mem", "perc_swap", "perc_disk",
@@ -2601,6 +2672,18 @@ const SOURCE_TYPES: &[&str] = &[
     "net_state", "uptime", "clock", "window", "workspace",
     "command", "env_var", "static_text", "tray", "notifications",
 ];
+
+/// The sensor-type combo's options (roadmap2 #6): every canonical type
+/// in alphabetical order; an unknown type from the edited file joins
+/// the list (also sorted) so the selection stays visible.
+fn available_source_types(current: &str) -> Vec<String> {
+    let mut types: Vec<String> = SOURCE_TYPES.iter().map(|s| s.to_string()).collect();
+    if !types.iter().any(|t| t == current) {
+        types.push(current.to_string());
+    }
+    types.sort();
+    types
+}
 
 /// Friendly label for a canonical source type (shown when it needs no
 /// extra configuration).
@@ -2655,13 +2738,10 @@ fn sensor_view(section_index: usize, sensor_index: usize, sensor_count: usize, s
         .align_y(Alignment::Center)
         .width(Length::Fill);
 
-    // Options = the canonical types; load_sensor already converted any
-    // legacy name, so the current value is in this list unless the file
-    // holds an unknown/typo'd type — which stays visible to be fixed.
-    let mut source_types: Vec<String> = SOURCE_TYPES.iter().map(|s| s.to_string()).collect();
-    if !source_types.iter().any(|t| t == &sensor.source_type) {
-        source_types.push(sensor.source_type.clone());
-    }
+    // Options = the canonical types, alphabetical (roadmap2 #6); an
+    // unknown/typo'd type from the file joins the list — still sorted —
+    // so the current value never falls out of the options.
+    let source_types = available_source_types(&sensor.source_type);
     let source_type_picklist = picklist(
         source_types,
         Some(&sensor.source_type),
@@ -3009,6 +3089,7 @@ mod tests {
             snapshot: String::new(),
             modal: None,
             wallpaper_files: Vec::new(),
+            autostart_apps: Vec::new(),
         }
     }
 
@@ -3423,5 +3504,23 @@ mod tests {
         );
         assert_eq!(parse_user_dirs_pictures("#XDG_PICTURES_DIR=\"$HOME/x\"\n"), None);
         assert_eq!(parse_user_dirs_pictures("XDG_PICTURES_DIR=\"\"\n"), None);
+    }
+
+    /// Roadmap2 #6: the sensor-type combo is alphabetical, and an
+    /// unknown type from the file joins the list still sorted (the
+    /// selection never falls out of the options).
+    #[test]
+    fn available_source_types_are_sorted() {
+        let types = available_source_types("perc_cpu");
+        let mut sorted = types.clone();
+        sorted.sort();
+        assert_eq!(types, sorted, "canonical types must come out sorted");
+        assert!(types.contains(&"perc_cpu".to_string()));
+
+        let types = available_source_types("z_custom_type");
+        let mut sorted = types.clone();
+        sorted.sort();
+        assert_eq!(types, sorted, "the unknown type must sort in too");
+        assert!(types.contains(&"z_custom_type".to_string()));
     }
 }
