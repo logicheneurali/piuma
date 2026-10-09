@@ -96,6 +96,9 @@ pub struct PanelConfig {
     /// Generate the GTK theme bridge from the bar's style (roadmap N3);
     /// absent = false (no file is written or removed).
     pub app_theme: Option<bool>,
+    /// Desktop background the bar renders itself on the background layer
+    /// (roadmap2 #1); absent = disabled (no window is opened).
+    pub wallpaper: Option<WallpaperConfig>,
     pub section_layout: Option<String>,
     pub default_section_weight: Option<u32>,
     pub default_bg_color: Option<String>,
@@ -112,6 +115,21 @@ pub struct PanelConfig {
     /// present ⇔ the D-Bus server runs.
     pub notifications: Option<NotificationsConfig>,
     pub sections: Vec<SectionConfig>,
+}
+
+/// `panel.wallpaper`: the desktop background the bar draws on the
+/// background layer — no external wallpaper tool is involved. Every
+/// field defaults so a partial block (or none at all) keeps old
+/// configs working: disabled, no path, no window.
+#[derive(Deserialize, serde::Serialize, Clone)]
+pub struct WallpaperConfig {
+    /// Whether the bar shows the wallpaper at all.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Absolute path of the image, drawn with a cover fit over the
+    /// whole output.
+    #[serde(default)]
+    pub path: String,
 }
 
 /// `panel.notifications`: tunes the D-Bus server (the block's presence
@@ -351,6 +369,7 @@ pub fn default_config() -> Config {
             icon_theme: None,
             autostart: None,
             app_theme: None,
+            wallpaper: None,
             section_layout: Some("horizontal".to_string()),
             default_section_weight: Some(1),
             default_bg_color: None,
@@ -458,6 +477,33 @@ mod tests {
         // The type name must come back unchanged (setup writes it verbatim).
         let out = serde_json::to_string(&cfg).expect("config must serialize");
         assert!(out.contains(r#""type":"tray""#), "got: {out}");
+    }
+
+    /// Roadmap2 #1: `panel.wallpaper` parses whole, partial and absent —
+    /// exactly the validation piuma-setup runs before saving, and the
+    /// per-field defaults every older config relies on.
+    #[test]
+    fn wallpaper_keys_parse_and_roundtrip() {
+        let json = r#"{"panel":{"wallpaper":{"enabled":true,"path":"/tmp/a.png"},"sections":[]}}"#;
+        let cfg: Config = serde_json::from_str(json).expect("wallpaper must be valid");
+        let wp = cfg.panel.wallpaper.as_ref().expect("block present");
+        assert!(wp.enabled);
+        assert_eq!(wp.path, "/tmp/a.png");
+        // A partial block falls back per field…
+        let cfg: Config =
+            serde_json::from_str(r#"{"panel":{"wallpaper":{},"sections":[]}}"#).expect("partial ok");
+        let wp = cfg.panel.wallpaper.as_ref().expect("block present");
+        assert!(!wp.enabled);
+        assert!(wp.path.is_empty());
+        // …and an absent block stays absent (old configs: disabled).
+        let cfg: Config =
+            serde_json::from_str(r#"{"panel":{"sections":[]}}"#).expect("absent ok");
+        assert!(cfg.panel.wallpaper.is_none());
+        // Roundtrip through piuma's own serializer (setup writes the same
+        // shape by hand).
+        let out = serde_json::to_string(&cfg).expect("config must serialize");
+        let back: Config = serde_json::from_str(&out).expect("reparse must work");
+        assert!(back.panel.wallpaper.is_none());
     }
 
     /// Roadmap N1: `panel.icon_theme` and the per-sensor `icon` parse and

@@ -182,6 +182,23 @@ applications are not themed (that would require qt6ct/kvantum); they
 keep their current style. The effect is best-effort — it follows each
 app's CSS cascade.
 
+`panel.wallpaper` makes the bar draw the desktop background itself —
+no external wallpaper tool is involved:
+`"wallpaper": { "enabled": true, "path": "/path/to/image.png" }`
+under `panel` opens one background-layer surface per active monitor —
+each covering its full output, the bar's reserved strip included — and
+renders the image with a *cover* fit (aspect kept, overflow cropped);
+input passes straight through to the desktop. Monitors plugged later
+join on the next tick, unplugged ones close their surface. A missing or
+removed file closes everything. Absent (the default) or
+`enabled: false` opens no surface, so an existing wallpaper setup
+keeps working untouched. The toggle, the images found under the
+freedesktop folders (`$XDG_DATA_HOME/wallpapers`,
+`$XDG_DATA_DIRS/*/wallpapers` and your pictures folder from
+`user-dirs.dirs`) with a preview, and a hand-typed path field live in
+piuma-setup's *Wallpaper* tab; the bar applies the change on its next
+tick.
+
 Numeric style fields — `border_width`, `border_width_hover`, `border_radius`
 and `padding` (on sensors, on sections, and on `panel.sensor_defaults` /
 `panel.section_defaults`) use the range `-1..=N`:
@@ -431,8 +448,8 @@ For a visual configuration tool, you can use:
 
 `piuma-setup` loads `~/.config/piuma/piuma.json` on startup. The
 categories sit behind **side tabs** on the left — Panel, Notifications,
-Sensor Defaults, Section Defaults, Sections — and only the selected
-category's card is shown, so the growing configuration stays readable;
+Sensor Defaults, Section Defaults, Sections, Wallpaper — and only the
+selected category's card is shown, so the growing configuration stays readable;
 unsaved edits live in memory, so switching tabs never loses work. The
 bottom bar offers:
 

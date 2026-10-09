@@ -175,6 +175,10 @@ struct Panel {
     /// Bumped by every tray press: a `TrayMenuLoaded` carrying an older
     /// generation belongs to a superseded press and must not open.
     tray_menu_gen: u64,
+    /// Wallpaper windows (roadmap2 #1): one background surface per
+    /// active output, keyed by the compositor's output name; empty
+    /// while the wallpaper is off.
+    wallpaper: Vec<(String, iced::window::Id)>,
 }
 
 /// One open tray menu: which item it belongs to (the item's bus + path
@@ -748,7 +752,11 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             if let Some(cmd) = sync_popup(panel, geometry_changed || config_reloaded) {
                 cmds.push(cmd);
             }
-            if cmds.is_empty() { Command::none() } else { Command::batch(cmds) }
+            // The wallpaper surface follows the config on the same
+            // cadence: the first tick materializes it after startup,
+            // later ticks track enable/path changes (a cheap compare).
+            cmds.push(sync_wallpaper(panel));
+            Command::batch(cmds)
         }
         Message::IcedEvent(e) => {
             // Mouse enter/leave/press are handled per-sensor by MouseArea,
@@ -1146,6 +1154,9 @@ fn panel_font(config: &config::Config) -> Font {
 
 fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> {
     // Side windows render their own trees; only bar calls feed BAR_ID.
+    if panel.wallpaper.iter().any(|(_, id)| *id == window) {
+        return wallpaper_view(panel);
+    }
     if let Some((id, _)) = panel.tray_menu.as_ref() {
         if *id == window {
             return tray_menu_view(panel);
@@ -1983,6 +1994,111 @@ fn popup_card_h(style: &PopupStyle) -> u32 {
     2 * style.padding + 5 * style.font_size
 }
 
+/// Open or close the wallpaper surface (roadmap2 #1) so it matches the
+/// config: the window exists while `panel.wallpaper` is enabled with an
+/// existing file and closes otherwise. Called on every tick — the
+/// comparison is cheap, and the first tick materializes the setting
+/// after startup (the daemon's init closure cannot open windows).
+/// One wallpaper surface per active output: a layer surface lives on a
+/// single output, so the window set tracks the monitor list. Runs on
+/// every tick — the output query only executes while something must be
+/// shown (the disabled case costs nothing), a monitor plugged later
+/// joins within a tick, and a removed one closes its surface.
+fn sync_wallpaper(panel: &mut Panel) -> Command<Message> {
+    let wanted = panel.config.panel.wallpaper.as_ref().is_some_and(|w| {
+        w.enabled && !w.path.is_empty() && PathBuf::from(&w.path).is_file()
+    });
+    let desired = if wanted { monitor_names() } else { Vec::new() };
+    let (to_open, to_close) = wallpaper_plan(&panel.wallpaper, &desired);
+    let mut cmds: Vec<Command<Message>> = to_close.into_iter().map(iced::window::close).collect();
+    for name in to_open {
+        let (id, open) = Message::layershell_open(NewLayerShellSettings {
+            // `FILL` = both axes to the compositor: the surface covers
+            // this output whatever its size and scale (all four anchors
+            // are what `FILL` requires).
+            size: LayerSize::FILL,
+            layer: Layer::Background,
+            anchor: Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right,
+            // -1 = ignore other surfaces' reservations: the bar's strip
+            // must not inset the background (full output, exactly what
+            // a wallpaper tool does).
+            exclusive_zone: Some(-1),
+            margin: None,
+            keyboard_interactivity: KeyboardInteractivity::None,
+            output_option: OutputOption::OutputName(name.clone()),
+            // Clicks fall through to the bare desktop: the wallpaper
+            // never eats input meant for the compositor.
+            events_transparent: true,
+            namespace: Some("piuma-wallpaper".to_string()),
+            ..Default::default()
+        });
+        panel.wallpaper.push((name, id));
+        cmds.push(open);
+    }
+    Command::batch(cmds)
+}
+
+/// Names of the currently active outputs, from `hyprctl monitors -j` —
+/// best-effort, the same source the bar's geometry helpers use; no
+/// answer = no surface for now (retried on the next tick).
+fn monitor_names() -> Vec<String> {
+    let Ok(output) = std::process::Command::new("hyprctl").args(["monitors", "-j"]).output() else {
+        return Vec::new();
+    };
+    monitor_names_json(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// `name` of every entry of the `hyprctl monitors -j` array; anything
+/// unparseable yields no outputs instead of breaking the bar.
+fn monitor_names_json(json: &str) -> Vec<String> {
+    let Ok(monitors) = serde_json::from_str::<Vec<serde_json::Value>>(json) else {
+        return Vec::new();
+    };
+    monitors
+        .iter()
+        .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(str::to_string))
+        .collect()
+}
+
+/// Pure part of the wallpaper sync: outputs that still need a window
+/// and windows to close (their output is gone, or the whole feature
+/// switched off — an empty wanted list then closes everything).
+fn wallpaper_plan<T: Clone>(current: &[(String, T)], desired: &[String]) -> (Vec<String>, Vec<T>) {
+    let to_open = desired
+        .iter()
+        .filter(|name| !current.iter().any(|(n, _)| n == *name))
+        .cloned()
+        .collect();
+    let to_close = current
+        .iter()
+        .filter(|(name, _)| !desired.contains(name))
+        .map(|(_, id)| id.clone())
+        .collect();
+    (to_open, to_close)
+}
+
+/// The wallpaper surface: the configured image covering the whole output
+/// (cover fit keeps the aspect ratio and crops what spills over). The
+/// file is re-checked here — a path removed behind the config's back
+/// renders the surface empty instead of breaking the window.
+fn wallpaper_view(panel: &Panel) -> Element<'_, Message> {
+    let path = panel
+        .config
+        .panel
+        .wallpaper
+        .as_ref()
+        .map(|w| w.path.as_str())
+        .unwrap_or_default();
+    if path.is_empty() || !PathBuf::from(path).is_file() {
+        return container(text("")).width(Length::Fill).height(Length::Fill).into();
+    }
+    Image::new(iced::widget::image::Handle::from_path(path))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .content_fit(iced::ContentFit::Cover)
+        .into()
+}
+
 fn sync_popup(panel: &mut Panel, reposition: bool) -> Option<Command<Message>> {
     let enabled = panel.config.panel.notifications.is_some();
     let cards = if enabled {
@@ -2569,6 +2685,7 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         tray_menu: None,
                         tray_menu_hover: None,
                         tray_menu_gen: 0,
+                        wallpaper: Vec::new(),
                     }
                 },
                 namespace,
@@ -2655,8 +2772,9 @@ fn parse_config_arg() -> Option<String> {
 mod tests {
     use super::{
         corner_radius, dbusmenu, fit_menu_labels, icons_theme, menu_placement, menu_row_h,
-        menu_size, popup_card_h, popup_placement, section_touch, text_width, tray_icon_target,
-        PopupStyle, MENU_INDENT, MENU_MAX_W, MENU_MIN_W, MENU_PAD,
+        menu_size, monitor_names_json, popup_card_h, popup_placement, section_touch, text_width,
+        tray_icon_target, wallpaper_plan, PopupStyle, MENU_INDENT, MENU_MAX_W, MENU_MIN_W,
+        MENU_PAD,
     };
     use iced::font::Font;
     use iced_exwlshell::reexport::Anchor;
@@ -2905,5 +3023,33 @@ mod tests {
         let (anchor, m) = menu_placement(10, 10, 4000, 4000, 1920, 1080);
         assert_eq!(anchor, Anchor::Right | Anchor::Bottom);
         assert_eq!((m.right, m.bottom), (1920 - 10, 1080 - 10));
+    }
+
+    /// Roadmap2 #1: the monitor list is the `name` field of every entry
+    /// of `hyprctl monitors -j`; junk or empty input yields no outputs
+    /// (the sync then just retries next tick).
+    #[test]
+    fn monitor_names_from_hyprctl_json() {
+        let json = r#"[{"id":0,"name":"HDMI-A-2","x":0},{"id":1,"name":"eDP-1","x":1920}]"#;
+        assert_eq!(monitor_names_json(json), vec!["HDMI-A-2", "eDP-1"]);
+        assert!(monitor_names_json("not json at all").is_empty());
+        assert!(monitor_names_json("[]").is_empty());
+        assert!(monitor_names_json(r#"[{"id":0}]"#).is_empty());
+    }
+
+    /// Roadmap2 #1: the sync plan opens one window per wanted output,
+    /// keeps the ones already placed there and closes the rest — an
+    /// empty wanted list (feature off) closes everything.
+    #[test]
+    fn wallpaper_plan_opens_keeps_and_closes() {
+        let current = vec![("HDMI-A-2".to_string(), 1u32), ("GONE-1".to_string(), 2u32)];
+        let desired = vec!["HDMI-A-2".to_string(), "eDP-1".to_string()];
+        let (open, close) = wallpaper_plan(&current, &desired);
+        assert_eq!(open, vec!["eDP-1"]);
+        assert_eq!(close, vec![2]);
+
+        let (open, close) = wallpaper_plan(&current, &[]);
+        assert!(open.is_empty());
+        assert_eq!(close, vec![1, 2]);
     }
 }

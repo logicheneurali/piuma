@@ -9,13 +9,21 @@ use std::borrow::Borrow;
 use std::collections::HashSet;
 use std::fs;
 use std::ops::RangeInclusive;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // piuma's real config schema (same package, different bin target): the
 // save path validates against it before writing, so a config piuma
 // would reject is reported here instead of failing silently at load.
 #[path = "../config.rs"]
 mod config;
+
+/// The `panel.wallpaper` block (roadmap2 #1): whether the bar draws the
+/// desktop background itself and which image covers the output.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WallpaperCfg {
+    pub enabled: bool,
+    pub path: String,
+}
 
 // Configuration structure for GUI - mirrors src/config.rs
 #[derive(Debug, Clone)]
@@ -34,6 +42,9 @@ pub struct PiumaConfig {
     /// GTK theme bridge generation (roadmap N3): `None` = key absent (no
     /// file written or removed).
     pub app_theme: Option<bool>,
+    /// Desktop background the bar draws itself (roadmap2 #1): `None` =
+    /// key absent (the bar opens no background window).
+    pub wallpaper: Option<WallpaperCfg>,
     pub section_layout: String,
     pub default_section_weight: u32,
     pub default_bg_color: Option<String>,
@@ -193,6 +204,7 @@ impl Default for PiumaConfig {
             icon_theme: None,
             autostart: None,
             app_theme: None,
+            wallpaper: None,
             section_layout: "horizontal".to_string(),
             default_section_weight: 1,
             default_bg_color: Some("#1a1b26".to_string()),
@@ -275,6 +287,11 @@ pub enum Message {
     AutostartChanged(bool),
     /// GTK theme bridge toggle (roadmap N3).
     AppThemeChanged(bool),
+    /// Wallpaper enable toggle (roadmap2 #1).
+    WallpaperEnabled(bool),
+    /// Wallpaper image path, from the scanned list or a hand-typed
+    /// custom path (roadmap2 #1); one destination for both sources.
+    WallpaperPathChanged(String),
     /// Sidebar category switch (roadmap N4).
     TabSelected(Tab),
     ThicknessChanged(u32),
@@ -435,16 +452,18 @@ pub enum Tab {
     SensorDefaults,
     SectionDefaults,
     Sections,
+    Wallpaper,
 }
 
 impl Tab {
     /// Sidebar order.
-    const ALL: [Tab; 5] = [
+    const ALL: [Tab; 6] = [
         Tab::Panel,
         Tab::Notifications,
         Tab::SensorDefaults,
         Tab::SectionDefaults,
         Tab::Sections,
+        Tab::Wallpaper,
     ];
 
     /// Label shown on the sidebar button.
@@ -455,6 +474,7 @@ impl Tab {
             Tab::SensorDefaults => "Sensor Defaults",
             Tab::SectionDefaults => "Section Defaults",
             Tab::Sections => "Sections",
+            Tab::Wallpaper => "Wallpaper",
         }
     }
 }
@@ -477,6 +497,9 @@ pub struct PiumaSetup {
     snapshot: String,
     /// Modal dialog stacked over the view, when one is open.
     modal: Option<Modal>,
+    /// Images found under the freedesktop wallpaper folders (roadmap2 #1),
+    /// scanned once at startup for the Wallpaper tab's list.
+    wallpaper_files: Vec<PathBuf>,
 }
 
 impl PiumaSetup {
@@ -494,6 +517,7 @@ impl PiumaSetup {
             current_file: DEFAULT_FILE.to_string(),
             snapshot: String::new(),
             modal: None,
+            wallpaper_files: scan_wallpaper_dirs(&wallpaper_dirs()),
         };
         match fs::read_to_string(file_path(&state.current_file)) {
             Ok(content) => match state.load_from_json(&content) {
@@ -539,6 +563,14 @@ impl PiumaSetup {
         }
         if let Some(t) = self.config.app_theme {
             panel.insert("app_theme".to_string(), JsonValue::Bool(t));
+        }
+        // The wallpaper block is written whole (present = configured,
+        // absent = untouched, so a save never injects the key).
+        if let Some(w) = &self.config.wallpaper {
+            let mut wp = Map::new();
+            wp.insert("enabled".to_string(), JsonValue::Bool(w.enabled));
+            wp.insert("path".to_string(), JsonValue::String(w.path.clone()));
+            panel.insert("wallpaper".to_string(), JsonValue::Object(wp));
         }
         panel.insert("section_layout".to_string(), JsonValue::String(self.config.section_layout.clone()));
         panel.insert("default_section_weight".to_string(), JsonValue::Number(self.config.default_section_weight.into()));
@@ -895,6 +927,7 @@ impl PiumaSetup {
             icon_theme: None,
             autostart: None,
             app_theme: None,
+            wallpaper: None,
             section_layout: "horizontal".to_string(),
             default_section_weight: 1,
             default_bg_color: None,
@@ -928,6 +961,14 @@ impl PiumaSetup {
         // Absent `app_theme` stays `None`: no bridge file is written or
         // removed (roadmap N3).
         self.config.app_theme = panel.get("app_theme").and_then(|v| v.as_bool());
+        // Absent `wallpaper` stays `None`: the bar draws no background
+        // (roadmap2 #1). A partial block falls back per field.
+        self.config.wallpaper = panel.get("wallpaper").and_then(|v| {
+            v.as_object().map(|o| WallpaperCfg {
+                enabled: o.get("enabled").and_then(JsonValue::as_bool).unwrap_or(false),
+                path: o.get("path").and_then(JsonValue::as_str).unwrap_or_default().to_string(),
+            })
+        });
         if let Some(sl) = panel.get("section_layout").and_then(|v| v.as_str()) {
             self.config.section_layout = sl.to_string();
         }
@@ -1202,6 +1243,16 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
         Message::AppThemeChanged(value) => {
             // On = explicit true; off drops back to absent (≈ false).
             state.config.app_theme = value.then_some(true);
+        }
+        Message::WallpaperEnabled(value) => {
+            // The toggle only flips `enabled`: the chosen path survives
+            // both directions (the surface opens/closes on save + reload).
+            wallpaper_set(&mut state.config, |w| w.enabled = value);
+        }
+        Message::WallpaperPathChanged(path) => {
+            // List pick and typed path share the destination; the bar
+            // checks existence itself, so a not-yet-there path is fine.
+            wallpaper_set(&mut state.config, |w| w.path = path);
         }
         Message::TabSelected(tab) => state.active_tab = tab,
         Message::ThicknessChanged(value) => state.config.thickness = value,
@@ -1856,6 +1907,7 @@ fn active_card(state: &PiumaSetup) -> Element<'_, Message> {
         Tab::SensorDefaults => sensor_defaults_view(state),
         Tab::SectionDefaults => section_defaults_view(state),
         Tab::Sections => sections_list(state),
+        Tab::Wallpaper => wallpaper_settings(state),
     }
 }
 
@@ -2041,6 +2093,179 @@ fn config_header(_state: &PiumaSetup) -> Element<Message> {
         .spacing(10)
         .align_x(Alignment::Center)
         .into()
+}
+
+/// Freedesktop wallpaper folders (base-dir + user-dirs specs): the
+/// per-user data dir, every system data dir (`…/wallpapers`) and the
+/// user's pictures directory. Missing folders are skipped by the scan.
+fn wallpaper_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let data_home = std::env::var_os("XDG_DATA_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")));
+    if let Some(base) = data_home {
+        dirs.push(base.join("wallpapers"));
+    }
+    if let Ok(data_dirs) = std::env::var("XDG_DATA_DIRS") {
+        dirs.extend(
+            data_dirs
+                .split(':')
+                .filter(|d| !d.is_empty())
+                .map(|d| PathBuf::from(d).join("wallpapers")),
+        );
+    }
+    if let Some(pictures) = user_pictures_dir() {
+        dirs.push(pictures);
+    }
+    dirs
+}
+
+/// Pictures folder from `~/.config/user-dirs.dirs`: the value is quoted
+/// shell-ish text with `$HOME` placeholders, expanded here.
+fn user_pictures_dir() -> Option<PathBuf> {
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    let content = fs::read_to_string(home.join(".config/user-dirs.dirs")).ok()?;
+    let raw = parse_user_dirs_pictures(&content)?;
+    Some(PathBuf::from(raw.replace("$HOME", home.to_str()?)))
+}
+
+/// `XDG_PICTURES_DIR` value of `user-dirs.dirs` content; comments and
+/// other keys are ignored, an empty value means "no pictures dir".
+fn parse_user_dirs_pictures(content: &str) -> Option<String> {
+    content
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("XDG_PICTURES_DIR=")
+                .map(|v| v.trim().trim_matches('"').to_string())
+        })
+        .filter(|v| !v.is_empty())
+}
+
+/// Every image under `dirs`, sorted and deduplicated: common raster
+/// formats only (what the bar's image widget decodes).
+fn scan_wallpaper_dirs(dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for dir in dirs {
+        collect_images(dir, &mut found, 6);
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
+/// Recursive worker of `scan_wallpaper_dirs`: unreadable entries are
+/// skipped and `depth` caps the walk, so a symlink cycle can never hang
+/// the setup window.
+fn collect_images(dir: &Path, out: &mut Vec<PathBuf>, depth: u8) {
+    const EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "gif", "webp", "bmp"];
+    if depth == 0 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_images(&path, out, depth - 1);
+        } else if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+        {
+            out.push(path);
+        }
+    }
+}
+
+/// Applies one wallpaper edit and collapses a block the user backed out
+/// of (disabled + empty path) back to `None`, so a save never injects
+/// the key unless the section was really used.
+fn wallpaper_set(config: &mut PiumaConfig, edit: impl FnOnce(&mut WallpaperCfg)) {
+    let w = config.wallpaper.get_or_insert_with(WallpaperCfg::default);
+    edit(w);
+    if !w.enabled && w.path.is_empty() {
+        config.wallpaper = None;
+    }
+}
+
+/// The `panel.wallpaper` editor (roadmap2 #1): the bar draws the image
+/// itself, so this tab only chooses it — enable toggle, the images found
+/// in the freedesktop folders (list + preview) and a hand-typed path.
+/// Saving is the global Save; the bar applies the change on its tick.
+fn wallpaper_settings(state: &PiumaSetup) -> Element<'_, Message> {
+    let cfg = state.config.wallpaper.clone().unwrap_or_default();
+    let current = cfg.path.clone();
+
+    // The scanned images as a pickable list; the current path is marked.
+    let mut files = column![].spacing(2).width(Length::Fill);
+    for file in &state.wallpaper_files {
+        let label = file.to_string_lossy().to_string();
+        let selected = current == label;
+        files = files.push(
+            button(text(if selected { format!("• {label}") } else { label.clone() }).size(BODY))
+                .on_press(Message::WallpaperPathChanged(label))
+                .style(if selected {
+                    button::primary as fn(&Theme, button::Status) -> button::Style
+                } else {
+                    button::secondary as fn(&Theme, button::Status) -> button::Style
+                })
+                .width(Length::Fill),
+        );
+    }
+    let list = scrollable(files).height(Length::Fixed(240.0)).width(Length::Fill);
+
+    // Preview of the current path: the image when the file is there, a
+    // placeholder otherwise (a typed path may not exist yet).
+    let preview: Element<Message> = if !current.is_empty() && PathBuf::from(&current).is_file() {
+        iced::widget::image(iced::widget::image::Handle::from_path(current.clone()))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .content_fit(iced::ContentFit::Contain)
+            .into()
+    } else {
+        text("No preview — pick an image or check the path").size(BODY).into()
+    };
+
+    card(
+        column![
+            text("Wallpaper").size(16).style(|_t: &Theme| TextStyle {
+                color: Some(Color::from_rgb(0.8, 0.8, 0.8)),
+                ..TextStyle::default()
+            }),
+            toggler(cfg.enabled)
+                .label("Draw the wallpaper behind the desktop")
+                .on_toggle(Message::WallpaperEnabled),
+            Row::new()
+                .push(list)
+                .push(
+                    container(preview)
+                        .width(Length::Fixed(360.0))
+                        .height(Length::Fixed(240.0))
+                        .style(|_t: &Theme| container::Style {
+                            border: Border {
+                                color: Color::from_rgb8(0x44, 0x44, 0x44),
+                                width: 1.0,
+                                radius: 4.0.into(),
+                            },
+                            ..container::Style::default()
+                        }),
+                )
+                .spacing(10)
+                .width(Length::Fill),
+            input(
+                "/path/to/image.png",
+                state.config.wallpaper.as_ref().map(|w| w.path.as_str()).unwrap_or_default(),
+                Message::WallpaperPathChanged,
+            )
+            .width(Length::Fill),
+            text("Searched: $XDG_DATA_HOME/wallpapers, $XDG_DATA_DIRS/wallpapers and your pictures folder (freedesktop).")
+                .size(BODY),
+        ]
+        .spacing(10)
+        .width(Length::Fill),
+    )
+    .into()
 }
 
 /// Panel-wide settings as a two-column form grid inside a card.
@@ -2783,6 +3008,7 @@ mod tests {
             current_file: "piuma.json".to_string(),
             snapshot: String::new(),
             modal: None,
+            wallpaper_files: Vec::new(),
         }
     }
 
@@ -3128,5 +3354,74 @@ mod tests {
             (12, 12, "#ffffff", "#808080", "full"),
             "negative padding and an unknown border type fall back"
         );
+    }
+
+    /// Roadmap2 #1: the wallpaper block roundtrips load→save whole and
+    /// absent, and a partial block falls back per field — exactly what
+    /// the save path's `config::Config` validation accepts.
+    #[test]
+    fn wallpaper_key_roundtrip() {
+        let mut state = fixture();
+        state
+            .load_from_json(r#"{"panel":{"wallpaper":{"enabled":true,"path":"/tmp/a.png"}}}"#)
+            .expect("wallpaper block must parse");
+        let wp = state.config.wallpaper.as_ref().expect("block present");
+        assert!(wp.enabled);
+        assert_eq!(wp.path, "/tmp/a.png");
+        let out: JsonValue = serde_json::from_str(&state.serialize().expect("serialize")).expect("json");
+        assert_eq!(out["panel"]["wallpaper"]["enabled"], true);
+        assert_eq!(out["panel"]["wallpaper"]["path"], "/tmp/a.png");
+
+        // A partial block falls back per field…
+        let mut state = fixture();
+        state
+            .load_from_json(r#"{"panel":{"wallpaper":{}}}"#)
+            .expect("partial block must parse");
+        let wp = state.config.wallpaper.as_ref().expect("block present");
+        assert!(!wp.enabled);
+        assert!(wp.path.is_empty());
+
+        // …and an absent block stays absent (no key is ever written).
+        let mut state = fixture();
+        state
+            .load_from_json(r#"{"panel":{}}"#)
+            .expect("minimal config must parse");
+        assert!(state.config.wallpaper.is_none());
+        let out: JsonValue = serde_json::from_str(&state.serialize().expect("serialize")).expect("json");
+        assert!(out["panel"].get("wallpaper").is_none());
+    }
+
+    /// Roadmap2 #1: the scanner picks images recursively and sorted and
+    /// ignores everything else (freedesktop folders mix metadata with
+    /// pictures); unknown folders are skipped without error.
+    #[test]
+    fn scan_finds_images_recursively() {
+        let root = std::env::temp_dir().join(format!("piuma-wp-scan-{}", std::process::id()));
+        let nested = root.join("bundle").join("contents");
+        fs::create_dir_all(&nested).expect("temp dirs");
+        fs::write(root.join("b.jpg"), b"").expect("file");
+        fs::write(nested.join("a.png"), b"").expect("file");
+        fs::write(root.join("notes.txt"), b"").expect("file");
+        let found = scan_wallpaper_dirs(&[root.clone(), PathBuf::from("/does/not/exist")]);
+        let names: Vec<String> = found
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        // Sorted by full path: root/b.jpg sorts before root/bundle/….
+        assert_eq!(names, vec!["b.jpg".to_string(), "a.png".to_string()]);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Roadmap2 #1: `XDG_PICTURES_DIR` is read from user-dirs.dirs —
+    /// comments and other keys ignored, quotes stripped, empty dropped.
+    #[test]
+    fn user_dirs_pictures_parses() {
+        let content = "# Generated\nXDG_DESKTOP_DIR=\"$HOME/Scrivania\"\nXDG_PICTURES_DIR=\"$HOME/Immagini\"\n";
+        assert_eq!(
+            parse_user_dirs_pictures(content).as_deref(),
+            Some("$HOME/Immagini")
+        );
+        assert_eq!(parse_user_dirs_pictures("#XDG_PICTURES_DIR=\"$HOME/x\"\n"), None);
+        assert_eq!(parse_user_dirs_pictures("XDG_PICTURES_DIR=\"\"\n"), None);
     }
 }
