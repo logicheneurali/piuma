@@ -40,6 +40,7 @@ mod sensor_runner;
 mod sensors;
 mod text_width;
 mod tray;
+mod workspace;
 
 // ── globals ────────────────────────────────────────────────────────
 
@@ -111,6 +112,9 @@ struct SensorValue {
     /// Tray icons when the source is a `tray` sensor (`None` otherwise);
     /// the icons themselves live in `tray.rs`.
     tray: Option<Vec<tray::TrayIcon>>,
+    /// Workspace buttons when the source is a `workspace` sensor (`None`
+    /// otherwise), built by `workspace::buttons()` (roadmap2 #4).
+    workspaces: Option<Vec<workspace::WorkspaceButton>>,
     /// Pinned pixel width of the value text (roadmap M5): net rate sensors
     /// keep a stable box so the row never resizes with the content.
     fixed_width: Option<u16>,
@@ -203,6 +207,8 @@ enum Message {
     SensorHovered(usize, usize, bool),
     /// A sensor was clicked: (section_index, sensor_index, action).
     SensorPressed(usize, usize, Option<String>),
+    /// A workspace button was clicked: focus that workspace (roadmap2 #4).
+    WorkspaceClicked(String),
     /// Wheel scrolled over a sensor: (section_index, sensor_index, up);
     /// `None` for scroll events that carry no usable delta.
     SensorScrolled(usize, usize, Option<bool>),
@@ -546,6 +552,12 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                         // (tray.rs) instead of text.
                         let tray_icons =
                             matches!(s.source, config::SensorSource::Tray {}).then(tray::items);
+                        // Workspace sensors build their button list from
+                        // hyprctl (roadmap2 #4): one entry per available
+                        // workspace, the active one flagged.
+                        let workspace_buttons =
+                            matches!(s.source, config::SensorSource::Workspace {})
+                                .then(workspace::buttons);
                         // Roadmap N1: theme file for the sensor's icon, at the
                         // panel's font size. The lookup is memoized, so the
                         // per-second rebuild only clones the cached path; with
@@ -613,6 +625,8 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                                 s.source,
                                 config::SensorSource::StaticText { .. }
                                     | config::SensorSource::Tray {}
+                                    // The buttons carry the names already.
+                                    | config::SensorSource::Workspace {}
                             ) {
                                 String::new()
                             } else {
@@ -633,6 +647,7 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                                 .unwrap_or(0) as u16,
                             action: s.action.clone(),
                             tray: tray_icons,
+                            workspaces: workspace_buttons,
                             icon,
                             // Only the net rate sensors pin their width
                             // (roadmap M5); the measurement is cached per
@@ -998,6 +1013,12 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             }
             Command::none()
         }
+        Message::WorkspaceClicked(name) => {
+            // Focus the clicked workspace in the background, like every
+            // sensor action (the Lua dispatch itself lives in workspace.rs).
+            workspace::focus(&name);
+            Command::none()
+        }
         Message::SensorScrolled(section_index, sensor_index, up) => {
             // Wheel: the notifications sensor walks its history, volume
             // sensors adjust the level; both reflect the change in place
@@ -1200,9 +1221,27 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
         };
 
         // Build sensor widgets with optional per-sensor background. A tray
-        // sensor with no items renders nothing at all (no empty box).
+        // sensor with no items renders nothing at all (no empty box), and
+        // so does the notifications sensor with nothing active — its
+        // display value is empty in that case (roadmap2 #3), and it
+        // reappears with the next notification.
         let sensor_widgets: Vec<Element<'a, Message>> = section.sensors.iter().enumerate().filter_map(|(sensor_idx, s)| {
             if s.tray.as_ref().is_some_and(|icons| icons.is_empty()) {
+                return None;
+            }
+            let is_notifications = panel
+                .config
+                .panel
+                .sections
+                .get(section_idx)
+                .and_then(|sec| sec.sensors.get(sensor_idx))
+                .is_some_and(|cfg_s| matches!(cfg_s.source, config::SensorSource::Notifications {}));
+            if is_notifications && s.value.is_empty() {
+                return None;
+            }
+            // A workspace sensor with no buttons (hyprctl unreachable)
+            // hides like the tray does (roadmap2 #4).
+            if s.workspaces.as_ref().is_some_and(|b| b.is_empty()) {
                 return None;
             }
             let sensor_text_color = s.text_color.as_ref().map(|c| *c).unwrap_or(section_text);
@@ -1251,11 +1290,41 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
                         padding: s.padding,
                     },
                 )
+            } else if let Some(buttons) = &s.workspaces {
+                // One button per available workspace (roadmap2 #4): the
+                // names shown, the active one inverted, click focuses —
+                // the buttons own their mouse handling like tray icons.
+                // The sensor's own icon still leads the row (its config
+                // predates the buttons), centred like every other sensor
+                // row so it never rides above the baseline.
+                let ws_row = workspace::row(
+                    buttons,
+                    font_size,
+                    font_obj,
+                    &workspace::Style {
+                        bg_color: s.bg_color.unwrap_or(section_bg),
+                        text_color,
+                        border_color: s.border_color,
+                        border_width: s.border_width,
+                        border_radius: s.border_radius,
+                        border_type: s.border_type.clone(),
+                        padding: s.padding,
+                    },
+                );
+                let mut row = Row::new().spacing(6).align_y(Alignment::Center);
+                if let Some(path) = &s.icon {
+                    row = row.push(icons::widget(path, font_size as f32));
+                }
+                row.push(ws_row).into()
             } else {
                 // Icon first when the sensor declares one (roadmap N1), then
                 // the optional name, then the value: an empty name still
-                // renders the value alone, without a gap.
-                let mut row = Row::new().spacing(6);
+                // renders the value alone, without a gap. The row centres
+                // its children: the icon box is `font_size` square while a
+                // text line box is `font_size × 1.3` (iced's default line
+                // height), so a top-aligned row left the icon riding ~2px
+                // above the text baseline (roadmap2: icon alignment).
+                let mut row = Row::new().spacing(6).align_y(Alignment::Center);
                 if let Some(path) = &s.icon {
                     row = row.push(icons::widget(path, font_size as f32));
                 }
@@ -1287,7 +1356,11 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
                 s.bg_color
             };
             let border_color = s.border_color;
-            let pad = s.padding;
+            // A workspace sensor's buttons carry the sensor's own
+            // padding (they are the boxes), so the outer box adds none:
+            // the pill keeps the height and inset of every other sensor
+            // instead of stacking the padding twice (roadmap2 #4).
+            let pad = if s.workspaces.is_some() { 0 } else { s.padding };
 
             let styled_container = styled_box(
                 content,
@@ -1305,8 +1378,9 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
 
             // Tray icons carry their own MouseAreas (press/wheel/tooltip);
             // wrapping them in the sensor MouseArea as well would handle the
-            // same events twice, so a tray sensor stays bare.
-            if s.tray.is_some() {
+            // same events twice, so a tray sensor stays bare — and so does a
+            // workspace sensor: its buttons press themselves.
+            if s.tray.is_some() || s.workspaces.is_some() {
                 return Some(styled_container.into());
             }
 

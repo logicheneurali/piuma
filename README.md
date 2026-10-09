@@ -36,7 +36,8 @@ save writes the new names into `piuma.json`.
   the card look (font size, colors incl. hover, borders, padding) is
   configurable — white text on black, grey border by default
 - **Bar sensor**: the `notifications` source shows the newest active
-  summary with a count; the wheel walks the history (`(selected/total)`),
+  summary with a count and hides itself while no notification is active;
+  the wheel walks the history (`(selected/total)`),
   the click runs the shown entry's `default` action
 - **Spec signals**: `NotificationClosed` uses reason 1 (expired),
   2 (dismissed) and 3 (`CloseNotification`); `ActionInvoked` carries the
@@ -156,8 +157,11 @@ following the freedesktop Autostart spec: `Hidden`,
 `Path`, `Exec` field codes, and a user file overriding the system file
 with the same name. A program already running is never started twice,
 and piuma never launches itself. Absent (the default) the feature is
-dormant — nothing is scanned or spawned. The toggle lives in
-piuma-setup's *Panel Settings* card.
+dormant — nothing is scanned or spawned. Both switches live in
+piuma-setup's dedicated *Autostart apps* tab: the global toggle plus one
+on/off per detected `.desktop` — disabling writes the user's override
+file (`Hidden=true` added to a full copy of the winning file, the
+spec's own suppression), enabling takes those switch lines out again.
 
 `panel.app_theme: true` generates `<config dir>/theme/gtk.css` — a
 small GTK stylesheet carrying the bar's **character** (`panel.font`,
@@ -240,12 +244,12 @@ Each sensor's `source` object has a `type` plus the parameters listed
 |---|---|---|
 | `perc_cpu` | CPU usage (`4.8`) | — |
 | `perc_gpu` | GPU utilization (`12`; NVIDIA or AMD) | — |
-| `perc_mem` | RAM used percentage (`45%`) | — |
-| `perc_swap` | swap used percentage (`0%`) | — |
-| `perc_disk` | root fs used percentage (`66%`) | — |
-| `perc_battery` | battery charge percentage (`80%`) | — |
-| `perc_backlight` | backlight brightness percentage (`31%`) | — |
-| `perc_volume` | mixer volume percentage (`50%`) | `device` (default `Master`; auto fallback `amixer` → `wpctl` → `pactl`) |
+| `perc_mem` | RAM used percentage, bare value (`45`) | — |
+| `perc_swap` | swap used percentage, bare value (`0`) | — |
+| `perc_disk` | root fs used percentage, bare value (`66`) | — |
+| `perc_battery` | battery charge percentage, bare value (`80`) | — |
+| `perc_backlight` | backlight brightness percentage, bare value (`31`) | — |
+| `perc_volume` | mixer volume, bare value (`50`) | `device` (default `Master`; auto fallback `amixer` → `wpctl` → `pactl`) |
 | `used_mem` | RAM used (`14353 MB`) | — |
 | `used_swap` | swap used (`0 MB`) | — |
 | `used_disk` | root fs used (`619G`) | — |
@@ -264,12 +268,12 @@ Each sensor's `source` object has a `type` plus the parameters listed
 | `uptime` | uptime (`up 2 hours, 30 minutes`) | — |
 | `clock` | time (`10:12:42`); `format: "date"` = date only | `format` |
 | `window` | focused window title (cut at 80 chars + `...`) | — |
-| `workspace` | current workspace | — |
+| `workspace` | one button per available workspace — the name shown, the active one inverted, click focuses it | — |
 | `command` | shell command stdout | `command` |
 | `env_var` | environment variable value | `env_var` |
 | `static_text` | fixed text | `static_text` |
 | `tray` | system tray icons (StatusNotifierItem) | — |
-| `notifications` | newest active notification (`N6 newest (5)`) | — |
+| `notifications` | newest active notification (`N6 newest (5)`); the sensor is hidden while nothing is active | — |
 
 Network rates and the CPU percentage are computed from consecutive
 counter samples (`/proc/net/dev`, `/proc/stat`): the very first refresh
@@ -392,7 +396,9 @@ no popup); its keys are optional and fall back to the values above:
 
 The `notifications` sensor shows the newest active summary plus
 `(selected/total)` while the wheel browses the history, and a left click
-runs the shown entry's `default` action. On the popup, clicking a card
+runs the shown entry's `default` action. While nothing is active the
+sensor disappears from the bar altogether — like the tray with no items —
+and returns with the next notification. On the popup, clicking a card
 does the same (then dismisses the card) and the ✕ only dismisses. The
 server emits the spec signals with the right reasons: 1 (expired),
 2 (dismissed/closed by user), 3 (`CloseNotification`).
@@ -448,8 +454,8 @@ For a visual configuration tool, you can use:
 
 `piuma-setup` loads `~/.config/piuma/piuma.json` on startup. The
 categories sit behind **side tabs** on the left — Panel, Notifications,
-Sensor Defaults, Section Defaults, Sections, Wallpaper — and only the
-selected category's card is shown, so the growing configuration stays readable;
+Sensor Defaults, Section Defaults, Sections, Wallpaper, Autostart apps —
+and only the selected category's card is shown, so the growing configuration stays readable;
 unsaved edits live in memory, so switching tabs never loses work. The
 bottom bar offers:
 

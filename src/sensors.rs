@@ -148,7 +148,9 @@ enum VolumeBackend {
 static VOLUME_BACKEND: OnceLock<Mutex<Option<VolumeBackend>>> = OnceLock::new();
 
 impl VolumeBackend {
-    /// Run this backend's command and parse its percentage (`50%`).
+    /// Run this backend's command and parse its percentage from the
+    /// output (the commands print `50%`); the returned value is bare —
+    /// like every other `perc_*` sensor (roadmap2 #5).
     fn read(self, device: &str) -> String {
         let output = match self {
             VolumeBackend::Amixer => Command::new("amixer").args(["get", device]).output(),
@@ -168,25 +170,29 @@ impl VolumeBackend {
                 for line in text.lines() {
                     if line.contains('%') && (line.contains("Front Left") || line.contains("Mono")) {
                         if let Some(pct) = line.split_whitespace().find(|t| t.contains('%')) {
-                            return pct.trim_matches(|c| c == '[' || c == ']').to_string();
+                            // "[50%]" → bare "50" (roadmap2 #5).
+                            return pct
+                                .trim_matches(|c| c == '[' || c == ']')
+                                .trim_end_matches('%')
+                                .to_string();
                         }
                     }
                 }
                 "N/A".to_string()
             }
             VolumeBackend::Wpctl => {
-                // "Volume: 0.50 [MUTED]" → "50%"
+                // "Volume: 0.50 [MUTED]" → "50"
                 text.split_whitespace()
                     .find_map(|t| t.parse::<f64>().ok())
-                    .map(|v| format!("{:.0}%", v * 100.0))
+                    .map(|v| format!("{:.0}", v * 100.0))
                     .unwrap_or_else(|| "N/A".to_string())
             }
             VolumeBackend::Pactl => {
-                // "front-left: 32768 / 50% / -18.06 dB, …" → "50%"
+                // "front-left: 32768 / 50% / -18.06 dB, …" → "50"
                 text.split_whitespace()
                     .find(|t| t.contains('%'))
-                    .map(|t| t.trim_matches(|c: char| !c.is_ascii_digit() && c != '%').to_string())
-                    .filter(|t| t != "%")
+                    .map(|t| t.trim_matches(|c: char| !c.is_ascii_digit()).to_string())
+                    .filter(|t| !t.is_empty())
                     .unwrap_or_else(|| "N/A".to_string())
             }
         }
@@ -242,12 +248,14 @@ fn cache_backend(backend: VolumeBackend) {
     }
 }
 
-/// Parse a `50%`-style value; `N/A` and anything unparsable → None.
+/// Parse a bare or `50%`-style value (the bar shows bare values since
+/// roadmap2 #5, while command outputs and old configs may carry the
+/// suffix); `N/A` and anything unparsable → None.
 fn parse_percent(value: &str) -> Option<f32> {
     value.trim().trim_end_matches('%').parse::<f32>().ok()
 }
 
-/// Get audio volume (e.g. `50%`): tries amixer → wpctl → pactl (ALSA,
+/// Get audio volume (e.g. `50`): tries amixer → wpctl → pactl (ALSA,
 /// PipeWire, PulseAudio) and remembers the first that works; empty
 /// device = Master (amixer control name; the other backends use the
 /// default sink).
@@ -391,9 +399,12 @@ fn df_root() -> Option<Vec<String>> {
     if parts.len() >= 5 { Some(parts) } else { None }
 }
 
-/// Get disk usage percentage (e.g. `66%`).
+/// Get disk usage percentage as a bare value (e.g. `66`; df's own
+/// `66%` column loses the suffix, roadmap2 #5).
 pub fn disk_usage() -> String {
-    df_root().map(|p| p[4].clone()).unwrap_or_else(|| "N/A".to_string())
+    df_root()
+        .map(|p| p[4].trim_end_matches('%').to_string())
+        .unwrap_or_else(|| "N/A".to_string())
 }
 
 /// Get used disk space in human units (e.g. `619G`).
@@ -439,10 +450,10 @@ fn meminfo() -> Option<MemInfo> {
     })
 }
 
-/// Get memory usage percentage (e.g. `41%`).
+/// Get memory usage percentage as a bare value (e.g. `41`, roadmap2 #5).
 pub fn mem_perc() -> String {
     match meminfo() {
-        Some(m) if m.mem_total > 0 => format!("{}%", (m.mem_total - m.mem_avail) * 100 / m.mem_total),
+        Some(m) if m.mem_total > 0 => format!("{}", (m.mem_total - m.mem_avail) * 100 / m.mem_total),
         _ => "N/A".to_string(),
     }
 }
@@ -463,10 +474,10 @@ pub fn mem_total() -> String {
     }
 }
 
-/// Get swap usage percentage (e.g. `12%`).
+/// Get swap usage percentage as a bare value (e.g. `12`, roadmap2 #5).
 pub fn swap_perc() -> String {
     match meminfo() {
-        Some(m) if m.swap_total > 0 => format!("{}%", (m.swap_total - m.swap_free) * 100 / m.swap_total),
+        Some(m) if m.swap_total > 0 => format!("{}", (m.swap_total - m.swap_free) * 100 / m.swap_total),
         _ => "N/A".to_string(),
     }
 }
@@ -548,10 +559,10 @@ fn battery_levels() -> Option<(f64, f64, &'static str, usize)> {
     }
 }
 
-/// Get battery charge percentage (e.g. `80%`).
+/// Get battery charge percentage as a bare value (e.g. `80`, roadmap2 #5).
 pub fn battery_perc() -> String {
     match battery_levels() {
-        Some((now, full, _, _)) if full > 0.0 => format!("{:.0}%", now * 100.0 / full),
+        Some((now, full, _, _)) if full > 0.0 => format!("{:.0}", now * 100.0 / full),
         _ => "N/A".to_string(),
     }
 }
@@ -572,7 +583,8 @@ pub fn battery_total() -> String {
     }
 }
 
-/// Get backlight brightness percentage (e.g. `31%`) from the first
+/// Get backlight brightness percentage as a bare value (e.g. `31`,
+/// roadmap2 #5) from the first
 /// backlight device under /sys/class/backlight.
 pub fn backlight_perc() -> String {
     let Ok(dir) = fs::read_dir("/sys/class/backlight") else {
@@ -583,7 +595,7 @@ pub fn backlight_perc() -> String {
         if let (Some(cur), Some(max)) = (read_num(base.join("brightness")), read_num(base.join("max_brightness")))
         {
             if max > 0 {
-                return format!("{}%", cur * 100 / max);
+                return format!("{}", cur * 100 / max);
             }
         }
     }
@@ -754,6 +766,9 @@ mod tests {
     fn percent_values_parse() {
         assert_eq!(parse_percent("50%"), Some(50.0));
         assert_eq!(parse_percent("0%"), Some(0.0));
+        // Bare values (the bar's own display since roadmap2 #5) parse too.
+        assert_eq!(parse_percent("50"), Some(50.0));
+        assert_eq!(parse_percent("0"), Some(0.0));
         assert_eq!(parse_percent("N/A"), None);
     }
 
