@@ -445,6 +445,14 @@ Sensor sources use the smallest practical set of tools:
 ./target/release/piuma --config /path/to/config.json
 ```
 
+Only one bar runs at a time: a second launch replaces the previous
+one (the most recent wins, coordinated by a lock file in
+`$XDG_RUNTIME_DIR/piuma.lock`), so starting piuma again — manually, or
+from Hyprland's `hyprland.start` block after a compositor restart —
+never stacks a second bar or a second wallpaper surface. The bar also
+exits for good when its display connection ends (compositor closed,
+session over), instead of lingering in the background.
+
 ## Configuration GUI Tool
 
 For a visual configuration tool, you can use:
