@@ -2535,21 +2535,28 @@ fn fit_menu_labels(entries: &mut [dbusmenu::MenuEntry], w: u32, font: &Font, fon
 /// Anchor + edge margins for the menu at the output-relative point
 /// (x, y): it opens right/down from the cursor — the natural quadrant
 /// under a top/left bar — and flips to the opposite side when the
-/// surface would leave the output (margins clamp at 0, so an oversized
-/// menu gets cut at the top rather than flying off). The caller uses
+/// surface would leave the output, with the flipped edge **clamped to
+/// the output**: a menu that doesn't fit on that side is cut at the
+/// output edge instead of being pinned at the cursor and leaving the
+/// screen (the 116-row Cachy-Update menu used to open with its base at
+/// the top bar and ~2300 px of it above the screen). The caller uses
 /// `OutputOption::LastOutput`, the same output `SCREEN_WIDTH/HEIGHT`
 /// and `tray::menu_point` refer to.
 fn menu_placement(x: i32, y: i32, w: u32, h: u32, sw: i32, sh: i32) -> (Anchor, Margin) {
     let (w, h) = (w as i32, h as i32);
+    // Fits: anchored at the point. Overflows: the far edge sticks to the
+    // output and the surface ends at the point — unless that would push
+    // the near edge off-screen, in which case the surface sits flush
+    // with the output edge (cut, not lost).
     let (anchor_h, left, right) = if x + w <= sw {
         (Anchor::Left, x, 0)
     } else {
-        (Anchor::Right, 0, (sw - x).max(0))
+        (Anchor::Right, 0, (sw - x).clamp(0, (sw - w).max(0)))
     };
     let (anchor_v, top, bottom) = if y + h <= sh {
         (Anchor::Top, y, 0)
     } else {
-        (Anchor::Bottom, 0, (sh - y).max(0))
+        (Anchor::Bottom, 0, (sh - y).clamp(0, (sh - h).max(0)))
     };
     (
         anchor_h | anchor_v,
@@ -3309,15 +3316,32 @@ mod tests {
         assert_eq!(anchor, Anchor::Right | Anchor::Top);
         assert_eq!((m.right, m.left), (1920 - 1850, 0));
 
-        // …near the bottom → above it; an oversized surface still lands
-        // on-screen (clamped margins).
+        // …near the bottom → above it; an oversized surface is cut at
+        // the output edge (flush with the bottom-right corner), not
+        // pinned at the cursor.
         let (anchor, m) = menu_placement(100, 1050, 200, 100, 1920, 1080);
         assert_eq!(anchor, Anchor::Left | Anchor::Bottom);
         assert_eq!((m.bottom, m.top), (1080 - 1050, 0));
 
         let (anchor, m) = menu_placement(10, 10, 4000, 4000, 1920, 1080);
         assert_eq!(anchor, Anchor::Right | Anchor::Bottom);
-        assert_eq!((m.right, m.bottom), (1920 - 10, 1080 - 10));
+        assert_eq!((m.right, m.bottom), (0, 0));
+
+        // Regression: the 116-row Cachy-Update menu under a top bar (at
+        // = the tray icon, h ≈ 2332 px) used to open with its base at
+        // the cursor and 2300 px above the screen — only a sliver at
+        // the bar was visible. It now hangs from the right edge and is
+        // cut at the screen bottom.
+        let (anchor, m) = menu_placement(1700, 14, 240, 2332, 1920, 1080);
+        assert_eq!(anchor, Anchor::Right | Anchor::Bottom);
+        assert_eq!((m.right, m.bottom), (1920 - 1700, 0));
+
+        // Mid-screen cursor: a menu too tall to open downward flips up
+        // and stays fully visible (clamped to the top edge, not to the
+        // cursor).
+        let (anchor, m) = menu_placement(100, 500, 200, 600, 1920, 1080);
+        assert_eq!(anchor, Anchor::Left | Anchor::Bottom);
+        assert_eq!((m.bottom, m.top), (1080 - 600, 0));
     }
 
     /// Roadmap2 #1: the monitor list is the `name` field of every entry
