@@ -100,11 +100,13 @@ pub fn unit_of(source: &config::SensorSource) -> &'static str {
     }
 }
 
-/// The average guide's label: `avg 4.8%`, `avg 61.5°C`,
-/// `avg 9318 B/s` (rates drop the decimal — bytes have none).
+/// The average guide's label: `avg 5%`, `avg 61.5°C`,
+/// `avg 9318 B/s` — percentages round to whole percents like their
+/// sensors, rates drop the decimal (bytes have none).
 pub fn avg_label(avg: f32, unit: &str) -> String {
     match unit {
         "B/s" => format!("avg {avg:.0} {unit}"),
+        "%" => format!("avg {avg:.0}{unit}"),
         "" => format!("avg {avg:.1}"),
         _ => format!("avg {avg:.1}{unit}"),
     }
@@ -394,11 +396,11 @@ mod tests {
         assert_eq!(grid, vec![90.0, 67.5, 45.0, 22.5, 0.0], "0/25/50/75/100%");
     }
 
-    /// The average label carries the source's unit, rates without a
-    /// decimal (bytes are whole).
+    /// The average label carries the source's unit; percentages and
+    /// rates show whole numbers, bytes have no decimal.
     #[test]
     fn average_labels_carry_the_units() {
-        assert_eq!(avg_label(4.84, "%"), "avg 4.8%");
+        assert_eq!(avg_label(4.84, "%"), "avg 5%");
         assert_eq!(avg_label(61.54, "°C"), "avg 61.5°C");
         assert_eq!(avg_label(9318.4, "B/s"), "avg 9318 B/s");
         assert_eq!(avg_label(1.0, ""), "avg 1.0");

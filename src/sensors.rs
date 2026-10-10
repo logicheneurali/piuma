@@ -28,9 +28,11 @@ fn proc_stat_cpu() -> Option<(u64, u64)> {
 }
 
 /// Get CPU load percentage between two /proc/stat samples as (text,
-/// value) (e.g. `4.8`): the one sampling call feeds both the bar and
+/// value) (e.g. `5`): the one sampling call feeds both the bar and
 /// the graph engine — the delta is stateful and can only be consumed
-/// once per tick. No external commands; None on the first tick.
+/// once per tick. No external commands; None on the first tick. The
+/// text rounds to a whole percent like every `perc_*` sensor; the
+/// plotted value keeps its precision.
 pub fn cpu_load() -> Option<(String, f64)> {
     let (total, idle) = proc_stat_cpu()?;
     let now = Instant::now();
@@ -45,7 +47,7 @@ pub fn cpu_load() -> Option<(String, f64)> {
         return None;
     }
     let load = (d_total - d_idle.min(d_total)) as f64 * 100.0 / d_total as f64;
-    Some((format!("{load:.1}"), load))
+    Some((format!("{load:.0}"), load))
 }
 
 /// GPU busy percentage from the amdgpu hwmon sysfs (AMD), if present.
