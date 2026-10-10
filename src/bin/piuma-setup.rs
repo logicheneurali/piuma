@@ -190,6 +190,7 @@ pub struct Sensor {
     pub border_type: Option<String>,
     pub padding: Option<i32>,
     pub action: Option<String>,
+    pub draw_graph: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -264,6 +265,7 @@ impl Default for Sensor {
             border_type: None,
             padding: None,
             action: None,
+            draw_graph: false,
         }
     }
 }
@@ -372,6 +374,8 @@ pub enum Message {
     SensorBorderTypeChanged(usize, usize, String),
     SensorPaddingChanged(usize, usize, i32),
     SensorActionChanged(usize, usize, String),
+    /// Graph toggle of one sensor (hover popup trend).
+    SensorDrawGraphChanged(usize, usize, bool),
     /// Toggles the collapsible "Sensor Defaults" card.
     ToggleDefaults,
     /// Toggles the collapsible "Section Defaults" card.
@@ -789,6 +793,11 @@ impl PiumaSetup {
 
         if let Some(action) = &sensor.action {
             map.insert("action".to_string(), JsonValue::String(action.clone()));
+        }
+        // Saved only when on: an absent key keeps the file minimal and
+        // means "no graph" forever (serde default).
+        if sensor.draw_graph {
+            map.insert("draw_graph".to_string(), JsonValue::Bool(true));
         }
 
         for (key, opt) in [
@@ -1238,6 +1247,8 @@ impl PiumaSetup {
         if let Some(val) = obj.get("action").and_then(|v| v.as_str()) {
             sensor.action = Some(val.to_string());
         }
+        // Graph toggle: absent = off (the config default).
+        sensor.draw_graph = obj.get("draw_graph").and_then(|v| v.as_bool()).unwrap_or(false);
 
         Some(sensor)
     }
@@ -1612,6 +1623,14 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                 let section = &mut state.config.sections[section_index];
                 if sensor_index < section.sensors.len() {
                     section.sensors[sensor_index].action = if value.is_empty() { None } else { Some(value) };
+                }
+            }
+        }
+        Message::SensorDrawGraphChanged(section_index, sensor_index, value) => {
+            if section_index < state.config.sections.len() {
+                let section = &mut state.config.sections[section_index];
+                if sensor_index < section.sensors.len() {
+                    section.sensors[sensor_index].draw_graph = value;
                 }
             }
         }
@@ -2788,6 +2807,11 @@ fn sensor_view(section_index: usize, sensor_index: usize, sensor_count: usize, s
         .width(Length::Fill)
         .into());
 
+    // Hover trend popup; only the numeric sources (perc_/used_/temp_) graph.
+    let draw_graph = form_cell("Draw graph", toggler(sensor.draw_graph)
+        .on_toggle(move |value| Message::SensorDrawGraphChanged(section_index, sensor_index, value))
+        .into());
+
     // Collapsed header shows which overrides are actually set.
     let summary = style_summary(
         &[
@@ -2805,7 +2829,7 @@ fn sensor_view(section_index: usize, sensor_index: usize, sensor_count: usize, s
         Message::ToggleSensorStyle(section_index, sensor_index),
     );
 
-    let mut root = column![header, source, icon, action, style_header]
+    let mut root = column![header, source, icon, action, draw_graph, style_header]
         .spacing(6)
         .width(Length::Fill);
 
