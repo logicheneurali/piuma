@@ -7,6 +7,9 @@ license = "Apache-2.0"
 
 [dependencies]
 iced = { version = "0.14", features = ["smol", "advanced", "image", "svg", "canvas"] }
+# Operation runner (`iced_runtime::task::widget`): the graph popup
+# queries its sensor's on-screen rect through the widget tree.
+iced_runtime = "0.14"
 iced_exwlshell = { git = "https://github.com/waycrate/exwlshelleventloop.git", branch = "master" }
 log = "0.4"
 simple_logger = "5"

@@ -1194,8 +1194,9 @@ pub fn row<'a>(
 /// graph popup) in output-relative coordinates (what layer-shell
 /// margins need): window-relative cursor + the bar's offset inside its
 /// output (from the anchor).
-pub fn cursor_output_point(panel: &crate::Panel) -> Option<(i32, i32)> {
-    let (cx, cy) = panel.last_cursor?;
+/// The bar surface's corner inside the output (the bar sits at its
+/// anchor): lifts window-relative coordinates to output space.
+pub fn bar_origin(panel: &crate::Panel) -> (i32, i32) {
     let thickness = crate::panel_thickness(&panel.config) as i32;
     let (sw, sh) = (
         unsafe { crate::SCREEN_WIDTH } as i32,
@@ -1203,13 +1204,18 @@ pub fn cursor_output_point(panel: &crate::Panel) -> Option<(i32, i32)> {
     );
     // The bar spans the output along its long axis, so only the anchored
     // edge shifts it inside the output.
-    let (wx, wy) = if panel.last_anchor == Anchor::Right {
+    if panel.last_anchor == Anchor::Right {
         (sw - thickness, 0)
     } else if panel.last_anchor == Anchor::Bottom {
         (0, sh - thickness)
     } else {
         (0, 0)
-    };
+    }
+}
+
+pub fn cursor_output_point(panel: &crate::Panel) -> Option<(i32, i32)> {
+    let (cx, cy) = panel.last_cursor?;
+    let (wx, wy) = bar_origin(panel);
     Some((wx + cx as i32, wy + cy as i32))
 }
 

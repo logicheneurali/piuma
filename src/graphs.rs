@@ -321,6 +321,143 @@ impl<Message> canvas::Program<Message> for Graph {
     }
 }
 
+// ── connector (sensor box ↔ popup) ─────────────────────────────────
+
+/// End-dot radius of the connector: a small filled circle on the
+/// sensor's edge and on the popup's edge.
+pub const CONNECTOR_DOT_R: f32 = 3.0;
+
+/// Geometry of the connector joining a sensor box to its graph popup
+/// (both given as output-space rects `(x0, y0, x1, y1)` of their real
+/// surfaces): the dot on the sensor's edge facing the popup, the dot on
+/// the popup's edge facing the sensor, and the polyline between them —
+/// an organ-chart run of right angles only: straight away from the
+/// sensor, one rail half-way across the gap, straight into the popup.
+/// Aligned ends collapse the rail into a plain straight line.
+pub fn connector_geometry(
+    sensor: (i32, i32, i32, i32),
+    popup: (i32, i32, i32, i32),
+) -> (iced::Point, iced::Point, Vec<iced::Point>) {
+    let sc = (
+        (sensor.0 + sensor.2) as f32 / 2.0,
+        (sensor.1 + sensor.3) as f32 / 2.0,
+    );
+    let pc = (
+        (popup.0 + popup.2) as f32 / 2.0,
+        (popup.1 + popup.3) as f32 / 2.0,
+    );
+    // The popup sits entirely on one side of the sensor box (a top bar
+    // opens below, a left bar to the right): that side picks the edges
+    // the two dots land on and the axis of the corridor.
+    let (d1, d2, rail, vertical) = if popup.1 >= sensor.3 {
+        // Below: the sensor's bottom edge → the popup's top edge.
+        (
+            iced::Point::new(sc.0, sensor.3 as f32),
+            iced::Point::new(pc.0, popup.1 as f32),
+            (sensor.3 + popup.1) as f32 / 2.0,
+            true,
+        )
+    } else if popup.3 <= sensor.1 {
+        (
+            iced::Point::new(sc.0, sensor.1 as f32),
+            iced::Point::new(pc.0, popup.3 as f32),
+            (sensor.1 + popup.3) as f32 / 2.0,
+            true,
+        )
+    } else if popup.0 >= sensor.2 {
+        // Right: the sensor's right edge → the popup's left edge.
+        (
+            iced::Point::new(sensor.2 as f32, sc.1),
+            iced::Point::new(popup.0 as f32, pc.1),
+            (sensor.2 + popup.0) as f32 / 2.0,
+            false,
+        )
+    } else {
+        (
+            iced::Point::new(sensor.0 as f32, sc.1),
+            iced::Point::new(popup.2 as f32, pc.1),
+            (sensor.0 + popup.2) as f32 / 2.0,
+            false,
+        )
+    };
+    let mut path = if vertical {
+        vec![
+            d1,
+            iced::Point::new(d1.x, rail),
+            iced::Point::new(d2.x, rail),
+            d2,
+        ]
+    } else {
+        vec![
+            d1,
+            iced::Point::new(rail, d1.y),
+            iced::Point::new(rail, d2.y),
+            d2,
+        ]
+    };
+    // Aligned ends put the rail on the straight line: the duplicate
+    // point (and only it) goes.
+    path.dedup_by(|a, b| a == b);
+    (d1, d2, path)
+}
+
+/// The connector's drawing: the polyline and its two end dots in the
+/// link surface's own coordinates (the opener sizes that surface to
+/// this drawing's bounding box plus a padding). Same border colour and
+/// width as the popup box it belongs to.
+pub struct Connector {
+    pub d1: iced::Point,
+    pub d2: iced::Point,
+    pub path: Vec<iced::Point>,
+    pub color: Color,
+    pub width: f32,
+}
+
+/// The connector surface's whole view: one canvas filling the window.
+pub fn link_widget(conn: Connector) -> iced::Element<'static, crate::Message> {
+    canvas::Canvas::new(conn)
+        .width(iced::Length::Fill)
+        .height(iced::Length::Fill)
+        .into()
+}
+
+impl<Message> canvas::Program<Message> for Connector {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &iced::Renderer,
+        _theme: &iced::Theme,
+        bounds: iced::Rectangle,
+        _cursor: Cursor,
+    ) -> Vec<Geometry<iced::Renderer>> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        // Between the popup's death and the tick's window close the
+        // surface still renders: draw nothing rather than something.
+        if self.path.len() < 2 {
+            return vec![frame.into_geometry()];
+        }
+        let line = Path::new(|path| {
+            for (i, p) in self.path.iter().enumerate() {
+                if i == 0 {
+                    path.move_to(*p);
+                } else {
+                    path.line_to(*p);
+                }
+            }
+        });
+        frame.stroke(
+            &line,
+            Stroke::default().with_width(self.width).with_color(self.color),
+        );
+        for dot in [self.d1, self.d2] {
+            frame.fill(&Path::circle(dot, CONNECTOR_DOT_R), self.color);
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,5 +541,47 @@ mod tests {
         assert_eq!(avg_label(61.54, "°C"), "avg 61.5°C");
         assert_eq!(avg_label(9318.4, "B/s"), "avg 9318 B/s");
         assert_eq!(avg_label(1.0, ""), "avg 1.0");
+    }
+
+    /// The connector drops from the sensor's bottom edge, rails across
+    /// the half-way point of the gap and lands on the popup's top edge;
+    /// aligned ends collapse the rail onto the straight line.
+    #[test]
+    fn connector_follows_an_organ_chart_path() {
+        let (d1, d2, path) = connector_geometry((800, 4, 880, 24), (840, 42, 1100, 182));
+        assert_eq!(d1, iced::Point::new(840.0, 24.0));
+        assert_eq!(d2, iced::Point::new(970.0, 42.0));
+        assert_eq!(
+            path,
+            vec![
+                iced::Point::new(840.0, 24.0),
+                iced::Point::new(840.0, 33.0),
+                iced::Point::new(970.0, 33.0),
+                iced::Point::new(970.0, 42.0),
+            ]
+        );
+
+        let (d1, d2, path) = connector_geometry((800, 4, 880, 24), (800, 42, 880, 182));
+        assert_eq!(d1, iced::Point::new(840.0, 24.0));
+        assert_eq!(d2, iced::Point::new(840.0, 42.0));
+        assert_eq!(path.len(), 3, "collinear run: {path:?}");
+    }
+
+    /// A popup to the sensor's right rails across the vertical gap
+    /// instead (left/right bar layouts).
+    #[test]
+    fn connector_rails_across_a_side_popup() {
+        let (d1, d2, path) = connector_geometry((4, 200, 24, 280), (60, 240, 320, 380));
+        assert_eq!(d1, iced::Point::new(24.0, 240.0));
+        assert_eq!(d2, iced::Point::new(60.0, 310.0));
+        assert_eq!(
+            path,
+            vec![
+                iced::Point::new(24.0, 240.0),
+                iced::Point::new(42.0, 240.0),
+                iced::Point::new(42.0, 310.0),
+                iced::Point::new(60.0, 310.0),
+            ]
+        );
     }
 }

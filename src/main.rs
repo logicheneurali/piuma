@@ -29,6 +29,7 @@ use iced_exwlshell::reexport::{
 };
 use iced_exwlshell::settings::{LayerShellSettings, LayerSize, StartMode};
 use iced_exwlshell::to_layer_message;
+use iced_runtime::core::widget::operation::Outcome;
 
 mod app_theme;
 mod autostart;
@@ -84,6 +85,9 @@ const POPUP_MARGIN: i32 = 8;
 // below knows nothing of it, the popup is its own window).
 const GRAPH_POPUP_W: u32 = 260;
 const GRAPH_POPUP_H: u32 = 140;
+/// Padding around the connector's bounding box: its surface is the
+/// box plus this on every side (the end dots must not clip).
+const GRAPH_LINK_PAD: i32 = 4;
 /// Content geometry inside the popup: a fixed header box and gap, so
 /// the average label and the canvas share one exact coordinate system
 /// (the label sits on the guide line the draw pass computes).
@@ -212,6 +216,10 @@ struct Panel {
     /// output-space rect the hover guards compare the cursor with,
     /// `None` while hidden.
     graph_popup: Option<GraphPopup>,
+    /// The connector surface joining the graph popup to its sensor (see
+    /// `sync_graph_link`): its id and the id of the popup it draws —
+    /// `None` while hidden.
+    graph_link: Option<(iced::window::Id, iced::window::Id)>,
     /// Wallpaper windows (roadmap2 #1): one background surface per
     /// active output, keyed by the compositor's output name; empty
     /// while the wallpaper is off.
@@ -240,6 +248,13 @@ struct GraphPopup {
     section: usize,
     sensor: usize,
     rect: (i32, i32, i32, i32),
+    /// Which output edge the popup anchors to: an anchored surface sits
+    /// past the bar's reserved strip, so the real surface rect derives
+    /// from `rect` + the anchor (see `popup_surface_rect`).
+    anchor: Anchor,
+    /// The sensor box's on-screen rect in output space, as answered by
+    /// `FindSensorRect`: the connector window is pinned to it.
+    sensor_rect: Option<(i32, i32, i32, i32)>,
     /// Set when a cursor event arrives tagged with this window's id:
     /// the leave-guard's coordinates can be stale, this cannot.
     pointer_seen: bool,
@@ -297,6 +312,10 @@ enum Message {
     /// The cursor left the graph popup: dismiss it unless the cursor
     /// went back to its own sensor (the popup follows the hover).
     GraphPopupExited,
+    /// Answer of the sensor-box rect query `FindSensorRect`:
+    /// (section, sensor, window-relative rect). The connector window
+    /// gets pinned to it (`sync_graph_link`).
+    SensorRectFound(usize, usize, (i32, i32, i32, i32)),
     /// Click on a popup card: run its spec `default` action, dismiss it.
     PopupCardClicked(u32),
     /// Click on a popup card's ✕: dismiss it only (spec reason 2).
@@ -311,6 +330,60 @@ enum Message {
 
 fn namespace() -> String {
     String::from("piuma")
+}
+
+// ── sensor rect query ──────────────────────────────────────────────
+
+/// Widget id of a sensor box in the bar view: the graph popup queries
+/// the sensor's on-screen rect through it (see `FindSensorRect`).
+fn sensor_box_id(section: usize, sensor: usize) -> iced::widget::Id {
+    format!("piuma-sensor-{section}-{sensor}").into()
+}
+
+/// Runtime query of a sensor box's rect: the operation walks the
+/// widget trees (on every window — one answer is enough, only the bar
+/// carries the tagged container) and reports the bounds of the
+/// container tagged with the sensor's widget id.
+struct FindSensorRect {
+    section: usize,
+    sensor: usize,
+    target: iced::widget::Id,
+    found: Option<(i32, i32, i32, i32)>,
+}
+
+impl FindSensorRect {
+    fn new(section: usize, sensor: usize) -> Self {
+        Self {
+            section,
+            sensor,
+            target: sensor_box_id(section, sensor),
+            found: None,
+        }
+    }
+}
+
+impl Operation<Message> for FindSensorRect {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<Message>)) {
+        operate(self);
+    }
+
+    fn container(&mut self, id: Option<&iced::widget::Id>, bounds: iced::Rectangle) {
+        if self.found.is_none() && id == Some(&self.target) {
+            self.found = Some((
+                bounds.x as i32,
+                bounds.y as i32,
+                (bounds.x + bounds.width) as i32,
+                (bounds.y + bounds.height) as i32,
+            ));
+        }
+    }
+
+    fn finish(&self) -> Outcome<Message> {
+        match self.found {
+            Some(rect) => Outcome::Some(Message::SensorRectFound(self.section, self.sensor, rect)),
+            None => Outcome::None,
+        }
+    }
 }
 
 // ── helpers ─────────────────────────────────────────────────────────
@@ -858,6 +931,12 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             if let Some(cmd) = sync_popup(panel, geometry_changed || config_reloaded) {
                 cmds.push(cmd);
             }
+            // The connector surface rides with the popup: it opens once
+            // the sensor rect is known and dies with the popup — one
+            // place drives its window too.
+            if let Some(cmd) = sync_graph_link(panel) {
+                cmds.push(cmd);
+            }
             // The wallpaper surface follows the config on the same
             // cadence: the first tick materializes it after startup,
             // later ticks track enable/path changes (a cheap compare).
@@ -1196,6 +1275,20 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                 Command::none()
             }
         }
+        Message::SensorRectFound(section, sensor, rect) => {
+            // The queried bounds are in the bar window's coordinates:
+            // lift them to output space (the bar sits inside the output
+            // at its anchor) — the popup's own rects live there too.
+            let (ox, oy) = tray::bar_origin(panel);
+            if let Some(gp) = panel.graph_popup.as_mut() {
+                if (gp.section, gp.sensor) == (section, sensor) {
+                    gp.sensor_rect = Some((rect.0 + ox, rect.1 + oy, rect.2 + ox, rect.3 + oy));
+                }
+            }
+            // The answer lands right after the popup opened: open the
+            // connector at once (the tick owns the closing side).
+            sync_graph_link(panel).unwrap_or_else(Command::none)
+        }
         _ => Command::none(),
     }
 }
@@ -1314,6 +1407,9 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
         if gp.id == window {
             return graph_popup_view(panel, gp);
         }
+    }
+    if panel.graph_link.is_some_and(|(id, _)| id == window) {
+        return graph_link_view(panel);
     }
     if panel.popup == Some(window) {
         return popup_view(panel);
@@ -1507,6 +1603,10 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
                 box_w,
                 box_h,
             );
+            // Tagged so the graph popup can query this box's on-screen
+            // rect and pin its connector window to it.
+            let styled_container =
+                container(styled_container).id(sensor_box_id(section_idx, sensor_idx));
 
             // Tray icons carry their own MouseAreas (press/wheel/tooltip);
             // wrapping them in the sensor MouseArea as well would handle the
@@ -2810,11 +2910,16 @@ fn graph_hover_sync(
         section,
         sensor,
         rect,
+        anchor,
+        sensor_rect: None,
         pointer_seen: false,
         missed: 0,
     });
     eprintln!("[piuma] graph: open rect={rect:?} cursor=({x},{y})");
     cmds.push(open);
+    // Ask the bar for the sensor box's on-screen rect: the connector
+    // window is pinned to it once the answer lands (`sync_graph_link`).
+    cmds.push(iced_runtime::task::widget(FindSensorRect::new(section, sensor)));
     Command::batch(cmds)
 }
 
@@ -2845,6 +2950,132 @@ fn cursor_in_graph_popup(panel: &Panel) -> bool {
         .graph_popup
         .as_ref()
         .is_some_and(|gp| x >= gp.rect.0 && x < gp.rect.2 && y >= gp.rect.1 && y < gp.rect.3)
+}
+
+/// The popup's rect as its surface really sits on the output: a layer
+/// surface is pushed past the reservations of the edge it anchors to —
+/// and the bar's reservation lives on the edge the BAR anchors to. So
+/// the shift applies per axis, only where the two anchors point to the
+/// same side (measured on this stack: top bar, popup anchored Left|Top
+/// → +28 on y, none on x).
+fn popup_surface_rect(gp: &GraphPopup, bar_anchor: Anchor, zone: i32) -> (i32, i32, i32, i32) {
+    let (mut x0, mut y0, mut x1, mut y1) = gp.rect;
+    if gp.anchor.contains(Anchor::Top) && bar_anchor.contains(Anchor::Top) {
+        y0 += zone;
+        y1 += zone;
+    }
+    if gp.anchor.contains(Anchor::Bottom) && bar_anchor.contains(Anchor::Bottom) {
+        y0 -= zone;
+        y1 -= zone;
+    }
+    if gp.anchor.contains(Anchor::Left) && bar_anchor.contains(Anchor::Left) {
+        x0 += zone;
+        x1 += zone;
+    }
+    if gp.anchor.contains(Anchor::Right) && bar_anchor.contains(Anchor::Right) {
+        x0 -= zone;
+        x1 -= zone;
+    }
+    (x0, y0, x1, y1)
+}
+
+/// The connector drawing in the link surface's own coordinates, the
+/// surface's top-left output position and its size — `None` while the
+/// popup or its sensor rect is missing (the window renders empty in
+/// that gap and the tick closes it).
+fn graph_link_geometry(panel: &Panel) -> Option<(graphs::Connector, (i32, i32), (u32, u32))> {
+    let gp = panel.graph_popup.as_ref()?;
+    let sensor = gp.sensor_rect?;
+    let popup = popup_surface_rect(gp, panel.last_anchor, panel.last_exclusive_zone);
+    let st = popup_style(&panel.config);
+    let (d1, d2, path) = graphs::connector_geometry(sensor, popup);
+    // The surface is the connector's bounding box (the end dots are
+    // its extremes — the rail lies between them) plus a dot-sized
+    // padding on every side; the drawing shifts into local space.
+    let x0 = d1.x.min(d2.x).floor() as i32 - GRAPH_LINK_PAD;
+    let y0 = d1.y.min(d2.y).floor() as i32 - GRAPH_LINK_PAD;
+    let x1 = d1.x.max(d2.x).ceil() as i32 + GRAPH_LINK_PAD;
+    let y1 = d1.y.max(d2.y).ceil() as i32 + GRAPH_LINK_PAD;
+    let shift = |p: iced::Point| iced::Point::new(p.x - x0 as f32, p.y - y0 as f32);
+    let conn = graphs::Connector {
+        d1: shift(d1),
+        d2: shift(d2),
+        path: path.iter().copied().map(shift).collect(),
+        color: st.border,
+        width: (st.border_width as f32).max(1.0),
+    };
+    Some((conn, (x0, y0), ((x1 - x0) as u32, (y1 - y0) as u32)))
+}
+
+/// One place drives the connector surface: it opens once the popup's
+/// sensor rect has landed (the query answers a render after the popup
+/// opened), it swaps when the popup jumps to another sensor, and it
+/// dies with the popup. With `exclusive_zone = -1` the surface ignores
+/// every reservation, so its margins are the exact output position of
+/// the connector's bounding box.
+fn sync_graph_link(panel: &mut Panel) -> Option<Command<Message>> {
+    let wanted = panel
+        .graph_popup
+        .as_ref()
+        .filter(|gp| gp.sensor_rect.is_some())
+        .map(|gp| gp.id);
+    // Settled: the open connector draws the popup that is showing.
+    if let (Some((_, popup_id)), Some(wanted)) = (panel.graph_link, wanted) {
+        if popup_id == wanted {
+            return None;
+        }
+    }
+    let mut cmds: Vec<Command<Message>> = Vec::new();
+    // The popup died or moved to another sensor: the old connector
+    // goes (a swap reopens it on the new geometry right after).
+    if let Some((id, _)) = panel.graph_link.take() {
+        eprintln!("[piuma] graph: link close");
+        cmds.push(iced::window::close(id));
+    }
+    if let Some(popup_id) = wanted {
+        let (_, (ox, oy), (w, h)) = graph_link_geometry(panel)?;
+        let (id, open) = Message::layershell_open(NewLayerShellSettings {
+            size: LayerSize::px(w, h),
+            layer: Layer::Overlay,
+            anchor: Anchor::Top | Anchor::Left,
+            // -1 = ignore other surfaces' reservations (the bar's
+            // strip must not inset this one — as on the wallpaper).
+            exclusive_zone: Some(-1),
+            margin: Some(Margin {
+                top: oy,
+                right: 0,
+                bottom: 0,
+                left: ox,
+            }),
+            keyboard_interactivity: KeyboardInteractivity::None,
+            output_option: OutputOption::LastOutput,
+            // A pure drawing over the desktop: hovers and clicks
+            // pass through (as on the wallpaper).
+            events_transparent: true,
+            namespace: Some("piuma-graph-link".to_string()),
+            ..Default::default()
+        });
+        panel.graph_link = Some((id, popup_id));
+        eprintln!("[piuma] graph: link at ({ox},{oy}) size={w}x{h}");
+        cmds.push(open);
+    }
+    Some(Command::batch(cmds))
+}
+
+/// The connector window's view: one canvas with the polyline and the
+/// two end dots. The surface lives exactly as long as the popup; in
+/// the tick-sized gap before its close the drawing is empty.
+fn graph_link_view<'a>(panel: &'a Panel) -> Element<'a, Message> {
+    match graph_link_geometry(panel) {
+        Some((conn, _, _)) => graphs::link_widget(conn),
+        None => graphs::link_widget(graphs::Connector {
+            d1: iced::Point::new(0.0, 0.0),
+            d2: iced::Point::new(0.0, 0.0),
+            path: Vec::new(),
+            color: Color::TRANSPARENT,
+            width: 0.0,
+        }),
+    }
 }
 
 /// The hover graph popup: the sensor's name and current value over its
@@ -3344,6 +3575,7 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         tray_menu_gen: 0,
                         graphs,
                         graph_popup: None,
+                        graph_link: None,
                         wallpaper: Vec::new(),
                     }
                 },
@@ -3800,6 +4032,8 @@ mod tests {
             section: 0,
             sensor: 0,
             rect: (0, 0, 10, 10),
+            anchor: Anchor::Top,
+            sensor_rect: None,
             pointer_seen: false,
             missed: 0,
         };

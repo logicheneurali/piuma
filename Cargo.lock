@@ -3216,6 +3216,7 @@ dependencies = [
  "freedesktop-icons",
  "iced",
  "iced_exwlshell",
+ "iced_runtime",
  "log",
  "serde",
  "serde_json",
