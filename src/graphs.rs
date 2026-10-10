@@ -53,6 +53,63 @@ pub fn scale_of(source: &config::SensorSource) -> Option<Scale> {
     })
 }
 
+/// Semi-transparent alpha of the quarter grid under the data.
+const GRID_ALPHA: f32 = 0.25;
+/// Alpha of the average guide line (stronger than the grid, softer
+/// than the trend).
+const AVG_ALPHA: f32 = 0.55;
+/// Quarter steps per axis: 4 divisions = the 0/25/50/75/100% lines.
+const GRID_STEPS: u32 = 4;
+
+/// y of a 0..1 fraction of the axis: 0 = bottom (minimum), 1 = top
+/// (maximum). The single source for grid, data, guide line and the
+/// label's position — the view calls it too.
+pub fn axis_y(h: f32, frac: f32) -> f32 {
+    h * (1.0 - frac)
+}
+
+/// Arithmetic mean of a window — the average guide's value; `None`
+/// while nothing was recorded yet (no line, no label).
+pub fn mean(window: &[f32]) -> Option<f32> {
+    if window.is_empty() {
+        return None;
+    }
+    Some(window.iter().sum::<f32>() / window.len() as f32)
+}
+
+/// Label suffix of a graphed source's values: the engine plots the
+/// bare number, the popup's average label carries the unit.
+pub fn unit_of(source: &config::SensorSource) -> &'static str {
+    use config::SensorSource as S;
+    match source {
+        S::PercCpu {}
+        | S::PercGpu {}
+        | S::PercMem {}
+        | S::PercSwap {}
+        | S::PercDisk {}
+        | S::PercBattery {}
+        | S::PercBacklight {}
+        | S::PercVolume { .. }
+        | S::UsedMem {}
+        | S::UsedSwap {}
+        | S::UsedDisk {}
+        | S::UsedBattery {} => "%",
+        S::UsedNetdown { .. } | S::UsedNetup { .. } => "B/s",
+        S::TempCpu {} => "°C",
+        _ => "",
+    }
+}
+
+/// The average guide's label: `avg 4.8%`, `avg 61.5°C`,
+/// `avg 9318 B/s` (rates drop the decimal — bytes have none).
+pub fn avg_label(avg: f32, unit: &str) -> String {
+    match unit {
+        "B/s" => format!("avg {avg:.0} {unit}"),
+        "" => format!("avg {avg:.1}"),
+        _ => format!("avg {avg:.1}{unit}"),
+    }
+}
+
 /// One recorded column: which sensor it belongs to and its axis policy.
 #[derive(Clone)]
 struct Column {
@@ -198,15 +255,37 @@ impl<Message> canvas::Program<Message> for Graph {
         _cursor: Cursor,
     ) -> Vec<Geometry<iced::Renderer>> {
         let mut frame = Frame::new(renderer, bounds.size());
+        let (w, h) = (bounds.width, bounds.height);
+        if w <= 0.0 || h <= 0.0 {
+            return vec![frame.into_geometry()];
+        }
+        // Grid under the data: five quarter lines of the axis — the
+        // literal 0/25/50/75/100% on a percent scale, quarters of the
+        // visible min..max range on an auto one.
+        for step in 0..=GRID_STEPS {
+            let y = axis_y(h, step as f32 / GRID_STEPS as f32);
+            let line = Path::new(|path| {
+                path.move_to(iced::Point::new(0.0, y));
+                path.line_to(iced::Point::new(w, y));
+            });
+            frame.stroke(
+                &line,
+                Stroke::default()
+                    .with_width(1.0)
+                    .with_color(Color {
+                        a: GRID_ALPHA,
+                        ..self.color
+                    }),
+            );
+        }
+        // The trend itself.
         if self.samples.len() >= 2 {
             let (lo, hi) = y_bounds(self.scale, &self.samples);
-            let (w, h) = (bounds.width, bounds.height);
             let last = (self.samples.len() - 1) as f32;
             let line = Path::new(|path| {
                 for (i, v) in self.samples.iter().enumerate() {
                     let x = w * i as f32 / last;
-                    // v == hi → top, v == lo → bottom.
-                    let y = h - (v - lo) / (hi - lo) * h;
+                    let y = axis_y(h, (v - lo) / (hi - lo));
                     if i == 0 {
                         path.move_to(iced::Point::new(x, y));
                     } else {
@@ -217,6 +296,23 @@ impl<Message> canvas::Program<Message> for Graph {
             frame.stroke(
                 &line,
                 Stroke::default().with_width(2.0).with_color(self.color),
+            );
+        }
+        // Average guide over the whole window; the popup view labels it
+        // through the same `axis_y` math (see `avg_label`).
+        if let Some(avg) = mean(&self.samples) {
+            let (lo, hi) = y_bounds(self.scale, &self.samples);
+            let y = axis_y(h, (avg - lo) / (hi - lo));
+            let line = Path::new(|path| {
+                path.move_to(iced::Point::new(0.0, y));
+                path.line_to(iced::Point::new(w, y));
+            });
+            frame.stroke(
+                &line,
+                Stroke::default().with_width(1.0).with_color(Color {
+                    a: AVG_ALPHA,
+                    ..self.color
+                }),
             );
         }
         vec![frame.into_geometry()]
@@ -284,5 +380,27 @@ mod tests {
         let (lo, hi) = y_bounds(Scale::Auto, &[7.0, 7.0]);
         assert!(lo < hi, "flat window keeps a span: {lo}..{hi}");
         assert_eq!(y_bounds(Scale::Auto, &[]), (0.0, 1.0), "empty window");
+    }
+
+    /// The mean drives the guide (empty window = no line) and the grid
+    /// spans bottom → top in five exact quarters.
+    #[test]
+    fn mean_and_quarter_lines() {
+        assert_eq!(mean(&[]), None, "no samples → no guide line");
+        assert_eq!(mean(&[10.0, 20.0, 60.0]), Some(30.0));
+        let grid: Vec<f32> = (0..=GRID_STEPS)
+            .map(|step| axis_y(90.0, step as f32 / GRID_STEPS as f32))
+            .collect();
+        assert_eq!(grid, vec![90.0, 67.5, 45.0, 22.5, 0.0], "0/25/50/75/100%");
+    }
+
+    /// The average label carries the source's unit, rates without a
+    /// decimal (bytes are whole).
+    #[test]
+    fn average_labels_carry_the_units() {
+        assert_eq!(avg_label(4.84, "%"), "avg 4.8%");
+        assert_eq!(avg_label(61.54, "°C"), "avg 61.5°C");
+        assert_eq!(avg_label(9318.4, "B/s"), "avg 9318 B/s");
+        assert_eq!(avg_label(1.0, ""), "avg 1.0");
     }
 }

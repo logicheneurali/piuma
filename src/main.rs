@@ -84,6 +84,11 @@ const POPUP_MARGIN: i32 = 8;
 // below knows nothing of it, the popup is its own window).
 const GRAPH_POPUP_W: u32 = 260;
 const GRAPH_POPUP_H: u32 = 140;
+/// Content geometry inside the popup: a fixed header box and gap, so
+/// the average label and the canvas share one exact coordinate system
+/// (the label sits on the guide line the draw pass computes).
+const GRAPH_HEADER_H: u32 = 20;
+const GRAPH_SPACING: u32 = 6;
 
 // ── tray menu geometry ──────────────────────────────────────────────
 // One row per entry, sized exactly (`menu_row_h` × count + 2× pad, see
@@ -836,6 +841,12 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             // position itself is remembered for tray activation hints.
             if let Event::Mouse(iced::mouse::Event::CursorMoved { position }) = e {
                 panel.last_cursor = Some((position.x, position.y));
+                // The hover can process before this event (a sensor
+                // hovered on the very first motion): retry the graph
+                // popup open now that a position exists.
+                if let Some((section, sensor)) = panel.hovered {
+                    return graph_hover_sync(panel, section, sensor, true);
+                }
             }
             Command::none()
         }
@@ -1134,9 +1145,11 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                 .as_ref()
                 .is_some_and(|gp| panel.hovered == Some((gp.section, gp.sensor)));
             if on_sensor {
+                eprintln!("[piuma] graph: keep (pointer left, cursor on the sensor)");
                 return Command::none();
             }
             if let Some(gp) = panel.graph_popup.take() {
+                eprintln!("[piuma] graph: close (pointer left the popup)");
                 iced::window::close(gp.id)
             } else {
                 Command::none()
@@ -2668,7 +2681,11 @@ fn graph_hover_sync(
     if !hovered {
         if showing && !cursor_in_graph_popup(panel) {
             let gp = panel.graph_popup.take().expect("showing");
+            eprintln!("[piuma] graph: close (sensor left, cursor off the popup)");
             return iced::window::close(gp.id);
+        }
+        if showing {
+            eprintln!("[piuma] graph: keep (sensor left, cursor still on the popup)");
         }
         return Command::none();
     }
@@ -2686,6 +2703,7 @@ fn graph_hover_sync(
     if !opted_in {
         return Command::none();
     }
+    eprintln!("[piuma] graph: hover on a graphable sensor ({section},{sensor})");
     let mut cmds: Vec<Command<Message>> = Vec::new();
     // Crossing between two graph sensors: the old surface dies with its
     // own leave events too, but closing here keeps the order definite.
@@ -2693,6 +2711,9 @@ fn graph_hover_sync(
         cmds.push(iced::window::close(old.id));
     }
     let Some((x, y)) = tray::cursor_output_point(panel) else {
+        // The enter can beat the first CursorMoved event (nothing moved
+        // since startup): the motion itself retries via `IcedEvent`.
+        eprintln!("[piuma] graph: no cursor position yet, waiting for the motion event");
         return Command::batch(cmds);
     };
     let (sw, sh) = unsafe { (SCREEN_WIDTH as i32, SCREEN_HEIGHT as i32) };
@@ -2715,6 +2736,7 @@ fn graph_hover_sync(
         sensor,
         rect,
     });
+    eprintln!("[piuma] graph: open rect={rect:?} cursor=({x},{y})");
     cmds.push(open);
     Command::batch(cmds)
 }
@@ -2773,24 +2795,79 @@ fn graph_popup_view<'a>(panel: &'a Panel, gp: &GraphPopup) -> Element<'a, Messag
         .graphs
         .window(gp.section, gp.sensor)
         .unwrap_or((graphs::Scale::Auto, Vec::new()));
-    let header: Element<'_, Message> = Row::new()
-        .push(
-            text(name)
-                .size(st.font_size)
-                .color(st.text)
-                .font(font.clone())
-                .wrapping(iced::widget::text::Wrapping::None)
-                .width(Length::Fill),
-        )
-        .push(text(current).size(st.font_size).color(color).font(font))
-        .align_y(Alignment::Center)
-        .spacing(8)
+    // Fixed content geometry: header box + gap, canvas takes the rest
+    // of the fixed-size window — the label below is positioned against
+    // exactly these numbers.
+    let graph_h = GRAPH_POPUP_H
+        .saturating_sub(2 * st.padding)
+        .saturating_sub(GRAPH_HEADER_H)
+        .saturating_sub(GRAPH_SPACING) as f32;
+    let header: Element<'_, Message> = container(
+        Row::new()
+            .push(
+                text(name)
+                    .size(st.font_size)
+                    .color(st.text)
+                    .font(font.clone())
+                    .wrapping(iced::widget::text::Wrapping::None)
+                    .width(Length::Fill),
+            )
+            .push(text(current).size(st.font_size).color(color).font(font))
+            .align_y(Alignment::Center)
+            .spacing(8)
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
+    .height(Length::Fixed(GRAPH_HEADER_H as f32))
+    .into();
+    // The average guide and its label share the canvas's coordinates:
+    // the same `axis_y` / `y_bounds` math the draw pass uses.
+    let guide = graphs::mean(&samples).map(|avg| {
+        let (lo, hi) = graphs::y_bounds(scale, &samples);
+        (avg, graphs::axis_y(graph_h, (avg - lo) / (hi - lo)))
+    });
+    let graph_box: Element<'_, Message> = container(graphs::widget(samples, scale, color))
         .width(Length::Fill)
+        .height(Length::Fixed(graph_h))
         .into();
+    let graph_area: Element<'_, Message> = match guide {
+        Some((avg, y)) => {
+            let unit = panel
+                .config
+                .panel
+                .sections
+                .get(gp.section)
+                .and_then(|sec| sec.sensors.get(gp.sensor))
+                .map(|s| graphs::unit_of(&s.source))
+                .unwrap_or("");
+            // Line-height estimate: the label centres on the guide.
+            let label_h = st.font_size as f32 * 1.2;
+            let label: Element<'_, Message> = container(
+                text(graphs::avg_label(avg, unit))
+                    .size(st.font_size.saturating_sub(1).max(8))
+                    .color(color),
+            )
+            .width(Length::Fill)
+            .height(Length::Fixed(graph_h))
+            .align_x(Alignment::End)
+            .padding(iced::Padding {
+                top: (y - label_h / 2.0).clamp(0.0, (graph_h - label_h).max(0.0)),
+                right: 4.0,
+                bottom: 0.0,
+                left: 0.0,
+            })
+            .into();
+            Stack::with_children([graph_box, label])
+                .width(Length::Fill)
+                .height(Length::Fixed(graph_h))
+                .into()
+        }
+        None => graph_box,
+    };
     let content: Element<'_, Message> = Column::new()
         .push(header)
-        .push(graphs::widget(samples, scale, color))
-        .spacing(6)
+        .push(graph_area)
+        .spacing(GRAPH_SPACING as f32)
         .width(Length::Fill)
         .height(Length::Fill)
         .into();
