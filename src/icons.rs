@@ -41,7 +41,10 @@ fn cache() -> std::sync::MutexGuard<'static, Cache> {
 /// Resolve `name` under `theme` at `size` to a file (svg preferred by the
 /// theme, otherwise the nearest sized bitmap). The first call per key pays
 /// the theme walk, every later one is a map hit — including misses, so an
-/// unknown icon is not re-searched every tick.
+/// unknown icon is not re-searched every tick. Only the size actually in
+/// use is kept: the sensor icon size follows the config, so other
+/// buckets mean the config changed and the next tick re-resolves
+/// everything anyway.
 pub fn resolve(theme: &str, name: &str, size: u16) -> Option<PathBuf> {
     {
         let cache = cache();
@@ -57,9 +60,10 @@ pub fn resolve(theme: &str, name: &str, size: u16) -> Option<PathBuf> {
         .with_size(size)
         .with_theme(theme)
         .find();
-    cache()
-        .entry(theme.to_string())
-        .or_default()
+    let mut cache = cache();
+    let by_size = cache.entry(theme.to_string()).or_default();
+    by_size.retain(|s, _| *s == size);
+    by_size
         .entry(size)
         .or_default()
         .insert(name.to_string(), found.clone());

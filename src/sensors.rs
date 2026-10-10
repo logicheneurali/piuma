@@ -670,7 +670,16 @@ fn net_counters(interface: &str) -> Option<(u64, u64)> {
 /// Bytes per second for one direction since its previous sample; None on
 /// the first call (baseline) or when the counter went backwards.
 fn net_rate(interface: &str, up: bool) -> Option<f64> {
-    let (rx, tx) = net_counters(interface)?;
+    let Some((rx, tx)) = net_counters(interface) else {
+        // The interface is gone (removed device, config reload): its
+        // sample must not outlive it.
+        if let Some(map) = NET_LAST.get() {
+            if let Ok(mut map) = map.lock() {
+                map.remove(interface);
+            }
+        }
+        return None;
+    };
     let now = Instant::now();
     let mut last = NET_LAST.get_or_init(Default::default).lock().ok()?;
     let sample = last

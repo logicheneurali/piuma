@@ -1140,24 +1140,24 @@ fn subscription(panel: &Panel) -> Subscription<Message> {
 /// surfaces are registered — the multi-surface runtime keys actions by id.
 static BAR_ID: std::sync::OnceLock<iced::window::Id> = std::sync::OnceLock::new();
 
-/// Configured family name kept alive for [`Font::Name`]'s `'static` bound:
-/// leaked once per name actually used, so reloads don't accumulate leaks.
-static FONT_NAME: std::sync::Mutex<Option<(&'static str, String)>> =
-    std::sync::Mutex::new(None);
+/// Configured family names kept alive for [`Font::Name`]'s `'static`
+/// bound: a name is leaked the first time it is used and the same
+/// pointer is reused after, so reloads — even alternating between two
+/// fonts — never leak a fresh copy per change.
+static FONT_NAMES: std::sync::Mutex<Vec<(&'static str, String)>> =
+    std::sync::Mutex::new(Vec::new());
 
 /// The `'static` family name of the configured font (roadmap M2).
 fn font_name_static(config: &config::Config) -> &'static str {
     let name = config.panel.font.as_deref().unwrap_or(DEFAULT_FONT);
-    let mut slot = FONT_NAME
+    let mut names = FONT_NAMES
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some((leaked, original)) = slot.as_ref() {
-        if original == name {
-            return *leaked;
-        }
+    if let Some((leaked, _)) = names.iter().find(|(_, original)| original == name) {
+        return *leaked;
     }
     let leaked = Box::leak(name.to_string().into_boxed_str());
-    *slot = Some((leaked, name.to_string()));
+    names.push((leaked, name.to_string()));
     leaked
 }
 

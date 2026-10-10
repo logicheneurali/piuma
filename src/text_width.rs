@@ -20,12 +20,17 @@ const ELLIPSIS: &str = "…";
 /// so the system font scan must happen only when font/size really change.
 static CACHE: Mutex<Option<CacheKey>> = Mutex::new(None);
 
-/// The font system itself, built on first use and reused after: a fresh one
-/// re-scans every font on disk (~125 ms measured on the development
-/// machine) while reuse makes each measurement shaping only — cheap enough
-/// to run per hover frame and per fitting candidate. Fonts installed while
-/// the bar runs are picked up at the next restart (the scan never repeats).
-static SYSTEM: Mutex<Option<cosmic_text::FontSystem>> = Mutex::new(None);
+/// The font system itself, built on first use and reused after: it used
+/// to scan and keep every font on the disk (~1000 faces parsed and held
+/// for the process' life) while measurements only ever shape the one
+/// family the bar renders with — now [`build_system`] loads just that
+/// family's files (through `fc-match`), so both the ~125 ms scan and
+/// the resident face database are gone. Reuse makes each measurement
+/// shaping only — cheap enough to run per hover frame and per fitting
+/// candidate. Fonts installed while the bar runs are picked up at the
+/// next restart (the scan never repeats); the slot remembers the family
+/// it was built for and rebuilds when a config reload changes it.
+static SYSTEM: Mutex<Option<(String, cosmic_text::FontSystem)>> = Mutex::new(None);
 
 /// Identity of a measured width: font, size AND the pattern list (a
 /// different list is a different question and must be measured again).
@@ -77,7 +82,7 @@ pub fn widest(font: &Font, font_size: u32, patterns: &[String]) -> u16 {
 /// would mean a ~125 ms disk scan each.
 pub fn fit(font: &Font, font_size: u32, jobs: &[(String, u32)]) -> Vec<String> {
     let attrs = attrs(font);
-    with_system(|font_system| {
+    with_system(font, |font_system| {
         jobs.iter()
             .map(|(text, budget)| {
                 let budget = u16::try_from(*budget).unwrap_or(u16::MAX);
@@ -107,13 +112,73 @@ pub fn fit(font: &Font, font_size: u32, jobs: &[(String, u32)]) -> Vec<String> {
     })
 }
 
+/// The fontconfig query for a family: the configured name, or the
+/// generic keyword for iced's generic families.
+fn family_query(font: &Font) -> String {
+    match &font.family {
+        Family::Name(name) => (*name).to_string(),
+        Family::SansSerif => "sans-serif".to_string(),
+        Family::Serif => "serif".to_string(),
+        Family::Cursive => "cursive".to_string(),
+        Family::Fantasy => "fantasy".to_string(),
+        Family::Monospace => "monospace".to_string(),
+    }
+}
+
+/// The font system for the configured family only: `fc-match` resolves
+/// the family — regular and bold, the bar can pin either weight — to
+/// their files, and the full system scan (parsing and keeping every
+/// face on the disk) never happens. `sans-serif` rides along as the
+/// glyph-fallback candidate cosmic-text looks for. A resolution that
+/// yields no file at all falls back to the full scan, so a missing
+/// font can never measure every width as zero (the M5 pin would then
+/// wrap the text it is meant to fix).
+fn build_system(family: &str) -> cosmic_text::FontSystem {
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    for query in [
+        family.to_string(),
+        format!("{family}:bold"),
+        "sans-serif".to_string(),
+    ] {
+        let Ok(output) = std::process::Command::new("fc-match")
+            .args(["-f", "%{file}\n", &query])
+            .output()
+        else {
+            break;
+        };
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if path.is_empty() {
+            continue;
+        }
+        // Probe the file before trusting it: a path fc-match knows is
+        // not a guarantee the font parses.
+        let mut probe = cosmic_text::fontdb::Database::new();
+        if probe.load_font_file(&path).is_ok() {
+            files.push(path.into());
+        }
+    }
+    if files.is_empty() {
+        return cosmic_text::FontSystem::new();
+    }
+    cosmic_text::FontSystem::new_with_fonts(
+        files.into_iter().map(cosmic_text::fontdb::Source::File),
+    )
+}
+
 /// Run `f` on the shared font system (see [`SYSTEM`]): it buffers shape
-/// results in place, so access must be exclusive. Lock order is always
-/// `CACHE` → `SYSTEM` ([`fit`] takes `SYSTEM` alone), so the two can't
-/// deadlock against each other.
-fn with_system<T>(f: impl FnOnce(&mut cosmic_text::FontSystem) -> T) -> T {
-    let mut system = SYSTEM.lock().unwrap_or_else(PoisonError::into_inner);
-    f(system.get_or_insert_with(cosmic_text::FontSystem::new))
+/// results in place, so access must be exclusive. The system is built
+/// for the family in play and rebuilt when a config reload points the
+/// bar at a different one. Lock order is always `CACHE` → `SYSTEM`
+/// ([`fit`] takes `SYSTEM` alone), so the two can't deadlock against
+/// each other.
+fn with_system<T>(font: &Font, f: impl FnOnce(&mut cosmic_text::FontSystem) -> T) -> T {
+    let family = family_query(font);
+    let mut slot = SYSTEM.lock().unwrap_or_else(PoisonError::into_inner);
+    let system = slot.get_or_insert_with(|| (family.clone(), build_system(&family)));
+    if system.0 != family {
+        *system = (family.clone(), build_system(&family));
+    }
+    f(&mut system.1)
 }
 
 /// The attributes iced shapes the configured font with.
@@ -177,7 +242,7 @@ fn width_px(
 /// (one shared font system, the widest result cached by [`widest`]).
 fn measure(font: &Font, font_size: u32, patterns: &[String]) -> u16 {
     let attrs = attrs(font);
-    with_system(|font_system| {
+    with_system(font, |font_system| {
         patterns
             .iter()
             .map(|pattern| shape(font_system, &attrs, font_size, pattern))
@@ -236,8 +301,19 @@ mod tests {
         assert_eq!(fitted[0], short);
         assert!(fitted[1].ends_with(ELLIPSIS), "{}", fitted[1]);
         assert!(fitted[1].len() < long.len());
-        let width = with_system(|font_system| width_px(font_system, &attrs(&font), 12, &fitted[1]));
+        let width = with_system(&font, |font_system| width_px(font_system, &attrs(&font), 12, &fitted[1]));
         assert!(width <= budget, "{width} > {budget}");
+    }
+
+    /// The lean system (family files only, resolved by `fc-match`)
+    /// still shapes real glyphs: a resolution failure falls back to the
+    /// full scan instead of measuring everything as zero.
+    #[test]
+    fn lean_system_shapes_the_configured_family() {
+        let font = Font::with_name("Noto Sans");
+        let width =
+            with_system(&font, |font_system| width_px(font_system, &attrs(&font), 12, "0123456789"));
+        assert!(width > 0, "digits must have a width in the configured family");
     }
 
     /// A budget too small even for the ellipsis drops the text entirely

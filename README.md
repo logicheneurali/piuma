@@ -368,7 +368,9 @@ no popup); its keys are optional and fall back to the values above:
   `0` and urgency 2 (critical) never expire on their own.
 - `history_size` – how many entries the wheel-browsable history keeps
   (the oldest are evicted when it is full; the popup only ever shows
-  the newest 5 active ones).
+  the newest 5 active ones). Clamped to `1..=200`: every entry can
+  carry a full `image-data` payload, so the bound keeps the bar's
+  memory in check whatever the file says.
 - `replace_existing` – when an app sends an update for the same
   notification, show it on the **existing card** instead of adding a
   duplicate (same id, new content, fresh timer); `false` records every

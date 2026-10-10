@@ -73,6 +73,12 @@ const DEFAULTS: Settings = Settings {
     replace_existing: true,
 };
 
+/// Upper bound for `panel.notifications.history_size`: every entry may
+/// carry a full `image-data` payload, so an unbounded configured value
+/// (the GUI accepts any number) would be an unbounded number of
+/// megabytes in the bar.
+const HISTORY_MAX: usize = 200;
+
 static SETTINGS: RwLock<Settings> = RwLock::new(DEFAULTS);
 
 /// Image payload from the spec's `image-data` hint, repacked at insert
@@ -138,7 +144,7 @@ pub fn configure(cfg: &crate::config::NotificationsConfig) {
             .history_size
             .map(|n| n as usize)
             .unwrap_or(DEFAULTS.history_size)
-            .max(1),
+            .clamp(1, HISTORY_MAX),
         replace_existing: cfg.replace_existing.unwrap_or(DEFAULTS.replace_existing),
     };
     if let Ok(mut live) = SETTINGS.write() {
