@@ -111,6 +111,14 @@ pub struct Notification {
 
 /// History in arrival order (back = newest), capped at `history_size`.
 static HISTORY: RwLock<VecDeque<Notification>> = RwLock::new(VecDeque::new());
+/// Popup image handles by notification id: `Handle::from_rgba` mints a
+/// unique renderer id on every call, so building it inside `view` made
+/// the bar re-decode and re-upload the same bytes on every frame. The
+/// entry lives exactly as long as its card: `record` (replace),
+/// `dismiss` and `prune_icon_handles` all part with it. Lock order is
+/// HISTORY before ICONS, everywhere.
+static ICONS: std::sync::LazyLock<RwLock<HashMap<u32, iced::widget::image::Handle>>> =
+    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 /// Monotonic ids: spec allows any scheme, 1-based and never reused.
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 /// Sensor scroll position: 0 = live (newest active entry), n > 0 = the
@@ -256,9 +264,16 @@ fn invoke(n: &Notification) {
 
 /// User dismissal from the popup (✕ button or card click): mark closed
 /// with the spec's reason 2 and report whether `NotificationClosed` must
-/// fire (first close of a known id).
+/// fire (first close of a known id). The card's icon handle goes with
+/// it (the tick-side prune would drop it a second later anyway).
 pub fn dismiss(id: u32) -> bool {
-    mark_closed(id, REASON_DISMISSED).1
+    let changed = mark_closed(id, REASON_DISMISSED).1;
+    if changed {
+        if let Ok(mut icons) = ICONS.write() {
+            icons.remove(&id);
+        }
+    }
+    changed
 }
 
 /// Emit `NotificationClosed(id, 2)` for a dismissal taken outside the
@@ -284,14 +299,14 @@ pub fn spawn_closed_signal(id: u32) {
 
 // ── popup-facing snapshots (F3) ────────────────────────────────────
 
-/// Icon a card can render: RGBA repacked at insert, or a path from
-/// `image-path`/`app_icon` (a themed icon *name* simply yields no icon).
+/// Icon a card can render: image-data (the handle comes from
+/// `icon_handle`, cached per notification) or a path from
+/// `image-path`/`app_icon` (a themed icon *name* simply yields no
+/// icon).
 pub enum CardIcon {
-    Rgba {
-        width: i32,
-        height: i32,
-        data: Vec<u8>,
-    },
+    /// The entry carries `image-data`; the view fetches the handle by
+    /// notification id, so the payload itself is never cloned here.
+    Image,
     Path(String),
 }
 
@@ -322,14 +337,68 @@ pub fn active_cards(max: usize) -> Vec<Card> {
             icon: n
                 .image
                 .as_ref()
-                .map(|img| CardIcon::Rgba {
-                    width: img.width,
-                    height: img.height,
-                    data: img.data.clone(),
-                })
+                .map(|_| CardIcon::Image)
                 .or_else(|| (!n.icon.is_empty()).then(|| CardIcon::Path(n.icon.clone()))),
         })
         .collect()
+}
+
+/// Number of active notifications (at most `max`), without cloning any
+/// payload: the bar's tick only needs the count, and the old path
+/// copied every image payload once a second just to drop it.
+pub fn active_cards_len(max: usize) -> usize {
+    let Ok(hist) = HISTORY.read() else {
+        return 0;
+    };
+    hist.iter()
+        .rev()
+        .filter(|n| n.closed.is_none())
+        .take(max)
+        .count()
+}
+
+/// The popup's image handle for a card, built once per notification and
+/// reused on every frame: the renderer id is stable, so the icon is
+/// decoded and uploaded a single time instead of once per frame.
+pub fn icon_handle(id: u32) -> Option<iced::widget::image::Handle> {
+    if let Ok(icons) = ICONS.read() {
+        if let Some(handle) = icons.get(&id) {
+            return Some(handle.clone());
+        }
+    }
+    let hist = HISTORY.read().ok()?;
+    // Only a visible card may have a handle: a just-closed entry stays
+    // in the history but must not resurrect its icon.
+    let img = hist
+        .iter()
+        .find(|n| n.id == id && n.closed.is_none())?
+        .image
+        .as_ref()?;
+    let handle = iced::widget::image::Handle::from_rgba(
+        img.width as u32,
+        img.height as u32,
+        img.data.clone(),
+    );
+    drop(hist); // the cache write takes no history lock with it
+    if let Ok(mut icons) = ICONS.write() {
+        icons.insert(id, handle.clone());
+    }
+    Some(handle)
+}
+
+/// Drop the handles whose card left the visible stack (expiry and
+/// history eviction leave through here); called from the bar's tick.
+pub fn prune_icon_handles() {
+    let Ok(hist) = HISTORY.read() else {
+        return;
+    };
+    let Ok(mut icons) = ICONS.write() else {
+        return;
+    };
+    if icons.is_empty() {
+        return;
+    }
+    icons.retain(|id, _| hist.iter().any(|n| n.id == *id && n.closed.is_none()));
 }
 
 /// Cut at a char boundary and append `…`.
@@ -362,6 +431,10 @@ fn record(replace: u32, n: Notification) -> u32 {
             *existing = Notification { id, ..n };
             existing.closed = None;
             existing.received = Instant::now();
+            // Same id, fresh pixels: the cached handle is stale.
+            if let Ok(mut icons) = ICONS.write() {
+                icons.remove(&id);
+            }
             return id;
         }
     }
@@ -679,6 +752,7 @@ mod tests {
     fn fresh() -> std::sync::MutexGuard<'static, ()> {
         let guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         HISTORY.write().unwrap().clear();
+        ICONS.write().unwrap().clear();
         NEXT_ID.store(1, Ordering::Relaxed);
         SELECTED.store(0, Ordering::Relaxed);
         *SETTINGS.write().unwrap() = DEFAULTS;
@@ -946,5 +1020,64 @@ mod tests {
         // Anything else closed (spec reason 3) is off the stack too.
         mark_closed(ids[4], REASON_CLOSED);
         assert!(active_cards(5).iter().all(|c| c.id != ids[4]));
+    }
+
+    /// The popup handle is built once per notification (stable renderer
+    /// id = one decode, not one per frame), changes when the entry is
+    /// replaced under the same id, and leaves with a dismissal.
+    #[test]
+    fn icon_handle_is_cached_per_notification() {
+        let _g = fresh();
+        let mut n = sample("img", 1, None);
+        n.image = Some(ImageData {
+            width: 2,
+            height: 2,
+            data: vec![0; 16],
+        });
+        let id = record(0, n);
+        let first = icon_handle(id).expect("image-data card");
+        assert_eq!(first, icon_handle(id).expect("second fetch"), "same handle");
+        // Same id, fresh pixels: the stale handle must not survive.
+        let mut replaced = sample("img2", 1, None);
+        replaced.image = Some(ImageData {
+            width: 2,
+            height: 2,
+            data: vec![255; 16],
+        });
+        assert_eq!(record(id, replaced), id, "replace honours the id");
+        let third = icon_handle(id).expect("replaced card");
+        assert_ne!(first, third, "replaced content gets a fresh handle");
+        // A dismissal takes the card (and its handle) off the stack.
+        assert!(dismiss(id));
+        assert!(icon_handle(id).is_none());
+    }
+
+    /// The tick-side count matches the visible stack without building
+    /// (let alone cloning) any card.
+    #[test]
+    fn active_cards_len_counts_without_payloads() {
+        let _g = fresh();
+        let with_img = |s: &str| {
+            let mut n = sample(s, 1, None);
+            n.image = Some(ImageData {
+                width: 2,
+                height: 2,
+                data: vec![7; 16],
+            });
+            n
+        };
+        let ids: Vec<u32> = (0..3)
+            .map(|i| record(0, with_img(&format!("n{i}"))))
+            .collect();
+        assert_eq!(active_cards_len(5), 3);
+        // Both handles are built while the cards are visible …
+        assert!(icon_handle(ids[0]).is_some());
+        assert!(icon_handle(ids[1]).is_some());
+        // … and the prune keeps them only for what is still visible.
+        mark_closed(ids[1], REASON_CLOSED);
+        assert_eq!(active_cards_len(5), 2);
+        prune_icon_handles();
+        assert!(ICONS.read().unwrap().contains_key(&ids[0]));
+        assert!(!ICONS.read().unwrap().contains_key(&ids[1]));
     }
 }

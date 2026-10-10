@@ -2176,7 +2176,11 @@ fn wallpaper_view(panel: &Panel) -> Element<'_, Message> {
 fn sync_popup(panel: &mut Panel, reposition: bool) -> Option<Command<Message>> {
     let enabled = panel.config.panel.notifications.is_some();
     let cards = if enabled {
-        notifications::active_cards(POPUP_MAX_CARDS).len()
+        // Count only, and reap the icon handles that lost their card:
+        // the old path cloned every (possibly image-bearing) card each
+        // tick just to read `.len()`.
+        notifications::prune_icon_handles();
+        notifications::active_cards_len(POPUP_MAX_CARDS)
     } else {
         0
     };
@@ -2351,19 +2355,18 @@ fn popup_view(panel: &Panel) -> Element<'_, Message> {
         } else {
             (st.text, st.bg, st.border)
         };
-        // Icon: image-data wins, a real file path follows; anything else
-        // (e.g. a themed icon name) renders without an icon.
+        // Icon: image-data wins (handle cached per notification — one
+        // decode, not one per frame), a real file path follows; anything
+        // else (e.g. a themed icon name) renders without an icon.
         let icon: Option<Image> = match &card.icon {
-            Some(notifications::CardIcon::Rgba { width, height, data }) => Some(
-                Image::new(iced::widget::image::Handle::from_rgba(
-                    *width as u32,
-                    *height as u32,
-                    data.clone(),
-                ))
-                .width(32)
-                .height(32)
-                .content_fit(iced::ContentFit::Contain),
-            ),
+            Some(notifications::CardIcon::Image) => {
+                notifications::icon_handle(card.id).map(|handle| {
+                    Image::new(handle)
+                        .width(32)
+                        .height(32)
+                        .content_fit(iced::ContentFit::Contain)
+                })
+            }
             Some(notifications::CardIcon::Path(p)) => std::path::Path::new(p)
                 .exists()
                 .then(|| {
