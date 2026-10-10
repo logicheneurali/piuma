@@ -2112,14 +2112,40 @@ fn sync_wallpaper(panel: &mut Panel) -> Command<Message> {
     Command::batch(cmds)
 }
 
+/// Last monitor list with its timestamp: outputs change rarely (hotplug),
+/// so the wallpaper sync — which asks every tick — gets a cached answer
+/// for `MONITORS_TTL` instead of spawning and parsing `hyprctl` at 1 Hz.
+static MONITORS: std::sync::Mutex<Option<(Instant, Vec<String>)>> = std::sync::Mutex::new(None);
+
+/// Freshness window of [`MONITORS`]: long enough to make the per-tick
+/// spawn rare, short enough that a hotplugged output gets its wallpaper
+/// surface within seconds.
+const MONITORS_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Names of the currently active outputs, from `hyprctl monitors -j` —
-/// best-effort, the same source the bar's geometry helpers use; no
-/// answer = no surface for now (retried on the next tick).
+/// best-effort, the same source the bar's geometry helpers use (cached,
+/// see [`MONITORS`]); no answer = no surface for now (retried on the
+/// next tick).
 fn monitor_names() -> Vec<String> {
+    if let Ok(cached) = MONITORS.lock() {
+        if let Some((at, names)) = cached.as_ref() {
+            if at.elapsed() < MONITORS_TTL && !names.is_empty() {
+                return names.clone();
+            }
+        }
+    }
     let Ok(output) = std::process::Command::new("hyprctl").args(["monitors", "-j"]).output() else {
         return Vec::new();
     };
-    monitor_names_json(&String::from_utf8_lossy(&output.stdout))
+    let names = monitor_names_json(&String::from_utf8_lossy(&output.stdout));
+    // An empty answer is never cached: a transient hyprctl failure
+    // retries on the next tick instead of freezing the list.
+    if !names.is_empty() {
+        if let Ok(mut cached) = MONITORS.lock() {
+            *cached = Some((Instant::now(), names.clone()));
+        }
+    }
+    names
 }
 
 /// `name` of every entry of the `hyprctl monitors -j` array; anything

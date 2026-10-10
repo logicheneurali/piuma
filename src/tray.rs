@@ -24,7 +24,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{OnceLock, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use iced::futures::channel::mpsc::Sender;
 use iced::futures::channel::oneshot;
@@ -920,15 +920,69 @@ async fn drive(sender: &Sender<Message>) -> zbus::Result<()> {
     }
 }
 
-/// Sleep without pulling in a timer dependency: a thread wakes the future
-/// (shared with `notifications.rs` for its expiry loop).
+/// Pending delays with their wakeups: one sleeping thread serves the
+/// whole queue. The previous implementation spawned — and destroyed —
+/// a fresh OS thread per sleep, which meant one thread every second for
+/// as long as the notification expiry loop ran.
+static TIMERS: std::sync::LazyLock<std::sync::Mutex<Vec<(Instant, oneshot::Sender<()>)>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
+/// The shared timer thread, started on the first delay asked for.
+static TIMER_THREAD: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+/// Sleep without pulling in a timer dependency: the shared timer thread
+/// wakes the future (the notification expiry loop and the retry paths —
+/// both sleep forever, one call at a time each).
 pub(crate) async fn delay(d: Duration) {
     let (tx, rx) = oneshot::channel::<()>();
-    std::thread::spawn(move || {
-        std::thread::sleep(d);
-        let _ = tx.send(());
+    match TIMERS.lock() {
+        Ok(mut timers) => timers.push((Instant::now() + d, tx)),
+        // A poisoned queue must never hang the caller.
+        Err(_) => {
+            let _ = tx.send(());
+        }
+    }
+    TIMER_THREAD.get_or_init(|| {
+        std::thread::Builder::new()
+            .name("piuma-timers".to_string())
+            .spawn(timer_thread)
+            .expect("Failed to spawn the piuma timer thread");
     });
     let _ = rx.await;
+}
+
+/// Complete every deadline that is due, then sleep until the nearest
+/// one — capped at 100 ms so a freshly registered delay is picked up
+/// promptly even while the queue sleeps (and an empty queue is a cheap
+/// 10 Hz poll instead of a spinning thread).
+fn timer_thread() {
+    loop {
+        let wait = match TIMERS.lock() {
+            Ok(mut timers) => {
+                let now = Instant::now();
+                // `oneshot::Sender::send` consumes it, so the queue is
+                // partitioned by drain instead of `retain` (which only
+                // sees shared references).
+                let mut rest = Vec::with_capacity(timers.len());
+                for (due, tx) in timers.drain(..) {
+                    if due <= now {
+                        let _ = tx.send(());
+                    } else {
+                        rest.push((due, tx));
+                    }
+                }
+                *timers = rest;
+                timers
+                    .iter()
+                    .map(|(due, _)| due.saturating_duration_since(now))
+                    .min()
+                    .unwrap_or(Duration::from_millis(100))
+                    .min(Duration::from_millis(100))
+            }
+            Err(_) => Duration::from_millis(100),
+        };
+        std::thread::sleep(wait);
+    }
 }
 
 /// Shared blocking session connection for outgoing traffic (tray clicks
