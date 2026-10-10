@@ -1190,10 +1190,11 @@ pub fn row<'a>(
     row.into()
 }
 
-/// The cursor point for tray surfaces in output-relative coordinates
-/// (what layer-shell margins need): window-relative cursor + the bar's
-/// offset inside its output (from the anchor).
-pub fn menu_point(panel: &crate::Panel) -> Option<(i32, i32)> {
+/// The cursor point for cursor-anchored surfaces (tray menu, sensor
+/// graph popup) in output-relative coordinates (what layer-shell
+/// margins need): window-relative cursor + the bar's offset inside its
+/// output (from the anchor).
+pub fn cursor_output_point(panel: &crate::Panel) -> Option<(i32, i32)> {
     let (cx, cy) = panel.last_cursor?;
     let thickness = crate::panel_thickness(&panel.config) as i32;
     let (sw, sh) = (
@@ -1213,10 +1214,10 @@ pub fn menu_point(panel: &crate::Panel) -> Option<(i32, i32)> {
 }
 
 /// Screen coordinates for an SNI activation hint (hints are advisory in
-/// the spec): the global form of `menu_point` — the output's position
-/// in the global layout added on top.
+/// the spec): the global form of `cursor_output_point` — the output's
+/// position in the global layout added on top.
 pub fn hint_point(panel: &crate::Panel) -> Option<(i32, i32)> {
-    let (mx, my) = menu_point(panel)?;
+    let (mx, my) = cursor_output_point(panel)?;
     let (ox, oy) = output_origin();
     Some((ox + mx, oy + my))
 }

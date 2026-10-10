@@ -148,6 +148,18 @@ drawn before its text, sized to the font and resolved under
 icon machinery stays dormant — no theme parsing, no file resolution, no
 memory — until at least one sensor declares an icon.
 
+A sensor can declare `"draw_graph": true`: hovering it opens a popup at
+the cursor showing the value's trend over the last two minutes (120
+samples at the tick rate), clamped on screen like the tray menu. Only
+sources with a numeric reading graph — the `perc_*` and `used_*` ones
+plus `temp_cpu`; on the others (`total_*`, `detail_*`, clock, uptime…)
+the toggle is inert. `used_*` graphs plot percent-of-total for
+mem/swap/disk/battery and the raw base unit (B/s) for the net rates,
+with the axis following the visible window (percentages keep 0–100). The history
+costs one dense buffer per opted-in sensor (about 500 B each) and
+nothing at all for the rest of the config; the toggle is editable in
+piuma-setup's sensor form (*Draw graph*) and absent = off.
+
 `panel.autostart: true` makes the bar launch, once at startup, the
 applications marked as autostart under the standard XDG directories —
 `$XDG_CONFIG_HOME/autostart` (default `~/.config/autostart`) and the

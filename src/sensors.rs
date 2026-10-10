@@ -27,9 +27,11 @@ fn proc_stat_cpu() -> Option<(u64, u64)> {
     Some((total, idle))
 }
 
-/// Get CPU load percentage between two /proc/stat samples (e.g. `4.8`).
-/// No external commands; None on the first tick, rendered as N/A.
-pub fn cpu_load() -> Option<String> {
+/// Get CPU load percentage between two /proc/stat samples as (text,
+/// value) (e.g. `4.8`): the one sampling call feeds both the bar and
+/// the graph engine — the delta is stateful and can only be consumed
+/// once per tick. No external commands; None on the first tick.
+pub fn cpu_load() -> Option<(String, f64)> {
     let (total, idle) = proc_stat_cpu()?;
     let now = Instant::now();
     let mut last = CPU_LAST.get_or_init(Default::default).lock().ok()?;
@@ -42,11 +44,12 @@ pub fn cpu_load() -> Option<String> {
     if dt < 0.2 || d_total == 0 {
         return None;
     }
-    Some(format!("{:.1}", (d_total - d_idle.min(d_total)) as f64 * 100.0 / d_total as f64))
+    let load = (d_total - d_idle.min(d_total)) as f64 * 100.0 / d_total as f64;
+    Some((format!("{load:.1}"), load))
 }
 
 /// GPU busy percentage from the amdgpu hwmon sysfs (AMD), if present.
-fn amdgpu_load() -> Option<String> {
+fn amdgpu_load() -> Option<f64> {
     let cards = fs::read_dir("/sys/class/drm").ok()?;
     for card in cards.flatten() {
         let name = card.file_name();
@@ -57,7 +60,7 @@ fn amdgpu_load() -> Option<String> {
         if let Ok(hwmons) = fs::read_dir(card.path().join("device").join("hwmon")) {
             for hwmon in hwmons.flatten() {
                 if let Some(v) = read_num(hwmon.path().join("gpu_busy_percent")) {
-                    return Some(v.to_string());
+                    return Some(v as f64);
                 }
             }
         }
@@ -65,10 +68,11 @@ fn amdgpu_load() -> Option<String> {
     None
 }
 
-/// Get GPU load percentage (e.g. `12`): NVIDIA via nvidia-smi, then the
-/// amdgpu sysfs counter (AMD); N/A elsewhere (e.g. Intel has no standard
-/// interface). No hard dependency on the NVIDIA driver.
-pub fn gpu_load() -> String {
+/// Get GPU load percentage (e.g. `12`) as (text, value): NVIDIA via
+/// nvidia-smi, then the amdgpu sysfs counter (AMD); None elsewhere
+/// (e.g. Intel has no standard interface). No hard dependency on the
+/// NVIDIA driver.
+pub fn gpu_load() -> Option<(String, f64)> {
     if let Ok(out) = Command::new("nvidia-smi")
         .args(["--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"])
         .output()
@@ -76,11 +80,13 @@ pub fn gpu_load() -> String {
         if out.status.success() {
             let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !value.is_empty() {
-                return value;
+                // A non-empty answer ends the search (no AMD fallback),
+                // as before; only a parseable one is a reading.
+                return value.parse::<f64>().ok().map(|perc| (value, perc));
             }
         }
     }
-    amdgpu_load().unwrap_or_else(|| "N/A".to_string())
+    amdgpu_load().map(|perc| (format!("{perc}"), perc))
 }
 
 /// Get system uptime (e.g. `up 3 hours, 0 minute`) from /proc/uptime,
@@ -255,20 +261,22 @@ fn parse_percent(value: &str) -> Option<f32> {
     value.trim().trim_end_matches('%').parse::<f32>().ok()
 }
 
-/// Get audio volume (e.g. `50`): tries amixer → wpctl → pactl (ALSA,
-/// PipeWire, PulseAudio) and remembers the first that works; empty
-/// device = Master (amixer control name; the other backends use the
-/// default sink).
-pub fn audio_volume(device: &str) -> String {
+/// Get audio volume as (text, percent value) (e.g. `50`): tries
+/// amixer → wpctl → pactl (ALSA, PipeWire, PulseAudio) and remembers
+/// the first that works; empty device = Master (amixer control name;
+/// the other backends use the default sink). The backends hand back
+/// the bare percent already, so the graph value is the same string
+/// parsed — a non-numeric answer counts as no reading (N/A).
+pub fn audio_volume(device: &str) -> Option<(String, f64)> {
     let device = volume_device(device);
     for backend in backend_order() {
         let value = backend.read(device);
         if value != "N/A" {
             cache_backend(backend);
-            return value;
+            return value.parse::<f64>().ok().map(|perc| (value, perc));
         }
     }
-    "N/A".to_string()
+    None
 }
 
 /// Serializes the read-modify-write of `adjust_volume` so concurrent
@@ -399,17 +407,24 @@ fn df_root() -> Option<Vec<String>> {
     if parts.len() >= 5 { Some(parts) } else { None }
 }
 
-/// Get disk usage percentage as a bare value (e.g. `66`; df's own
-/// `66%` column loses the suffix, roadmap2 #5).
-pub fn disk_usage() -> String {
-    df_root()
-        .map(|p| p[4].trim_end_matches('%').to_string())
-        .unwrap_or_else(|| "N/A".to_string())
+/// Get disk usage percentage as (text, bare value) (e.g. `66`); df's
+/// own `66%` column loses the suffix, roadmap2 #5. One `df` spawn
+/// feeds both the bar and the graph engine.
+pub fn disk_usage() -> Option<(String, f64)> {
+    df_root().and_then(|p| {
+        let bare = p[4].trim_end_matches('%').to_string();
+        let perc = bare.parse::<f64>().ok()?;
+        Some((bare, perc))
+    })
 }
 
-/// Get used disk space in human units (e.g. `619G`).
-pub fn disk_used() -> String {
-    df_root().map(|p| p[2].clone()).unwrap_or_else(|| "N/A".to_string())
+/// Get used disk space as (text, percent of total) (e.g. `619G`): the
+/// graph plots df's percent from the same spawn.
+pub fn disk_used() -> Option<(String, f64)> {
+    df_root().and_then(|p| {
+        let perc = p[4].trim_end_matches('%').parse::<f64>().ok()?;
+        Some((p[2].clone(), perc))
+    })
 }
 
 /// Get total disk size in human units (e.g. `950G`).
@@ -450,20 +465,28 @@ fn meminfo() -> Option<MemInfo> {
     })
 }
 
-/// Get memory usage percentage as a bare value (e.g. `41`, roadmap2 #5).
-pub fn mem_perc() -> String {
-    match meminfo() {
-        Some(m) if m.mem_total > 0 => format!("{}", (m.mem_total - m.mem_avail) * 100 / m.mem_total),
-        _ => "N/A".to_string(),
-    }
+/// Get memory usage percentage as (text, percent value) (e.g. `41`):
+/// one /proc/meminfo read feeds both the bar and the graph engine.
+pub fn mem_perc() -> Option<(String, f64)> {
+    meminfo().filter(|m| m.mem_total > 0).map(|m| {
+        let used = m.mem_total - m.mem_avail;
+        (
+            format!("{}", used * 100 / m.mem_total),
+            used as f64 * 100.0 / m.mem_total as f64,
+        )
+    })
 }
 
-/// Get used memory in MB (e.g. `13124 MB`).
-pub fn mem_used() -> String {
-    match meminfo() {
-        Some(m) if m.mem_total > 0 => format!("{} MB", (m.mem_total - m.mem_avail) / 1024),
-        _ => "N/A".to_string(),
-    }
+/// Get used memory as (text, percent of total) (e.g. `13124 MB`): the
+/// graph plots the share of the installed RAM from the same read.
+pub fn mem_used() -> Option<(String, f64)> {
+    meminfo().filter(|m| m.mem_total > 0).map(|m| {
+        let used = m.mem_total - m.mem_avail;
+        (
+            format!("{} MB", used / 1024),
+            used as f64 * 100.0 / m.mem_total as f64,
+        )
+    })
 }
 
 /// Get total memory in MB (e.g. `31808 MB`).
@@ -474,20 +497,28 @@ pub fn mem_total() -> String {
     }
 }
 
-/// Get swap usage percentage as a bare value (e.g. `12`, roadmap2 #5).
-pub fn swap_perc() -> String {
-    match meminfo() {
-        Some(m) if m.swap_total > 0 => format!("{}", (m.swap_total - m.swap_free) * 100 / m.swap_total),
-        _ => "N/A".to_string(),
-    }
+/// Get swap usage percentage as (text, percent value) (e.g. `12`):
+/// one /proc/meminfo read feeds both the bar and the graph engine.
+pub fn swap_perc() -> Option<(String, f64)> {
+    meminfo().filter(|m| m.swap_total > 0).map(|m| {
+        let used = m.swap_total - m.swap_free;
+        (
+            format!("{}", used * 100 / m.swap_total),
+            used as f64 * 100.0 / m.swap_total as f64,
+        )
+    })
 }
 
-/// Get used swap in MB (e.g. `3740 MB`).
-pub fn swap_used() -> String {
-    match meminfo() {
-        Some(m) if m.swap_total > 0 => format!("{} MB", (m.swap_total - m.swap_free) / 1024),
-        _ => "N/A".to_string(),
-    }
+/// Get used swap as (text, percent of total) (e.g. `3740 MB`): the
+/// graph plots the share of the swap from the same read.
+pub fn swap_used() -> Option<(String, f64)> {
+    meminfo().filter(|m| m.swap_total > 0).map(|m| {
+        let used = m.swap_total - m.swap_free;
+        (
+            format!("{} MB", used / 1024),
+            used as f64 * 100.0 / m.swap_total as f64,
+        )
+    })
 }
 
 /// Get total swap in MB (e.g. `31807 MB`).
@@ -559,19 +590,28 @@ fn battery_levels() -> Option<(f64, f64, &'static str, usize)> {
     }
 }
 
-/// Get battery charge percentage as a bare value (e.g. `80`, roadmap2 #5).
-pub fn battery_perc() -> String {
+/// Get battery charge as (text, percent value) (e.g. `80`): one sysfs
+/// read feeds both the bar and the graph engine.
+pub fn battery_perc() -> Option<(String, f64)> {
     match battery_levels() {
-        Some((now, full, _, _)) if full > 0.0 => format!("{:.0}", now * 100.0 / full),
-        _ => "N/A".to_string(),
+        Some((now, full, _, _)) if full > 0.0 => {
+            let perc = now * 100.0 / full;
+            Some((format!("{perc:.0}"), perc))
+        }
+        _ => None,
     }
 }
 
-/// Get current battery energy/charge (e.g. `64.0 Wh`).
-pub fn battery_used() -> String {
+/// Get current battery energy/charge as (text, percent of full)
+/// (e.g. `64.0 Wh`); the graph needs a full > 0 (a battery that can't
+/// report its capacity has no share to plot, `battery_perc`'s rule).
+pub fn battery_used() -> Option<(String, f64)> {
     match battery_levels() {
-        Some((now, _, unit, decimals)) => format!("{:.*} {}", decimals, now, unit),
-        _ => "N/A".to_string(),
+        Some((now, full, unit, decimals)) if full > 0.0 => Some((
+            format!("{:.*} {}", decimals, now, unit),
+            now * 100.0 / full,
+        )),
+        _ => None,
     }
 }
 
@@ -583,23 +623,24 @@ pub fn battery_total() -> String {
     }
 }
 
-/// Get backlight brightness percentage as a bare value (e.g. `31`,
-/// roadmap2 #5) from the first
-/// backlight device under /sys/class/backlight.
-pub fn backlight_perc() -> String {
-    let Ok(dir) = fs::read_dir("/sys/class/backlight") else {
-        return "N/A".to_string();
-    };
+/// Get backlight brightness as (text, percent value) (e.g. `31`,
+/// roadmap2 #5) from the first backlight device under
+/// /sys/class/backlight: one read feeds the bar and the graph engine.
+pub fn backlight_perc() -> Option<(String, f64)> {
+    let dir = fs::read_dir("/sys/class/backlight").ok()?;
     for entry in dir.flatten() {
         let base = entry.path();
         if let (Some(cur), Some(max)) = (read_num(base.join("brightness")), read_num(base.join("max_brightness")))
         {
             if max > 0 {
-                return format!("{}", cur * 100 / max);
+                return Some((
+                    format!("{}", cur * 100 / max),
+                    cur as f64 * 100.0 / max as f64,
+                ));
             }
         }
     }
-    "N/A".to_string()
+    None
 }
 
 // ── temperature (hwmon / thermal zone) ──────────────────────────────
@@ -630,19 +671,18 @@ fn thermal_zone_temp(zone_type: &str) -> Option<u64> {
     None
 }
 
-/// Get CPU temperature (e.g. `61°C`): hwmon first — Intel `coretemp`,
-/// AMD `k10temp` or `zenpower` (temp1 = Tctl/package) — then the
-/// `x86_pkg_temp` thermal zone; N/A when none of them exists.
-pub fn cpu_temp() -> String {
+/// Get CPU temperature as (text, value in °C) (e.g. `61°C`): hwmon
+/// first — Intel `coretemp`, AMD `k10temp` or `zenpower` (temp1 =
+/// Tctl/package) — then the `x86_pkg_temp` thermal zone; None when
+/// none of them exists. The text truncates to whole degrees, the graph
+/// keeps the decimals.
+pub fn cpu_temp() -> Option<(String, f64)> {
     for dev in ["coretemp", "k10temp", "zenpower"] {
         if let Some(t) = hwmon_temp(dev, "temp1_input") {
-            return format!("{}°C", t / 1000);
+            return Some((format!("{}°C", t / 1000), t as f64 / 1000.0));
         }
     }
-    if let Some(t) = thermal_zone_temp("x86_pkg_temp") {
-        return format!("{}°C", t / 1000);
-    }
-    "N/A".to_string()
+    thermal_zone_temp("x86_pkg_temp").map(|t| (format!("{}°C", t / 1000), t as f64 / 1000.0))
 }
 
 // ── network rates ───────────────────────────────────────────────────
@@ -746,16 +786,17 @@ pub fn net_rate_samples() -> Vec<String> {
     samples
 }
 
-/// Get network download rate (fixed-width format, e.g. `   1.4 MB/s`);
-/// `N/A` on the first tick.
-pub fn net_down(interface: &str) -> String {
-    net_rate(interface, false).map(fmt_rate).unwrap_or_else(|| "N/A".to_string())
+/// Get network download rate as (text, bytes/s) (fixed-width format,
+/// e.g. `   1.4 MB/s`); None on the first tick — the graph plots the
+/// raw B/s of the same sample.
+pub fn net_down(interface: &str) -> Option<(String, f64)> {
+    net_rate(interface, false).map(|rate| (fmt_rate(rate), rate))
 }
 
-/// Get network upload rate (fixed-width format, e.g. ` 812.0 B/s`);
-/// `N/A` on the first tick.
-pub fn net_up(interface: &str) -> String {
-    net_rate(interface, true).map(fmt_rate).unwrap_or_else(|| "N/A".to_string())
+/// Get network upload rate as (text, bytes/s) (fixed-width format,
+/// e.g. ` 812.0 B/s`); None on the first tick.
+pub fn net_up(interface: &str) -> Option<(String, f64)> {
+    net_rate(interface, true).map(|rate| (fmt_rate(rate), rate))
 }
 
 #[cfg(test)]

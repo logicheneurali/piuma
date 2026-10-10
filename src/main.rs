@@ -34,6 +34,7 @@ mod app_theme;
 mod autostart;
 mod config;
 mod dbusmenu;
+mod graphs;
 mod icons;
 mod notifications;
 mod sensor_runner;
@@ -76,6 +77,13 @@ const POPUP_WIDTH: u32 = 360;
 const POPUP_CARD_GAP: u32 = 8;
 /// Gap between the screen edges and the popup corner.
 const POPUP_MARGIN: i32 = 8;
+
+// ── sensor graph popup geometry (roadmap2 #11) ──────────────────────
+// One popup at a time, on the sensor under the cursor: fixed size, the
+// surface ends where the box ends (no input-region games — the layout
+// below knows nothing of it, the popup is its own window).
+const GRAPH_POPUP_W: u32 = 260;
+const GRAPH_POPUP_H: u32 = 140;
 
 // ── tray menu geometry ──────────────────────────────────────────────
 // One row per entry, sized exactly (`menu_row_h` × count + 2× pad, see
@@ -179,6 +187,14 @@ struct Panel {
     /// Bumped by every tray press: a `TrayMenuLoaded` carrying an older
     /// generation belongs to a superseded press and must not open.
     tray_menu_gen: u64,
+    /// Trend history for the `draw_graph` sensors' hover popup: one
+    /// dense ring of samples per config, rebuilt on reload (see
+    /// `graphs`).
+    graphs: graphs::History,
+    /// Open graph popup: its surface id, the sensor it draws and the
+    /// output-space rect the hover guards compare the cursor with,
+    /// `None` while hidden.
+    graph_popup: Option<GraphPopup>,
     /// Wallpaper windows (roadmap2 #1): one background surface per
     /// active output, keyed by the compositor's output name; empty
     /// while the wallpaper is off.
@@ -194,6 +210,17 @@ struct TrayMenu {
     path: String,
     menu_path: String,
     entries: Vec<dbusmenu::MenuEntry>,
+}
+
+/// The open sensor-graph popup: which sensor's trend it draws and the
+/// output-space rect `(x0, y0, x1, y1)` it occupies (placement of the
+/// moment, for the hover guards).
+#[derive(Clone)]
+struct GraphPopup {
+    id: iced::window::Id,
+    section: usize,
+    sensor: usize,
+    rect: (i32, i32, i32, i32),
 }
 
 // ── messages ────────────────────────────────────────────────────────
@@ -240,6 +267,9 @@ enum Message {
     TrayMenuLeave(i32),
     /// The cursor left the menu surface: dismiss it.
     TrayMenuClosed,
+    /// The cursor left the graph popup: dismiss it unless the cursor
+    /// went back to its own sensor (the popup follows the hover).
+    GraphPopupExited,
     /// Click on a popup card: run its spec `default` action, dismiss it.
     PopupCardClicked(u32),
     /// Click on a popup card's ✕: dismiss it only (spec reason 2).
@@ -503,6 +533,9 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             if let Some((reloaded, path)) = maybe_reload(panel) {
                 config_reloaded = true;
                 panel.config = reloaded;
+                // The graph history follows the new sensor set: one
+                // ring per `draw_graph` column of the new config.
+                panel.graphs = graphs::History::new(&panel.config.panel.sections);
                 // Roadmap N3: keep the generated GTK bridge in step with
                 // hot reloads (rewritten only when its content changes).
                 app_theme::sync(std::path::Path::new(&path), &panel.config.panel);
@@ -525,6 +558,10 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             // (it spawns `gsettings`), no file resolution, no cache entries.
             let icon_theme = icons_theme(&panel.config);
 
+            // Samples of this tick for the graph history (one read per
+            // sensor, collected here so the closure and the history
+            // never borrow the panel at once).
+            let mut graph_samples: Vec<((usize, usize), f64)> = Vec::new();
             let mut sections: Vec<SectionData> = Vec::new();
             for (section_idx, section_cfg) in panel.config.panel.sections.iter().enumerate() {
                 let section_default_txt = panel.config.panel.default_text_color
@@ -546,8 +583,18 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                 let sensors: Vec<SensorValue> = section_cfg
                     .sensors
                     .iter()
-                    .map(|s| {
-                        let value = sensor_runner::run(&s.source);
+                    .enumerate()
+                    .map(|(sensor_idx, s)| {
+                        let read = sensor_runner::run(&s.source);
+                        // Graph engine: record this tick's sample for the
+                        // sensors that opted in (`draw_graph` on a
+                        // graphable source); the columns ignore the rest.
+                        if s.draw_graph {
+                            if let Some((sample, _)) = read.graph {
+                                graph_samples.push(((section_idx, sensor_idx), sample));
+                            }
+                        }
+                        let value = read.text;
                         // Tray sensors render icons from the shared tray state
                         // (tray.rs) instead of text.
                         let tray_icons =
@@ -736,6 +783,9 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                 });
             }
             panel.sections = sections;
+            // One ring advance per tick: columns repeat their last value
+            // when a reading was missing (time stays uniform).
+            panel.graphs.record(&graph_samples);
             // Icons size to the space their sensor box really has; both the
             // view and the icon resolution read tray::icon_target.
             update_tray_icon_target(panel);
@@ -760,6 +810,13 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                         id: bar_id,
                         zone_size: panel.last_exclusive_zone,
                     }));
+                }
+            }
+            // An open graph popup dies with a reload too: its columns
+            // were rebuilt underneath it (and its sensor may be gone).
+            if config_reloaded {
+                if let Some(gp) = panel.graph_popup.take() {
+                    cmds.push(iced::window::close(gp.id));
                 }
             }
             // The popup follows the active set (and re-anchors with the
@@ -853,7 +910,7 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                 tray::ClickTarget::Menu => {
                     // Menu path or cursor missing → the spec call is the
                     // only fallback left (its failure gets logged).
-                    match (tray::menu_path(&bus, &path), tray::menu_point(panel)) {
+                    match (tray::menu_path(&bus, &path), tray::cursor_output_point(panel)) {
                         (Some(menu_path), Some(at)) => {
                             let (b, p, m) = (bus.clone(), path.clone(), menu_path.clone());
                             cmds.push(Command::perform(
@@ -1067,7 +1124,23 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             } else if panel.hovered == Some((section_index, sensor_index)) {
                 panel.hovered = None;
             }
-            Command::none()
+            graph_hover_sync(panel, section_index, sensor_index, hovered)
+        }
+        Message::GraphPopupExited => {
+            // The cursor is back on the popup's sensor: it stays (the
+            // popup re-anchors when the sensor is entered again).
+            let on_sensor = panel
+                .graph_popup
+                .as_ref()
+                .is_some_and(|gp| panel.hovered == Some((gp.section, gp.sensor)));
+            if on_sensor {
+                return Command::none();
+            }
+            if let Some(gp) = panel.graph_popup.take() {
+                iced::window::close(gp.id)
+            } else {
+                Command::none()
+            }
         }
         _ => Command::none(),
     }
@@ -1181,6 +1254,11 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
     if let Some((id, _)) = panel.tray_menu.as_ref() {
         if *id == window {
             return tray_menu_view(panel);
+        }
+    }
+    if let Some(gp) = panel.graph_popup.as_ref() {
+        if gp.id == window {
+            return graph_popup_view(panel, gp);
         }
     }
     if panel.popup == Some(window) {
@@ -2541,7 +2619,7 @@ fn fit_menu_labels(entries: &mut [dbusmenu::MenuEntry], w: u32, font: &Font, fon
 /// screen (the 116-row Cachy-Update menu used to open with its base at
 /// the top bar and ~2300 px of it above the screen). The caller uses
 /// `OutputOption::LastOutput`, the same output `SCREEN_WIDTH/HEIGHT`
-/// and `tray::menu_point` refer to.
+/// and `tray::cursor_output_point` refer to.
 fn menu_placement(x: i32, y: i32, w: u32, h: u32, sw: i32, sh: i32) -> (Anchor, Margin) {
     let (w, h) = (w as i32, h as i32);
     // Fits: anchored at the point. Overflows: the far edge sticks to the
@@ -2567,6 +2645,173 @@ fn menu_placement(x: i32, y: i32, w: u32, h: u32, sw: i32, sh: i32) -> (Anchor, 
             left,
         },
     )
+}
+
+/// Keep the hover graph popup in step with a sensor hover: it opens at
+/// the cursor (same output-clamped placement as the tray menu) when
+/// the sensor opted in with `draw_graph` on a graphable source. On
+/// leave it closes only when the cursor sits outside the popup rect —
+/// right after opening the surface maps **under the cursor** and steals
+/// the pointer from the bar, and that leave must not close it (every
+/// other departure either clears the rect test or is caught by the
+/// popup's own `GraphPopupExited`).
+fn graph_hover_sync(
+    panel: &mut Panel,
+    section: usize,
+    sensor: usize,
+    hovered: bool,
+) -> Command<Message> {
+    let showing = panel
+        .graph_popup
+        .as_ref()
+        .is_some_and(|gp| (gp.section, gp.sensor) == (section, sensor));
+    if !hovered {
+        if showing && !cursor_in_graph_popup(panel) {
+            let gp = panel.graph_popup.take().expect("showing");
+            return iced::window::close(gp.id);
+        }
+        return Command::none();
+    }
+    if showing {
+        return Command::none(); // this sensor is already on screen
+    }
+    // Opted in? The samples themselves arrive with the ticks.
+    let opted_in = panel
+        .config
+        .panel
+        .sections
+        .get(section)
+        .and_then(|sec| sec.sensors.get(sensor))
+        .is_some_and(|s| s.draw_graph && graphs::scale_of(&s.source).is_some());
+    if !opted_in {
+        return Command::none();
+    }
+    let mut cmds: Vec<Command<Message>> = Vec::new();
+    // Crossing between two graph sensors: the old surface dies with its
+    // own leave events too, but closing here keeps the order definite.
+    if let Some(old) = panel.graph_popup.take() {
+        cmds.push(iced::window::close(old.id));
+    }
+    let Some((x, y)) = tray::cursor_output_point(panel) else {
+        return Command::batch(cmds);
+    };
+    let (sw, sh) = unsafe { (SCREEN_WIDTH as i32, SCREEN_HEIGHT as i32) };
+    let (anchor, margin) = menu_placement(x, y, GRAPH_POPUP_W, GRAPH_POPUP_H, sw, sh);
+    let rect = placement_rect(anchor, &margin, GRAPH_POPUP_W, GRAPH_POPUP_H, sw, sh);
+    let (id, open) = Message::layershell_open(NewLayerShellSettings {
+        size: LayerSize::px(GRAPH_POPUP_W, GRAPH_POPUP_H),
+        layer: Layer::Overlay,
+        anchor,
+        exclusive_zone: None,
+        margin: Some(margin),
+        keyboard_interactivity: KeyboardInteractivity::None,
+        output_option: OutputOption::LastOutput,
+        namespace: Some("piuma-graph".to_string()),
+        ..Default::default()
+    });
+    panel.graph_popup = Some(GraphPopup {
+        id,
+        section,
+        sensor,
+        rect,
+    });
+    cmds.push(open);
+    Command::batch(cmds)
+}
+
+/// Output-space rect `(x0, y0, x1, y1)` of a surface placed by
+/// `menu_placement`: the anchored side starts at its margin, the
+/// flipped side's margin pins the far edge to the output.
+fn placement_rect(anchor: Anchor, margin: &Margin, w: u32, h: u32, sw: i32, sh: i32) -> (i32, i32, i32, i32) {
+    let (w, h) = (w as i32, h as i32);
+    let (x0, x1) = if anchor.contains(Anchor::Left) {
+        (margin.left, margin.left + w)
+    } else {
+        (sw - margin.right - w, sw - margin.right)
+    };
+    let (y0, y1) = if anchor.contains(Anchor::Top) {
+        (margin.top, margin.top + h)
+    } else {
+        (sh - margin.bottom - h, sh - margin.bottom)
+    };
+    (x0, y0, x1, y1)
+}
+
+/// Whether the cursor sits inside the open graph popup's rect.
+fn cursor_in_graph_popup(panel: &Panel) -> bool {
+    let Some((x, y)) = tray::cursor_output_point(panel) else {
+        return false;
+    };
+    panel
+        .graph_popup
+        .as_ref()
+        .is_some_and(|gp| x >= gp.rect.0 && x < gp.rect.2 && y >= gp.rect.1 && y < gp.rect.3)
+}
+
+/// The hover graph popup: the sensor's name and current value over its
+/// trend line, inside the shared popup box (the notification cards'
+/// style, same as the tray menu). The whole surface is one MouseArea
+/// whose exit reports the departure to `GraphPopupExited`.
+fn graph_popup_view<'a>(panel: &'a Panel, gp: &GraphPopup) -> Element<'a, Message> {
+    let st = popup_style(&panel.config);
+    let font = panel_font(&panel.config);
+    let sensor = panel
+        .sections
+        .get(gp.section)
+        .and_then(|sec| sec.sensors.get(gp.sensor));
+    let (name, current, color) = match sensor {
+        Some(s) => (
+            s.name.clone(),
+            s.value.clone(),
+            s.text_color.unwrap_or(st.text),
+        ),
+        // The sensor died under the popup (its exit will follow): keep
+        // the box empty rather than missing layers.
+        None => (String::new(), "N/A".to_string(), st.text),
+    };
+    let (scale, samples) = panel
+        .graphs
+        .window(gp.section, gp.sensor)
+        .unwrap_or((graphs::Scale::Auto, Vec::new()));
+    let header: Element<'_, Message> = Row::new()
+        .push(
+            text(name)
+                .size(st.font_size)
+                .color(st.text)
+                .font(font.clone())
+                .wrapping(iced::widget::text::Wrapping::None)
+                .width(Length::Fill),
+        )
+        .push(text(current).size(st.font_size).color(color).font(font))
+        .align_y(Alignment::Center)
+        .spacing(8)
+        .width(Length::Fill)
+        .into();
+    let content: Element<'_, Message> = Column::new()
+        .push(header)
+        .push(graphs::widget(samples, scale, color))
+        .spacing(6)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into();
+    let surface = styled_box(
+        container(content)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(iced::Padding::from(st.padding as f32))
+            .into(),
+        Some(st.bg),
+        Some(st.border),
+        st.border_width.min(u16::MAX as u32) as u16,
+        st.border_radius.min(u16::MAX as u32) as u16,
+        &st.border_type,
+        [false, false, false, false],
+        // The content carries the padding; the box only draws its border.
+        0,
+        Length::Fill,
+        Length::Fill,
+    );
+    MouseArea::new(surface).on_exit(Message::GraphPopupExited).into()
 }
 
 /// The tray menu surface: one row per entry inside the styled box
@@ -2911,6 +3156,7 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                     let size = panel_size(&cfg, unsafe { SCREEN_WIDTH }, unsafe { SCREEN_HEIGHT });
                     let anchor = panel_anchor(&cfg);
                     let zone = panel_thickness(&cfg) as i32;
+                    let graphs = graphs::History::new(&cfg.panel.sections);
                     Panel {
                         config: cfg,
                         sections: Vec::new(),
@@ -2926,6 +3172,8 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         tray_menu: None,
                         tray_menu_hover: None,
                         tray_menu_gen: 0,
+                        graphs,
+                        graph_popup: None,
                         wallpaper: Vec::new(),
                     }
                 },
