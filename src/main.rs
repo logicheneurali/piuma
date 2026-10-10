@@ -94,6 +94,13 @@ const GRAPH_SPACING: u32 = 6;
 /// tick): long enough to cross the gap under the bar, short enough to
 /// not linger.
 const GRAPH_ABANDON_GRACE: u8 = 2;
+/// Alpha of the tinted plate behind the average label: opaque enough
+/// to hold the text where it crosses the trend line, translucent
+/// enough to keep the guide visible through it.
+const LABEL_BG_ALPHA: f32 = 0.7;
+/// The plate's padding around the average label (v, h).
+const LABEL_PAD_V: f32 = 1.0;
+const LABEL_PAD_H: f32 = 4.0;
 
 // ── tray menu geometry ──────────────────────────────────────────────
 // One row per entry, sized exactly (`menu_row_h` × count + 2× pad, see
@@ -2910,23 +2917,39 @@ fn graph_popup_view<'a>(panel: &'a Panel, gp: &GraphPopup) -> Element<'a, Messag
                 .and_then(|sec| sec.sensors.get(gp.sensor))
                 .map(|s| graphs::unit_of(&s.source))
                 .unwrap_or("");
-            // Line-height estimate: the label centres on the guide.
-            let label_h = st.font_size as f32 * 1.2;
-            let label: Element<'_, Message> = container(
+            // The label rides centred on the guide, on a tinted plate
+            // that keeps it readable where it crosses the trend line
+            // (line-height estimate + the plate's own padding).
+            let label_h = st.font_size as f32 * 1.2 + 2.0 * LABEL_PAD_V;
+            let plate = container(
                 text(graphs::avg_label(avg, unit))
                     .size(st.font_size.saturating_sub(1).max(8))
                     .color(color),
             )
-            .width(Length::Fill)
-            .height(Length::Fixed(graph_h))
-            .align_x(Alignment::End)
-            .padding(iced::Padding {
-                top: (y - label_h / 2.0).clamp(0.0, (graph_h - label_h).max(0.0)),
-                right: 4.0,
-                bottom: 0.0,
-                left: 0.0,
+            .style(move |_theme: &iced::Theme| ContainerStyle {
+                background: Some(Background::Color(Color {
+                    a: LABEL_BG_ALPHA,
+                    ..st.bg
+                })),
+                ..ContainerStyle::default()
             })
-            .into();
+            .padding(iced::Padding {
+                top: LABEL_PAD_V,
+                bottom: LABEL_PAD_V,
+                left: LABEL_PAD_H,
+                right: LABEL_PAD_H,
+            });
+            let label: Element<'_, Message> = container(plate)
+                .width(Length::Fill)
+                .height(Length::Fixed(graph_h))
+                .align_x(Alignment::Center)
+                .padding(iced::Padding {
+                    top: (y - label_h / 2.0).clamp(0.0, (graph_h - label_h).max(0.0)),
+                    right: 0.0,
+                    bottom: 0.0,
+                    left: 0.0,
+                })
+                .into();
             Stack::with_children([graph_box, label])
                 .width(Length::Fill)
                 .height(Length::Fixed(graph_h))
