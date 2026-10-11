@@ -35,9 +35,35 @@ fn measured(text: String, source: &SensorSource, value: f64) -> Read {
 /// An optional reading rendered as `N/A` when absent.
 fn optional(reading: Option<(String, f64)>, source: &SensorSource) -> Read {
     match reading {
-        Some((text, value)) => measured(text, source, value),
+        Some((text, value)) => {
+            // perc_ — the bar text carries the `%` symbol (an answer
+            // that already ends in it is not doubled); the number that
+            // feeds the graph keeps its bare value.
+            let text = if is_percent(source) && !text.ends_with('%') {
+                format!("{text}%")
+            } else {
+                text
+            };
+            measured(text, source, value)
+        }
         None => plain("N/A".to_string()),
     }
+}
+
+/// Whether a source's reading is a percentage: the family whose bar
+/// text carries the `%` symbol.
+fn is_percent(source: &SensorSource) -> bool {
+    matches!(
+        source,
+        SensorSource::PercCpu {}
+            | SensorSource::PercGpu {}
+            | SensorSource::PercMem {}
+            | SensorSource::PercSwap {}
+            | SensorSource::PercDisk {}
+            | SensorSource::PercBattery {}
+            | SensorSource::PercBacklight {}
+            | SensorSource::PercVolume { .. }
+    )
 }
 
 /// Run a sensor source and return its value (text + optional sample).
@@ -101,5 +127,34 @@ pub fn run(source: &SensorSource) -> Read {
         SensorSource::Tray {} => plain(String::new()),
         // Newest active notification's summary (see `notifications.rs`).
         SensorSource::Notifications {} => plain(notifications::display_value()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// perc_ readings carry the `%` symbol in their bar text; the
+    /// number that feeds the graph keeps its bare value, other sources
+    /// and the `N/A` fallback don't change, and an answer that already
+    /// ends in `%` is not doubled.
+    #[test]
+    fn percent_readings_carry_the_symbol() {
+        let cpu = optional(Some(("5".into(), 5.5)), &SensorSource::PercCpu {});
+        assert_eq!(cpu.text, "5%");
+        assert_eq!(cpu.graph.map(|(v, _)| v), Some(5.5), "the sample stays bare");
+
+        let mem = optional(Some(("5".into(), 5.0)), &SensorSource::UsedMem {});
+        assert_eq!(mem.text, "5");
+
+        assert_eq!(optional(None, &SensorSource::PercMem {}).text, "N/A");
+
+        let vol = optional(
+            Some(("70%".into(), 70.0)),
+            &SensorSource::PercVolume {
+                device: String::new(),
+            },
+        );
+        assert_eq!(vol.text, "70%", "already suffixed: no doubling");
     }
 }
