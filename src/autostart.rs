@@ -8,6 +8,7 @@
 //! a user file overriding the system file with the same name.
 
 use std::collections::BTreeMap;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -244,13 +245,56 @@ fn strip_field_codes(exec: &str) -> String {
 
 /// The program an `Exec` line runs: the first token of the cleaned line,
 /// honouring double quotes — it is what the running-check compares.
+/// A `sh -c "…"` wrapper is seen through (the spec forbids none, and
+/// matching against the generic `sh` would match any shell alive in the
+/// session — at boot there always is one, which is exactly how the
+/// tray applet entry used to be skipped): the command inside `-c`
+/// decides, and in a `&&`/`;`/`||` chain its LAST segment — the earlier
+/// ones are setup (`sleep 3 && arch-update --tray`).
 fn program_of(exec: &str) -> String {
     let exec = exec.trim_start();
+    if let Some(inner) = shell_c_arg(exec) {
+        let last = chain_last(&inner);
+        let last = last.strip_prefix("exec ").unwrap_or(last);
+        if !last.is_empty() && last != exec {
+            return program_of(last);
+        }
+    }
     if let Some(rest) = exec.strip_prefix('"') {
         let end = rest.find('"').unwrap_or(rest.len());
         return rest[..end].to_string();
     }
     exec.split_whitespace().next().unwrap_or("").to_string()
+}
+
+/// Shells whose `-c` argument carries the real command line.
+const SHELLS: &[&str] = &["sh", "bash", "dash", "ksh", "zsh", "fish", "ash"];
+
+/// The `-c` argument of a `<shell> -c "…"` wrapper (quotes stripped),
+/// or `None` when `exec` is not that shape.
+fn shell_c_arg(exec: &str) -> Option<String> {
+    let exec = exec.trim_start();
+    let shell = exec.split_whitespace().next()?;
+    let base = Path::new(shell).file_name()?.to_string_lossy();
+    if !SHELLS.contains(&base.as_ref()) {
+        return None;
+    }
+    // The rest of the line after the shell token, then the `-c` flag.
+    let arg = exec[shell.len()..].trim_start().strip_prefix("-c")?.trim_start();
+    let arg = arg.strip_prefix('"').unwrap_or(arg);
+    let arg = arg.strip_suffix('"').unwrap_or(arg);
+    let arg = arg.strip_prefix('\'').unwrap_or(arg);
+    let arg = arg.strip_suffix('\'').unwrap_or(arg);
+    (!arg.is_empty()).then(|| arg.to_string())
+}
+
+/// The last `&&`/`;`/`||` segment of a `-c` command line: the part that
+/// persists (the earlier ones are setup steps).
+fn chain_last(cmd: &str) -> &str {
+    cmd.rsplit(|c| c == '&' || c == ';' || c == '|')
+        .map(str::trim)
+        .find(|s| !s.is_empty())
+        .unwrap_or(cmd)
 }
 
 /// True when `program` is piuma itself: a stray `piuma.desktop` in the
@@ -264,8 +308,11 @@ fn is_self(program: &str) -> bool {
     matches!((&exe_name, &prog_name), (Some(a), Some(b)) if a == b)
 }
 
-/// "se non già in esecuzione": scan `/proc/*/cmdline` for a process
-/// whose first argument has the same name as `program`.
+/// "se non già in esecuzione": scan OUR processes for one whose first
+/// argument has the same name as `program`. `/proc` sees the whole
+/// system, so the uid filter matters: a root service (or anything else
+/// of another user) is never "the app already running" for this
+/// session's autostart.
 fn already_running(program: &str) -> bool {
     let Some(want) = Path::new(program)
         .file_name()
@@ -273,10 +320,19 @@ fn already_running(program: &str) -> bool {
     else {
         return false;
     };
+    let me = std::fs::metadata("/proc/self")
+        .ok()
+        .map(|m| m.uid());
     let Ok(entries) = std::fs::read_dir("/proc") else { return false };
     for entry in entries.flatten() {
         if !entry.file_name().to_string_lossy().chars().all(|c| c.is_ascii_digit()) {
             continue;
+        }
+        if let Some(me) = me {
+            let Ok(meta) = std::fs::metadata(entry.path()) else { continue };
+            if meta.uid() != me {
+                continue;
+            }
         }
         let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) else { continue };
         let Some(first) = cmdline.split(|b| *b == 0).next().filter(|s| !s.is_empty()) else {
@@ -499,6 +555,24 @@ mod tests {
         assert_eq!(program_of(r#""/usr/bin/my app" %f"#), "/usr/bin/my app");
         assert_eq!(strip_field_codes("app %%literal %i"), "app %literal");
         assert_eq!(strip_field_codes("app %"), "app %");
+    }
+
+    /// A `sh -c "…"` wrapper resolves to the real program — the chain's
+    /// last command — never the generic shell: matching `sh` would match
+    /// any shell alive in the session (at boot: always one), which is
+    /// how the tray applet entry used to be skipped on a cold start.
+    #[test]
+    fn shell_wrappers_resolve_to_the_real_program() {
+        assert_eq!(
+            program_of(r#"/bin/sh -c "sleep 3 && arch-update --tray""#),
+            "arch-update"
+        );
+        assert_eq!(program_of("sh -c foo"), "foo");
+        assert_eq!(program_of(r#"bash -c "exec bar""#), "bar");
+        assert_eq!(program_of(r#"sh -c "sh -c nested""#), "nested");
+        // Not a wrapper: unchanged.
+        assert_eq!(program_of("sh myscript.sh"), "sh");
+        assert_eq!(program_of("notashell -c foo"), "notashell");
     }
 
     /// The spec filters decide visibility: hidden, the GNOME switch and
