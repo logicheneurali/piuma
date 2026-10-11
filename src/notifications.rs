@@ -32,9 +32,12 @@ use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 use iced::futures::channel::mpsc::Sender;
+use iced::futures::stream::StreamExt;
 use iced::Subscription;
 use zbus::fdo::RequestNameFlags;
 use zbus::object_server::SignalEmitter;
+use zbus::proxy::{Builder, CacheProperties};
+use zbus::Proxy;
 use zbus::zvariant::{OwnedValue, Value};
 use zbus::Connection;
 
@@ -647,12 +650,16 @@ pub fn subscription() -> Subscription<Message> {
     Subscription::run(|| iced::stream::channel(64, run))
 }
 
-/// Own the name or give up for good (the activator must not be fought);
-/// a transport error retries after 5 s like the tray does.
+/// Own the name, or watch the current owner and take over the moment
+/// the name leaves the bus (the previous piuma, mid-replacement, still
+/// holds it for the few milliseconds of its death — skipping for good,
+/// as v1 did, left the notification server dead until the next bar
+/// restart); a transport error retries after 5 s like the tray does.
 async fn run(sender: Sender<Message>) {
     loop {
         match drive(&sender).await {
-            Ok(()) => return,
+            // The watched owner left the bus: retry the claim right away.
+            Ok(()) => {}
             Err(e) => {
                 eprintln!("[piuma] notifications: D-Bus error: {e}; retrying in 5 s");
                 crate::tray::delay(Duration::from_secs(5)).await;
@@ -677,17 +684,37 @@ async fn drive(sender: &Sender<Message>) -> zbus::Result<()> {
             zbus::fdo::RequestNameReply::PrimaryOwner
             | zbus::fdo::RequestNameReply::AlreadyOwner,
         ) => {}
-        // Another server owns it (or its activator already started one):
-        // log and skip — v1 never replaces the name.
+        // Another server owns it (often the previous piuma, mid-replacement):
+        // watch for the name to leave the bus and let `run` retry; a
+        // surviving owner is never fought.
         Err(zbus::Error::NameTaken) => {
-            eprintln!("[piuma] notifications: {NOTIF_NAME} owned elsewhere — server skipped");
-            return Ok(());
+            eprintln!("[piuma] notifications: {NOTIF_NAME} owned elsewhere — waiting");
+            return watch_name(&conn).await;
         }
         Err(e) => return Err(e),
         Ok(_) => return Ok(()),
     }
     eprintln!("[piuma] notifications: server up ({NOTIF_NAME})");
     serve(&conn, sender).await
+}
+
+/// Resolves when the notification name's owner leaves the bus (or the
+/// owner stream ends) — `run` then retries the claim.
+async fn watch_name(conn: &Connection) -> zbus::Result<()> {
+    let proxy = Builder::<Proxy>::new(conn)
+        .destination(NOTIF_NAME)?
+        .path(NOTIF_PATH)?
+        .interface(NOTIF_IFACE)?
+        .cache_properties(CacheProperties::No)
+        .build()
+        .await?;
+    let mut owner = proxy.receive_owner_changed().await?;
+    loop {
+        match owner.next().await {
+            Some(Some(_)) => continue,
+            Some(None) | None => return Ok(()),
+        }
+    }
 }
 
 /// Keep the nearest deadline armed: expire what is due (reason 1 +
