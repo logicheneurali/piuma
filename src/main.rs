@@ -2392,6 +2392,41 @@ fn monitor_names_json(json: &str) -> Vec<String> {
         .collect()
 }
 
+/// The name of the output the graph popup surfaces belong to: the
+/// `focused` entry of a fresh `hyprctl monitors -j` — the bar's own
+/// output, since Hyprland focuses the monitor under the cursor and the
+/// popups only open on a bar hover. `OutputOption::LastOutput` picked
+/// another output once a second monitor joined (the popup opened over
+/// on it); no answer falls back to the old behaviour.
+fn active_output_name() -> Option<String> {
+    let output = std::process::Command::new("hyprctl")
+        .args(["monitors", "-j"])
+        .output()
+        .ok()?;
+    focused_output_name(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The `name` of the `hyprctl monitors -j` entry with
+/// `"focused": true`; unparseable input yields no output.
+fn focused_output_name(json: &str) -> Option<String> {
+    let monitors = serde_json::from_str::<Vec<serde_json::Value>>(json).ok()?;
+    monitors
+        .iter()
+        .find(|m| m.get("focused").and_then(|f| f.as_bool()) == Some(true))?
+        .get("name")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// The output for the graph popup and its connector: the bar's own
+/// ([`active_output_name`]), falling back to the old `LastOutput`
+/// behaviour when hyprctl can't answer.
+fn popup_output_option() -> OutputOption {
+    active_output_name()
+        .map(OutputOption::OutputName)
+        .unwrap_or(OutputOption::LastOutput)
+}
+
 /// Pure part of the wallpaper sync: outputs that still need a window
 /// and windows to close (their output is gone, or the whole feature
 /// switched off — an empty wanted list then closes everything).
@@ -2771,9 +2806,10 @@ fn fit_menu_labels(entries: &mut [dbusmenu::MenuEntry], w: u32, font: &Font, fon
 /// the output**: a menu that doesn't fit on that side is cut at the
 /// output edge instead of being pinned at the cursor and leaving the
 /// screen (the 116-row Cachy-Update menu used to open with its base at
-/// the top bar and ~2300 px of it above the screen). The caller uses
-/// `OutputOption::LastOutput`, the same output `SCREEN_WIDTH/HEIGHT`
-/// and `tray::cursor_output_point` refer to.
+/// the top bar and ~2300 px of it above the screen). The caller picks
+/// the output its surface goes to (the graph popup pins it to the
+/// bar's own via [`popup_output_option`], since `OutputOption::LastOutput`
+/// lands on another output once a second monitor joins).
 fn menu_placement(x: i32, y: i32, w: u32, h: u32, sw: i32, sh: i32) -> (Anchor, Margin) {
     let (w, h) = (w as i32, h as i32);
     // Fits: anchored at the point. Overflows: the far edge sticks to the
@@ -2901,7 +2937,9 @@ fn graph_hover_sync(
         exclusive_zone: None,
         margin: Some(margin),
         keyboard_interactivity: KeyboardInteractivity::None,
-        output_option: OutputOption::LastOutput,
+        // The bar's own output: `LastOutput` landed the popup on a
+        // second monitor once one joined the session.
+        output_option: popup_output_option(),
         namespace: Some("piuma-graph".to_string()),
         ..Default::default()
     });
@@ -3048,7 +3086,8 @@ fn sync_graph_link(panel: &mut Panel) -> Option<Command<Message>> {
                 left: ox,
             }),
             keyboard_interactivity: KeyboardInteractivity::None,
-            output_option: OutputOption::LastOutput,
+            // Same output as the popup it points at (see above).
+            output_option: popup_output_option(),
             // A pure drawing over the desktop: hovers and clicks
             // pass through (as on the wallpaper).
             events_transparent: true,
@@ -3672,10 +3711,11 @@ fn parse_config_arg() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cmdline_is_piuma, corner_radius, dbusmenu, fit_menu_labels, icons_theme, lock_pid,
-        menu_placement, menu_row_h, menu_size, monitor_names_json, popup_card_h,
-        popup_missed_tick, popup_placement, section_touch, text_width, tray_icon_target,
-        wallpaper_plan, GraphPopup, PopupStyle, MENU_INDENT, MENU_MAX_W, MENU_MIN_W, MENU_PAD,
+        cmdline_is_piuma, corner_radius, dbusmenu, fit_menu_labels, focused_output_name,
+        icons_theme, lock_pid, menu_placement, menu_row_h, menu_size, monitor_names_json,
+        popup_card_h, popup_missed_tick, popup_placement, section_touch, text_width,
+        tray_icon_target, wallpaper_plan, GraphPopup, PopupStyle, MENU_INDENT, MENU_MAX_W,
+        MENU_MIN_W, MENU_PAD,
     };
     use iced::font::Font;
     use iced_exwlshell::reexport::Anchor;
@@ -4004,6 +4044,20 @@ mod tests {
         assert!(monitor_names_json("not json at all").is_empty());
         assert!(monitor_names_json("[]").is_empty());
         assert!(monitor_names_json(r#"[{"id":0}]"#).is_empty());
+    }
+
+    /// The popup output follows the focused monitor (the one the bar
+    /// hover happened on), not whichever output the compositor calls
+    /// "last": with two monitors the graph popup used to open on the
+    /// other one.
+    #[test]
+    fn focused_output_name_takes_the_focused_monitor() {
+        let json = r#"[{"id":0,"name":"HDMI-A-1","focused":false},
+                       {"id":1,"name":"eDP-2","focused":true}]"#;
+        assert_eq!(focused_output_name(json).as_deref(), Some("eDP-2"));
+        assert!(focused_output_name("not json at all").is_none());
+        assert!(focused_output_name("[]").is_none());
+        assert!(focused_output_name(r#"[{"id":0,"name":"eDP-2"}]"#).is_none());
     }
 
     /// Roadmap2 #1: the sync plan opens one window per wanted output,
