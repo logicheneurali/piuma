@@ -1113,7 +1113,9 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                 exclusive_zone: None,
                 margin: Some(margin),
                 keyboard_interactivity: KeyboardInteractivity::None,
-                output_option: OutputOption::LastOutput,
+                // The bar's own output: `LastOutput` landed the popup
+                // on a second monitor once one joined the session.
+                output_option: popup_output_option(),
                 namespace: Some("piuma-tray-menu".to_string()),
                 ..Default::default()
             });
@@ -2392,30 +2394,38 @@ fn monitor_names_json(json: &str) -> Vec<String> {
         .collect()
 }
 
-/// The name of the output the graph popup surfaces belong to: the
-/// `focused` entry of a fresh `hyprctl monitors -j` — the bar's own
-/// output, since Hyprland focuses the monitor under the cursor and the
-/// popups only open on a bar hover. `OutputOption::LastOutput` picked
-/// another output once a second monitor joined (the popup opened over
-/// on it); no answer falls back to the old behaviour.
-fn active_output_name() -> Option<String> {
+/// The focused output — the bar's own, since Hyprland focuses the
+/// monitor under the cursor and everything cursor-driven (graph popup,
+/// tray menu, notification cards) belongs there — as `(name, x, y)`
+/// from a fresh `hyprctl monitors -j`. `OutputOption::LastOutput`
+/// picked another output once a second monitor joined (the popup
+/// opened over on it); no answer falls back to the old behaviour.
+fn focused_output() -> Option<(String, i32, i32)> {
     let output = std::process::Command::new("hyprctl")
         .args(["monitors", "-j"])
         .output()
         .ok()?;
-    focused_output_name(&String::from_utf8_lossy(&output.stdout))
+    focused_output_in(&String::from_utf8_lossy(&output.stdout))
 }
 
-/// The `name` of the `hyprctl monitors -j` entry with
+/// The (`name`, `x`, `y`) of the `hyprctl monitors -j` entry with
 /// `"focused": true`; unparseable input yields no output.
-fn focused_output_name(json: &str) -> Option<String> {
+fn focused_output_in(json: &str) -> Option<(String, i32, i32)> {
     let monitors = serde_json::from_str::<Vec<serde_json::Value>>(json).ok()?;
-    monitors
+    let m = monitors
         .iter()
-        .find(|m| m.get("focused").and_then(|f| f.as_bool()) == Some(true))?
-        .get("name")?
-        .as_str()
-        .map(str::to_string)
+        .find(|m| m.get("focused").and_then(|f| f.as_bool()) == Some(true))?;
+    Some((
+        m.get("name")?.as_str()?.to_string(),
+        m.get("x")?.as_i64()? as i32,
+        m.get("y")?.as_i64()? as i32,
+    ))
+}
+
+/// The output the cursor-driven popup surfaces pin themselves to (the
+/// bar's own, see [`focused_output`]); `LastOutput` as the fallback.
+fn active_output_name() -> Option<String> {
+    focused_output().map(|(name, _, _)| name)
 }
 
 /// The output for the graph popup and its connector: the bar's own
@@ -2499,7 +2509,9 @@ fn sync_popup(panel: &mut Panel, reposition: bool) -> Option<Command<Message>> {
                 exclusive_zone: None,
                 margin: Some(margin),
                 keyboard_interactivity: KeyboardInteractivity::None,
-                output_option: OutputOption::LastOutput,
+                // The focused output, like every other popup (margins
+                // are pure offsets — safe on any output).
+                output_option: popup_output_option(),
                 namespace: Some("piuma-notifications".to_string()),
                 ..Default::default()
             });
@@ -2806,10 +2818,10 @@ fn fit_menu_labels(entries: &mut [dbusmenu::MenuEntry], w: u32, font: &Font, fon
 /// the output**: a menu that doesn't fit on that side is cut at the
 /// output edge instead of being pinned at the cursor and leaving the
 /// screen (the 116-row Cachy-Update menu used to open with its base at
-/// the top bar and ~2300 px of it above the screen). The caller picks
-/// the output its surface goes to (the graph popup pins it to the
-/// bar's own via [`popup_output_option`], since `OutputOption::LastOutput`
-/// lands on another output once a second monitor joins).
+/// the top bar and ~2300 px of it above the screen). Cursor-driven
+/// callers pin the surface to the bar's own output via
+/// [`popup_output_option`], since `OutputOption::LastOutput` lands on
+/// another output once a second monitor joins.
 fn menu_placement(x: i32, y: i32, w: u32, h: u32, sw: i32, sh: i32) -> (Anchor, Margin) {
     let (w, h) = (w as i32, h as i32);
     // Fits: anchored at the point. Overflows: the far edge sticks to the
@@ -3711,7 +3723,7 @@ fn parse_config_arg() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cmdline_is_piuma, corner_radius, dbusmenu, fit_menu_labels, focused_output_name,
+        cmdline_is_piuma, corner_radius, dbusmenu, fit_menu_labels, focused_output_in,
         icons_theme, lock_pid, menu_placement, menu_row_h, menu_size, monitor_names_json,
         popup_card_h, popup_missed_tick, popup_placement, section_touch, text_width,
         tray_icon_target, wallpaper_plan, GraphPopup, PopupStyle, MENU_INDENT, MENU_MAX_W,
@@ -4051,13 +4063,16 @@ mod tests {
     /// "last": with two monitors the graph popup used to open on the
     /// other one.
     #[test]
-    fn focused_output_name_takes_the_focused_monitor() {
-        let json = r#"[{"id":0,"name":"HDMI-A-1","focused":false},
-                       {"id":1,"name":"eDP-2","focused":true}]"#;
-        assert_eq!(focused_output_name(json).as_deref(), Some("eDP-2"));
-        assert!(focused_output_name("not json at all").is_none());
-        assert!(focused_output_name("[]").is_none());
-        assert!(focused_output_name(r#"[{"id":0,"name":"eDP-2"}]"#).is_none());
+    fn focused_output_takes_the_focused_monitor() {
+        let json = r#"[{"id":0,"name":"HDMI-A-1","x":0,"y":0,"focused":false},
+                       {"id":1,"name":"eDP-2","x":1920,"y":0,"focused":true}]"#;
+        assert_eq!(
+            focused_output_in(json),
+            Some(("eDP-2".to_string(), 1920, 0))
+        );
+        assert!(focused_output_in("not json at all").is_none());
+        assert!(focused_output_in("[]").is_none());
+        assert!(focused_output_in(r#"[{"id":0,"name":"eDP-2"}]"#).is_none());
     }
 
     /// Roadmap2 #1: the sync plan opens one window per wanted output,

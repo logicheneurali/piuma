@@ -1228,19 +1228,14 @@ pub fn hint_point(panel: &crate::Panel) -> Option<(i32, i32)> {
     Some((ox + mx, oy + my))
 }
 
-/// The output the bar sits on in global layout coordinates: the last
-/// monitor of `hyprctl monitors -j` — the same choice the width/height
-/// helpers in `main.rs` make (they read the last field in that JSON).
+/// The focused output's position in the global layout: the cursor point
+/// is output-relative and SNI hints are global. (Was "the last monitor
+/// of `hyprctl monitors -j`", which aimed the hint at the other output
+/// once a second monitor joined the session.)
 fn output_origin() -> (i32, i32) {
-    let monitors: Option<Vec<serde_json::Value>> = std::process::Command::new("hyprctl")
-        .args(["monitors", "-j"])
-        .output()
-        .ok()
-        .and_then(|out| serde_json::from_slice(&out.stdout).ok());
-    let last = monitors.and_then(|mut m| m.pop());
-    let x = last.as_ref().and_then(|m| m["x"].as_i64()).unwrap_or(0);
-    let y = last.as_ref().and_then(|m| m["y"].as_i64()).unwrap_or(0);
-    (x as i32, y as i32)
+    crate::focused_output()
+        .map(|(_, x, y)| (x, y))
+        .unwrap_or((0, 0))
 }
 
 #[cfg(test)]
