@@ -3148,7 +3148,8 @@ fn calendar_size(config: &config::Config, weekdays: &[String; 7]) -> (u32, u32) 
 
 /// Keep the hover graph popup in step with a sensor hover: it opens at
 /// the cursor (same output-clamped placement as the tray menu) when
-/// the sensor opted in with `draw_graph` on a graphable source. On
+/// the sensor opted in with `draw_graph` on a graphable source that
+/// already recorded a sample (no data, no popup). On
 /// leave it closes only when the cursor sits outside the popup rect —
 /// right after opening the surface maps **under the cursor** and steals
 /// the pointer from the bar, and that leave must not close it (every
@@ -3179,14 +3180,16 @@ fn graph_hover_sync(
     if showing {
         return Command::none(); // this sensor is already on screen
     }
-    // Opted in? The samples themselves arrive with the ticks.
+    // Opted in and already carrying data? The samples themselves
+    // arrive with the ticks; without one there is no trend to show.
     let opted_in = panel
         .config
         .panel
         .sections
         .get(section)
         .and_then(|sec| sec.sensors.get(sensor))
-        .is_some_and(|s| s.draw_graph && graphs::scale_of(&s.source).is_some());
+        .is_some_and(|s| s.draw_graph && graphs::scale_of(&s.source).is_some())
+        && panel.graphs.has_samples(section, sensor);
     if !opted_in {
         return Command::none();
     }

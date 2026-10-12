@@ -66,11 +66,47 @@ fn is_percent(source: &SensorSource) -> bool {
     )
 }
 
+/// A numeric sample out of a text answer (the user-authored sources):
+/// the WHOLE trimmed answer must be a finite number, optionally
+/// followed by one digit-free suffix ("55%", "49°C", "1.9 GB"). A
+/// timestamp, an IP, a version, a locale decimal, "N/A" or NaN/inf
+/// parse to nothing — a wrong point would ride the Auto axis for the
+/// whole window, a refused one just repeats the previous value.
+fn strict_number(text: &str) -> Option<f64> {
+    let text = text.trim();
+    if let Ok(value) = text.parse::<f64>() {
+        return value.is_finite().then_some(value);
+    }
+    // The first char outside the number grammar ends the number: the
+    // head must parse as finite and the suffix must carry no digit, so
+    // "16:45:30" (suffix holds digits) is refused while "55%" and
+    // "49°C" pass.
+    let cut =
+        text.find(|c: char| !(c.is_ascii_digit() || matches!(c, '.' | '+' | '-' | 'e' | 'E')))?;
+    let (head, tail) = text.split_at(cut);
+    if tail.chars().any(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    head.parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
+/// A text reading that may carry the graph's sample: the graph takes
+/// the number only when the whole answer is one (`strict_number`),
+/// anything else stays plain text with no graph.
+fn maybe_measured(text: String, source: &SensorSource) -> Read {
+    match strict_number(&text) {
+        Some(value) => measured(text, source, value),
+        None => plain(text),
+    }
+}
+
 /// Run a sensor source and return its value (text + optional sample).
 pub fn run(source: &SensorSource) -> Read {
     match source {
-        SensorSource::Command { command } => {
-            plain(match std::process::Command::new("sh")
+        // The user-authored text sources: the answer feeds the graph
+        // sample when the whole thing is a number (see `strict_number`).
+        SensorSource::Command { command } => maybe_measured(
+            match std::process::Command::new("sh")
                 .args(["-c", command])
                 .output()
             {
@@ -78,12 +114,13 @@ pub fn run(source: &SensorSource) -> Read {
                     String::from(String::from_utf8_lossy(&out.stdout).trim())
                 }
                 _ => "ERROR".to_string(),
-            })
-        }
+            },
+            source,
+        ),
         SensorSource::EnvVar { env_var } => {
-            plain(std::env::var(env_var).unwrap_or("N/A".to_string()))
+            maybe_measured(std::env::var(env_var).unwrap_or("N/A".to_string()), source)
         }
-        SensorSource::StaticText { static_text } => plain(static_text.clone()),
+        SensorSource::StaticText { static_text } => maybe_measured(static_text.clone(), source),
         // perc_ — percentage values
         SensorSource::PercCpu {} => optional(sensors::cpu_load(), source),
         SensorSource::PercGpu {} => optional(sensors::gpu_load(), source),
@@ -161,5 +198,44 @@ mod tests {
             },
         );
         assert_eq!(vol.text, "70%", "already suffixed: no doubling");
+    }
+
+    /// The graph sample of a text source is the whole answer as a
+    /// finite number: clean numbers and single-suffix ones pass,
+    /// ambiguous or non-numeric answers record nothing — and the bar
+    /// text never changes either way.
+    #[test]
+    fn text_sources_graph_only_whole_numbers() {
+        for (text, expected) in [
+            ("42", Some(42.0)),
+            (" 42  ", Some(42.0)),
+            ("-3.5", Some(-3.5)),
+            ("1e3", Some(1000.0)),
+            ("55%", Some(55.0)),
+            ("49°C", Some(49.0)),
+            ("1.9 GB", Some(1.9)),
+            ("16:45:30", None),
+            ("192.168.1.1", None),
+            ("1.2.3", None),
+            ("1,5", None),
+            ("N/A", None),
+            ("ERROR", None),
+            ("nan", None),
+            ("inf", None),
+            ("3 g 4", None),
+            ("exit code 5", None),
+        ] {
+            assert_eq!(strict_number(text), expected, "{text:?}");
+        }
+
+        let source = SensorSource::Command {
+            command: String::new(),
+        };
+        let read = maybe_measured("49°C".into(), &source);
+        assert_eq!(read.graph.map(|(v, _)| v), Some(49.0));
+        assert_eq!(read.text, "49°C", "the bar text stays as-is");
+        let read = maybe_measured("hello".into(), &source);
+        assert!(read.graph.is_none());
+        assert_eq!(read.text, "hello");
     }
 }

@@ -49,6 +49,11 @@ pub fn scale_of(source: &config::SensorSource) -> Option<Scale> {
         | S::UsedNetdown { .. }
         | S::UsedNetup { .. }
         | S::TempCpu {} => Scale::Auto,
+        // The user-authored text sources: a number can come out of
+        // any of them, taken by the runner's strict whole-string parse
+        // — a non-numeric answer simply records nothing (see
+        // `sensor_runner::strict_number`).
+        S::Command { .. } | S::EnvVar { .. } | S::StaticText { .. } => Scale::Auto,
         _ => return None,
     })
 }
@@ -118,6 +123,10 @@ struct Column {
     section: usize,
     sensor: usize,
     scale: Scale,
+    /// At least one real sample recorded: the hover popup stays closed
+    /// until then — `draw_graph` on a source that never answered with
+    /// a number (or a sensor `N/A` since boot) has no trend to show.
+    sampled: bool,
 }
 
 /// The history of every graphable sensor, rebuilt on config reload.
@@ -148,6 +157,7 @@ impl History {
                         section,
                         sensor,
                         scale,
+                        sampled: false,
                     });
                     data.resize(data.len() + SAMPLES, f32::NAN);
                 }
@@ -171,11 +181,14 @@ impl History {
             return;
         }
         let prev = (self.head + SAMPLES - 1) % SAMPLES;
-        for (ci, col) in self.columns.iter().enumerate() {
+        for (ci, col) in self.columns.iter_mut().enumerate() {
             let fresh = samples
                 .iter()
                 .find(|((section, sensor), _)| (*section, *sensor) == (col.section, col.sensor))
                 .map(|(_, value)| *value as f32);
+            if fresh.is_some() {
+                col.sampled = true;
+            }
             let previous = self.data[ci * SAMPLES + prev];
             self.data[ci * SAMPLES + self.head] = fresh.unwrap_or(previous);
         }
@@ -198,6 +211,15 @@ impl History {
             out.push(if v.is_finite() { v } else { 0.0 });
         }
         Some((self.columns[ci].scale, out))
+    }
+
+    /// Whether a column recorded at least one sample: the hover gate's
+    /// "no data, no popup" check (a never-numeric `command` with
+    /// `draw_graph` on, or a sensor reading `N/A` since boot).
+    pub fn has_samples(&self, section: usize, sensor: usize) -> bool {
+        self.columns
+            .iter()
+            .any(|c| c.section == section && c.sensor == sensor && c.sampled)
     }
 }
 
@@ -484,6 +506,37 @@ mod tests {
         assert_eq!(h.columns[1].scale, Scale::Auto, "used_ follows the window");
         // Serde: absent flag parses as off.
         assert!(!sec.sensors[3].draw_graph);
+    }
+
+    /// The user-authored text sources take an Auto column (their
+    /// sample comes from the runner's strict parse), the semantic text
+    /// sources take none, and a column reports data only after its
+    /// first recorded sample.
+    #[test]
+    fn text_sources_take_a_column_once_they_carry_data() {
+        let sec = section(
+            r#"{"sensors":[
+                {"name":"CMD","source":{"type":"command","command":"echo 42"},"draw_graph":true},
+                {"name":"TXT","source":{"type":"static_text","static_text":"hi"},"draw_graph":true},
+                {"name":"WIN","source":{"type":"window"},"draw_graph":true},
+                {"name":"CLK","source":{"type":"clock"}}
+            ]}"#,
+        );
+        let mut h = History::new(std::slice::from_ref(&sec));
+        assert_eq!(
+            h.columns.len(),
+            2,
+            "command and static_text take columns, window and clock don't"
+        );
+        assert!(
+            h.columns.iter().all(|c| c.scale == Scale::Auto),
+            "text sources follow the window"
+        );
+        assert!(!h.has_samples(0, 0), "no data yet: the popup stays closed");
+        h.record(&[((0, 0), 42.0)]);
+        assert!(h.has_samples(0, 0), "the sample flags the column");
+        assert!(!h.has_samples(0, 1), "the other column has no data");
+        assert!(!h.has_samples(0, 2), "window never takes a column");
     }
 
     /// The ring wraps, missing readings repeat the previous value and
