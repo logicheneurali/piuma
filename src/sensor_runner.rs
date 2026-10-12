@@ -120,6 +120,11 @@ pub fn run(source: &SensorSource) -> Read {
                 _ => sensors::get_time(),
             })
         }
+        // The calendar sensor's bar text: a full strftime format (its
+        // hover popup lives in main.rs, see `calendar_hover_sync`).
+        SensorSource::Calendar { format } => plain(sensors::clock_formatted(
+            format.as_deref().unwrap_or("%H:%M:%S"),
+        )),
         SensorSource::Window {} => plain(sensors::get_window_title()),
         SensorSource::Workspace {} => plain(sensors::get_workspace()),
         // Tray items carry no text: the icons come from the shared tray

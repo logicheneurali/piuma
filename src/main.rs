@@ -33,6 +33,7 @@ use iced_runtime::core::widget::operation::Outcome;
 
 mod app_theme;
 mod autostart;
+mod calendar;
 mod config;
 mod dbusmenu;
 mod graphs;
@@ -105,6 +106,14 @@ const LABEL_BG_ALPHA: f32 = 0.7;
 /// The plate's padding around the average label (v, h).
 const LABEL_PAD_V: f32 = 1.0;
 const LABEL_PAD_H: f32 = 4.0;
+
+// ── calendar popup geometry (the `calendar` sensor) ────────────────
+/// Grace ticks the calendar popup gets after the cursor has left both
+/// its sensor and its surface (1 tick = 1 s at the 1 Hz tick): the
+/// spec asks for three seconds before it disappears.
+const CALENDAR_ABANDON_GRACE: u8 = 3;
+/// Horizontal padding inside one day/label cell, either side.
+const CALENDAR_CELL_PAD: u32 = 6;
 
 // ── tray menu geometry ──────────────────────────────────────────────
 // One row per entry, sized exactly (`menu_row_h` × count + 2× pad, see
@@ -220,6 +229,10 @@ struct Panel {
     /// `sync_graph_link`): its id and the id of the popup it draws —
     /// `None` while hidden.
     graph_link: Option<(iced::window::Id, iced::window::Id)>,
+    /// Open calendar popup of a hovered `calendar` sensor: surface id,
+    /// the sensor it belongs to, the shown month and its pointer/grace
+    /// state, `None` while hidden.
+    calendar: Option<CalendarPopup>,
     /// Wallpaper windows (roadmap2 #1): one background surface per
     /// active output, keyed by the compositor's output name; empty
     /// while the wallpaper is off.
@@ -258,6 +271,32 @@ struct GraphPopup {
     /// Set when a cursor event arrives tagged with this window's id:
     /// the leave-guard's coordinates can be stale, this cannot.
     pointer_seen: bool,
+    /// Grace ticks spent without sensor and without pointer.
+    missed: u8,
+}
+
+/// The calendar popup: which sensor's hover opened it, the month
+/// paging offset and the localized data fetched at open — plus the
+/// pointer/grace bookkeeping that decides when it disappears.
+#[derive(Clone)]
+struct CalendarPopup {
+    id: iced::window::Id,
+    section: usize,
+    sensor: usize,
+    /// Whole months between today's month and the shown one: the
+    /// arrows page it, a close drops it (a reopen starts at today).
+    offset: i32,
+    /// Today (local): the highlight and the month the offset starts at.
+    today: (u16, u8, u8),
+    /// Monday-first weekday labels, fetched once at open.
+    weekdays: [String; 7],
+    /// The header's "month year", re-fetched on every page change.
+    month_label: String,
+    /// The cursor is on the popup's surface — set by the surface's own
+    /// cursor events (and at open, where the surface maps under the
+    /// cursor), cleared by its exit. Unlike a "seen once" flag it can
+    /// return to `false`: the grace needs "is on", not "ever was".
+    pointer_on_popup: bool,
     /// Grace ticks spent without sensor and without pointer.
     missed: u8,
 }
@@ -312,6 +351,12 @@ enum Message {
     /// The cursor left the graph popup: dismiss it unless the cursor
     /// went back to its own sensor (the popup follows the hover).
     GraphPopupExited,
+    /// The calendar popup's arrows page the shown month by one.
+    CalendarPrev,
+    CalendarNext,
+    /// The cursor left the calendar popup's surface: the tick's grace
+    /// decides the close (three seconds on neither sensor nor popup).
+    CalendarExited,
     /// Answer of the sensor-box rect query `FindSensorRect`:
     /// (section, sensor, window-relative rect). The connector window
     /// gets pinned to it (`sync_graph_link`).
@@ -897,6 +942,11 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             if let Some(gp) = reap_abandoned_popup(panel) {
                 cmds.push(iced::window::close(gp.id));
             }
+            // The calendar popup's three-second grace runs on the same
+            // tick: neither sensor nor surface under the cursor spends it.
+            if let Some(cp) = reap_abandoned_calendar(panel) {
+                cmds.push(iced::window::close(cp.id));
+            }
             // With multiple layer surfaces the runtime routes actions by
             // surface id: target the bar explicitly. Its id is captured on
             // the first render, which always precedes this Tick (the guard
@@ -921,9 +971,14 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             }
             // An open graph popup dies with a reload too: its columns
             // were rebuilt underneath it (and its sensor may be gone).
+            // The calendar popup goes with it: its month came from the
+            // previous config's sensor.
             if config_reloaded {
                 if let Some(gp) = panel.graph_popup.take() {
                     cmds.push(iced::window::close(gp.id));
+                }
+                if let Some(cp) = panel.calendar.take() {
+                    cmds.push(iced::window::close(cp.id));
                 }
             }
             // The popup follows the active set (and re-anchors with the
@@ -958,13 +1013,20 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                         gp.pointer_seen = true;
                     }
                 }
+                if let Some(cp) = panel.calendar.as_mut() {
+                    if cp.id == id {
+                        // Same for the calendar popup: the cursor is on it
+                        // until its own exit event says otherwise.
+                        cp.pointer_on_popup = true;
+                    }
+                }
                 if BAR_ID.get().copied() == Some(id) {
                     panel.last_cursor = Some((position.x, position.y));
                     // The hover can process before this event (a sensor
-                    // hovered on the very first motion): retry the graph
-                    // popup open now that a position exists.
+                    // hovered on the very first motion): retry the popup
+                    // opens now that a position exists.
                     if let Some((section, sensor)) = panel.hovered {
-                        return graph_hover_sync(panel, section, sensor, true);
+                        return hover_sync(panel, section, sensor, true);
                     }
                 }
             }
@@ -1257,7 +1319,7 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             } else if panel.hovered == Some((section_index, sensor_index)) {
                 panel.hovered = None;
             }
-            graph_hover_sync(panel, section_index, sensor_index, hovered)
+            hover_sync(panel, section_index, sensor_index, hovered)
         }
         Message::GraphPopupExited => {
             // The cursor is back on the popup's sensor: it stays (the
@@ -1276,6 +1338,17 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             } else {
                 Command::none()
             }
+        }
+        Message::CalendarPrev => calendar_page(panel, -1),
+        Message::CalendarNext => calendar_page(panel, 1),
+        Message::CalendarExited => {
+            // No close here: the popup survives the three grace seconds
+            // in case the cursor comes back to it or to its sensor (the
+            // tick's reap decides, see `reap_abandoned_calendar`).
+            if let Some(cp) = panel.calendar.as_mut() {
+                cp.pointer_on_popup = false;
+            }
+            Command::none()
         }
         Message::SensorRectFound(section, sensor, rect) => {
             // The queried bounds are in the bar window's coordinates:
@@ -1408,6 +1481,11 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
     if let Some(gp) = panel.graph_popup.as_ref() {
         if gp.id == window {
             return graph_popup_view(panel, gp);
+        }
+    }
+    if let Some(cp) = panel.calendar.as_ref() {
+        if cp.id == window {
+            return calendar_popup_view(panel, cp);
         }
     }
     if panel.graph_link.is_some_and(|(id, _)| id == window) {
@@ -2882,6 +2960,154 @@ fn reap_abandoned_popup(panel: &mut Panel) -> Option<GraphPopup> {
     panel.graph_popup.take()
 }
 
+/// Both hover popups in step with one sensor hover: the trend popup
+/// (its own sensor type) and the calendar one — each opens only for
+/// its own source, so they share no condition beyond the hover.
+fn hover_sync(panel: &mut Panel, section: usize, sensor: usize, hovered: bool) -> Command<Message> {
+    Command::batch([
+        graph_hover_sync(panel, section, sensor, hovered),
+        calendar_hover_sync(panel, section, sensor, hovered),
+    ])
+}
+
+/// Keep the calendar popup in step with a sensor hover: hovering a
+/// `calendar` sensor opens it at the cursor (the trend popup's
+/// output-clamped placement), crossing to another calendar sensor
+/// swaps it. No hover close runs here — the popup must survive three
+/// more seconds after the cursor leaves both it and its sensor: the
+/// tick's grace decides (see `reap_abandoned_calendar`).
+fn calendar_hover_sync(
+    panel: &mut Panel,
+    section: usize,
+    sensor: usize,
+    hovered: bool,
+) -> Command<Message> {
+    let showing = panel
+        .calendar
+        .as_ref()
+        .is_some_and(|cp| (cp.section, cp.sensor) == (section, sensor));
+    if !hovered || showing {
+        return Command::none();
+    }
+    // Opted in? Only the `calendar` source opens this popup (a hover
+    // on any other sensor leaves an open popup counting down).
+    let is_calendar = panel
+        .config
+        .panel
+        .sections
+        .get(section)
+        .and_then(|sec| sec.sensors.get(sensor))
+        .is_some_and(|s| matches!(s.source, config::SensorSource::Calendar { .. }));
+    if !is_calendar {
+        return Command::none();
+    }
+    let Some((x, y)) = tray::cursor_output_point(panel) else {
+        // The enter can beat the first CursorMoved event (nothing moved
+        // since startup): the motion itself retries via `IcedEvent`.
+        eprintln!("[piuma] calendar: no cursor position yet, waiting for the motion event");
+        return Command::none();
+    };
+    let Some(today) = calendar::today() else {
+        // Without today's date there is no month to open on.
+        eprintln!("[piuma] calendar: no local date, staying closed");
+        return Command::none();
+    };
+    let mut cmds: Vec<Command<Message>> = Vec::new();
+    // Crossing between two calendar sensors: the old surface dies with
+    // its own leave events too, but closing here keeps the order definite.
+    if let Some(old) = panel.calendar.take() {
+        cmds.push(iced::window::close(old.id));
+    }
+    let weekdays = calendar::weekday_labels();
+    let (w, h) = calendar_size(&panel.config, &weekdays);
+    let (sw, sh) = unsafe { (SCREEN_WIDTH as i32, SCREEN_HEIGHT as i32) };
+    let (anchor, margin) = menu_placement(x, y, w, h, sw, sh);
+    let rect = placement_rect(anchor, &margin, w, h, sw, sh);
+    let (id, open) = Message::layershell_open(NewLayerShellSettings {
+        size: LayerSize::px(w, h),
+        layer: Layer::Overlay,
+        anchor,
+        exclusive_zone: None,
+        margin: Some(margin),
+        keyboard_interactivity: KeyboardInteractivity::None,
+        // The bar's own output (the graph popup's `LastOutput` landed
+        // on the wrong monitor once a second one joined the session).
+        output_option: popup_output_option(),
+        namespace: Some("piuma-calendar".to_string()),
+        ..Default::default()
+    });
+    panel.calendar = Some(CalendarPopup {
+        id,
+        section,
+        sensor,
+        offset: 0,
+        today,
+        weekdays,
+        month_label: calendar::month_label(today.0, today.1),
+        // The surface usually maps under the cursor and steals it from
+        // the bar (then the cursor *is* on it); a flipped placement
+        // opens away from it — the rect test settles both, the surface's
+        // own events keep the flag right afterwards.
+        pointer_on_popup: (x >= rect.0 && x < rect.2 && y >= rect.1 && y < rect.3),
+        missed: 0,
+    });
+    eprintln!("[piuma] calendar: open rect={rect:?} cursor=({x},{y}) size={w}x{h}");
+    cmds.push(open);
+    Command::batch(cmds)
+}
+
+/// Page the calendar popup by `delta` months and refresh the header's
+/// month label (one `date` spawn per click).
+fn calendar_page(panel: &mut Panel, delta: i32) -> Command<Message> {
+    let Some(cp) = panel.calendar.as_mut() else {
+        return Command::none(); // a click can race the grace's close
+    };
+    cp.offset += delta;
+    let (year, month) = calendar::shift_month(cp.today.0, cp.today.1, cp.offset);
+    cp.month_label = calendar::month_label(year, month);
+    Command::none()
+}
+
+/// Run once per tick: the calendar popup whose grace is spent —
+/// neither its own sensor nor its surface has had the cursor for
+/// [`CALENDAR_ABANDON_GRACE`] seconds — `None` while it lives. The
+/// popup's pointer flag is event-driven (enter/exit), so this counts
+/// only real absences, including after the cursor rests for good on
+/// another application's window where no event ever arrives again.
+fn reap_abandoned_calendar(panel: &mut Panel) -> Option<CalendarPopup> {
+    let Some(cp) = panel.calendar.as_mut() else {
+        return None;
+    };
+    if panel.hovered == Some((cp.section, cp.sensor)) || cp.pointer_on_popup {
+        cp.missed = 0;
+        return None;
+    }
+    cp.missed = cp.missed.saturating_add(1);
+    if cp.missed < CALENDAR_ABANDON_GRACE {
+        return None;
+    }
+    eprintln!("[piuma] calendar: close (cursor left the sensor and the popup)");
+    panel.calendar.take()
+}
+
+/// The calendar popup's surface size from the panel's font: every cell
+/// fits the widest of a day number, the weekday labels and the paging
+/// arrows, and the eight rows (header, labels, six weeks) grow with
+/// `panel.font_size` — the surface adapts to the font, never the
+/// reverse. Returns `(width, height)`.
+fn calendar_size(config: &config::Config, weekdays: &[String; 7]) -> (u32, u32) {
+    let font = panel_font(config);
+    let fs = config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
+    let st = popup_style(config);
+    let mut patterns: Vec<String> = vec!["88".into(), "←".into(), "→".into()];
+    patterns.extend(weekdays.iter().cloned());
+    let cell_w = u32::from(text_width::widest(&font, fs, &patterns)) + 2 * CALENDAR_CELL_PAD;
+    let row_h = fs.saturating_mul(14) / 10; // line height + breathing room
+    let w = st.padding.saturating_mul(2).saturating_add(cell_w.saturating_mul(7));
+    let h = st.padding.saturating_mul(2).saturating_add(row_h.saturating_mul(8));
+    (w, h)
+}
+
 /// Keep the hover graph popup in step with a sensor hover: it opens at
 /// the cursor (same output-clamped placement as the tray menu) when
 /// the sensor opted in with `draw_graph` on a graphable source. On
@@ -3266,6 +3492,133 @@ fn graph_popup_view<'a>(panel: &'a Panel, gp: &GraphPopup) -> Element<'a, Messag
     MouseArea::new(surface).on_exit(Message::GraphPopupExited).into()
 }
 
+/// The calendar popup: the month header with its paging arrows, the
+/// weekday labels and the month's Monday-first grid, inside the shared
+/// popup box (the notification cards' style, like the graph popup).
+/// The panel's font and font size draw every cell — the surface was
+/// sized from them when the popup opened (`calendar_size`) — and today's
+/// number stands out on the accent plate of the notifications' border.
+fn calendar_popup_view<'a>(panel: &'a Panel, cp: &CalendarPopup) -> Element<'a, Message> {
+    let st = popup_style(&panel.config);
+    let font = panel_font(&panel.config);
+    let fs = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
+    let accent = st.border;
+    let (year, month) = calendar::shift_month(cp.today.0, cp.today.1, cp.offset);
+    let weeks = calendar::month_matrix(year, month);
+
+    // One grid cell: its content centred in the cell's equal share.
+    let cell = |content: Element<'a, Message>| -> Element<'a, Message> {
+        container(content)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center)
+            .into()
+    };
+    // A paging arrow: a hit target as tall as the header row.
+    let arrow = |label: &'static str, msg: Message| -> Element<'a, Message> {
+        MouseArea::new(
+            container(text(label).size(fs).color(st.text).font(font.clone()))
+                .width(Length::Fixed(fs as f32 * 1.6))
+                .height(Length::Fill)
+                .align_x(Alignment::Center)
+                .align_y(Alignment::Center),
+        )
+        .on_press(msg)
+        .into()
+    };
+
+    let header = Row::new()
+        .push(arrow("←", Message::CalendarPrev))
+        .push(
+            text(cp.month_label.clone())
+                .size(fs)
+                .color(st.text)
+                .font(font.clone())
+                .width(Length::Fill)
+                .align_x(Alignment::Center)
+                .wrapping(iced::widget::text::Wrapping::None),
+        )
+        .push(arrow("→", Message::CalendarNext))
+        .width(Length::Fill)
+        .height(Length::Fill);
+    let mut labels = Row::new().width(Length::Fill).height(Length::Fill);
+    for label in &cp.weekdays {
+        labels = labels.push(cell(
+            text(label.clone())
+                .size(fs)
+                .color(st.text)
+                .font(font.clone())
+                .into(),
+        ));
+    }
+    // Eight equal rows: header, weekday labels and the six week rows.
+    let mut rows = Column::new().width(Length::Fill).height(Length::Fill);
+    rows = rows.push(header).push(labels);
+    for week in weeks {
+        let mut row = Row::new().width(Length::Fill).height(Length::Fill);
+        for day in week {
+            // Today only exists in the month the offset started from.
+            let is_today = cp.offset == 0 && day == Some(cp.today.2);
+            let day_font = if is_today {
+                iced::Font {
+                    weight: iced::font::Weight::Bold,
+                    ..font.clone()
+                }
+            } else {
+                font.clone()
+            };
+            let body: Element<'_, Message> = match day {
+                Some(d) => text(d.to_string())
+                    .size(fs)
+                    .color(st.text)
+                    .font(day_font)
+                    .into(),
+                None => Space::new().into(),
+            };
+            let c = container(body)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Alignment::Center)
+                .align_y(Alignment::Center);
+            let day_cell: Element<'_, Message> = if is_today {
+                c.style(move |_theme: &iced::Theme| {
+                    let mut style = ContainerStyle::default();
+                    style.background = Some(Background::Color(accent));
+                    style.border.radius = corner_radius([false; 4], 4.0);
+                    style
+                })
+                .into()
+            } else {
+                c.into()
+            };
+            row = row.push(day_cell);
+        }
+        rows = rows.push(row);
+    }
+    let content: Element<'_, Message> = rows.into();
+    let surface = styled_box(
+        container(content)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(iced::Padding::from(st.padding as f32))
+            .into(),
+        Some(st.bg),
+        Some(st.border),
+        st.border_width.min(u16::MAX as u32) as u16,
+        st.border_radius.min(u16::MAX as u32) as u16,
+        &st.border_type,
+        [false, false, false, false],
+        // The content carries the padding; the box only draws its border.
+        0,
+        Length::Fill,
+        Length::Fill,
+    );
+    // The whole surface reports its departure: the tick's grace takes
+    // it from there (the cursor may still return within three seconds).
+    MouseArea::new(surface).on_exit(Message::CalendarExited).into()
+}
+
 /// The tray menu surface: one row per entry inside the styled box
 /// (shared with the sensors and the notification cards), the whole list
 /// wrapped in a MouseArea whose exit dismisses the menu (the approved
@@ -3627,6 +3980,7 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         graphs,
                         graph_popup: None,
                         graph_link: None,
+                        calendar: None,
                         wallpaper: Vec::new(),
                     }
                 },
@@ -3723,11 +4077,11 @@ fn parse_config_arg() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cmdline_is_piuma, corner_radius, dbusmenu, fit_menu_labels, focused_output_in,
-        icons_theme, lock_pid, menu_placement, menu_row_h, menu_size, monitor_names_json,
-        popup_card_h, popup_missed_tick, popup_placement, section_touch, text_width,
-        tray_icon_target, wallpaper_plan, GraphPopup, PopupStyle, MENU_INDENT, MENU_MAX_W,
-        MENU_MIN_W, MENU_PAD,
+        calendar_size, cmdline_is_piuma, corner_radius, dbusmenu, fit_menu_labels,
+        focused_output_in, icons_theme, lock_pid, menu_placement, menu_row_h, menu_size,
+        monitor_names_json, popup_card_h, popup_missed_tick, popup_placement, section_touch,
+        text_width, tray_icon_target, wallpaper_plan, GraphPopup, PopupStyle, MENU_INDENT,
+        MENU_MAX_W, MENU_MIN_W, MENU_PAD,
     };
     use iced::font::Font;
     use iced_exwlshell::reexport::Anchor;
@@ -4044,6 +4398,23 @@ mod tests {
         let (anchor, m) = menu_placement(100, 500, 200, 600, 1920, 1080);
         assert_eq!(anchor, Anchor::Left | Anchor::Bottom);
         assert_eq!((m.bottom, m.top), (1080 - 600, 0));
+    }
+
+    /// The calendar popup's surface adapts to the panel font: doubling
+    /// `panel.font_size` must grow both dimensions strictly (the cells
+    /// fit the numbers and labels they show, the rows follow the size).
+    #[test]
+    fn calendar_size_follows_the_font() {
+        let weekdays = ["lun", "mar", "mer", "gio", "ven", "sab", "dom"].map(String::from);
+        let mut cfg = crate::config::default_config();
+        cfg.panel.font_size = Some(12);
+        let small = calendar_size(&cfg, &weekdays);
+        cfg.panel.font_size = Some(24);
+        let large = calendar_size(&cfg, &weekdays);
+        assert!(large.0 > small.0 && large.1 > small.1, "{small:?} vs {large:?}");
+        // With the default style the surface holds seven columns of at
+        // least two characters plus padding — never a degenerate box.
+        assert!(small.0 >= 7 * (12 + 2 * 6), "narrow: {:?}", small);
     }
 
     /// Roadmap2 #1: the monitor list is the `name` field of every entry

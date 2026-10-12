@@ -738,7 +738,7 @@ impl PiumaSetup {
                     map.insert("device".to_string(), JsonValue::String(device.clone()));
                 }
             }
-            "clock" => {
+            "clock" | "calendar" => {
                 if let Some(format) = &sensor.source_config.format {
                     map.insert("format".to_string(), JsonValue::String(format.clone()));
                 }
@@ -2688,7 +2688,7 @@ const SOURCE_TYPES: &[&str] = &[
     // temp_ — temperatures
     "temp_cpu",
     // no numeric category
-    "net_state", "uptime", "clock", "window", "workspace",
+    "net_state", "uptime", "clock", "calendar", "window", "workspace",
     "command", "env_var", "static_text", "tray", "notifications",
 ];
 
@@ -2733,6 +2733,7 @@ fn source_label(canonical: &str) -> &'static str {
         "net_state" => "Net state",
         "uptime" => "Uptime",
         "clock" => "Clock",
+        "calendar" => "Calendar",
         "window" => "Focused window",
         "workspace" => "Workspace",
         "tray" => "System tray",
@@ -2774,7 +2775,7 @@ fn sensor_view(section_index: usize, sensor_index: usize, sensor_count: usize, s
         "perc_volume" => input("Device", sensor.source_config.device.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "device".to_string(), value))
             .width(Length::Fill)
             .into(),
-        "clock" => input("Format", sensor.source_config.format.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "format".to_string(), value))
+        "clock" | "calendar" => input("Format", sensor.source_config.format.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "format".to_string(), value))
             .width(Length::Fill)
             .into(),
         "command" => input("Command", sensor.source_config.command.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "command".to_string(), value))

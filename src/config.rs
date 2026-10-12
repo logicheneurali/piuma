@@ -329,6 +329,10 @@ pub enum SensorSource {
     NetState { interface: String },
     #[serde(rename = "clock", alias = "Clock")]
     Clock { format: Option<String> },
+    /// Date/time on the bar (arbitrary `date` strftime, like `clock`)
+    /// with the month calendar popup on hover.
+    #[serde(rename = "calendar", alias = "Calendar")]
+    Calendar { format: Option<String> },
     #[serde(rename = "window", alias = "Window")]
     Window {},
     #[serde(rename = "workspace", alias = "Workspace")]
@@ -527,6 +531,31 @@ mod tests {
             serde_json::from_str(r#"{"panel":{"sections":[]}}"#).expect("bare config parses");
         assert!(bare.panel.icon_theme.is_none());
         assert!(bare.panel.sections.is_empty());
+    }
+
+    /// The `calendar` sensor's source parses with and without a format
+    /// and roundtrips the type name — exactly the validation
+    /// piuma-setup runs before saving.
+    #[test]
+    fn calendar_sensor_parses_and_roundtrips() {
+        let json = r#"{"panel":{"sections":[{"name":"sys","sensors":[
+            {"name":"Ora","source":{"type":"calendar","format":"%a %d %b %Y, %H:%M:%S"}},
+            {"name":"Ora base","source":{"type":"calendar"}}
+        ]}]}}"#;
+        let cfg: Config = serde_json::from_str(json).expect("a calendar sensor must be valid");
+        let SensorSource::Calendar { format } = &cfg.panel.sections[0].sensors[0].source else {
+            panic!("first sensor must be a calendar source");
+        };
+        assert_eq!(format.as_deref(), Some("%a %d %b %Y, %H:%M:%S"));
+        let out = serde_json::to_string(&cfg).expect("config must serialize");
+        assert!(out.contains(r#""type":"calendar""#), "got: {out}");
+        assert!(
+            matches!(
+                cfg.panel.sections[0].sensors[1].source,
+                SensorSource::Calendar { format: None }
+            ),
+            "the bare form keeps format absent"
+        );
     }
 
     /// Roadmap N2: `panel.autostart` parses and roundtrips; absent stays

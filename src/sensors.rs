@@ -313,10 +313,13 @@ pub fn adjust_volume(device: &str, up: bool) {
 }
 
 /// Get current time.
-pub fn get_time() -> String {
-    let output = Command::new("date")
-        .args(["+%H:%M:%S"])
-        .output();
+/// A `date` reading for an arbitrary strftime format: the `calendar`
+/// sensor's bar text (and the fixed readings below). The format is one
+/// argv — never a shell — an optional leading `+` is accepted, and a
+/// failing `date` shows `N/A` like every other reading.
+pub fn clock_formatted(format: &str) -> String {
+    let fmt = format.strip_prefix('+').unwrap_or(format);
+    let output = Command::new("date").arg(format!("+{fmt}")).output();
     match output {
         Ok(out) if out.status.success() => {
             let stdout = String::from_utf8_lossy(&out.stdout);
@@ -326,18 +329,13 @@ pub fn get_time() -> String {
     }
 }
 
+pub fn get_time() -> String {
+    clock_formatted("%H:%M:%S")
+}
+
 /// Get current date.
 pub fn get_date() -> String {
-    let output = Command::new("date")
-        .args(["+%Y-%m-%d"])
-        .output();
-    match output {
-        Ok(out) if out.status.success() => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            stdout.trim().to_string()
-        }
-        _ => "N/A".to_string(),
-    }
+    clock_formatted("%Y-%m-%d")
 }
 
 /// Longest window title the sensor shows (roadmap M1): longer text is cut
