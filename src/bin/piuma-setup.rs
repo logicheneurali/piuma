@@ -14,6 +14,9 @@ use std::path::{Path, PathBuf};
 // piuma's real config schema (same package, different bin target): the
 // save path validates against it before writing, so a config piuma
 // would reject is reported here instead of failing silently at load.
+// config.rs serves both binaries: the bar-only helpers (colour parsing,
+// default config, file loading) legitimately sit unused in the setup.
+#[allow(dead_code)]
 #[path = "../config.rs"]
 mod config;
 
@@ -1910,7 +1913,7 @@ fn style_summary(colors: &[(&str, &Option<String>)], numbers: &[(&str, &Option<i
 
 /// Root view: the scrollable column of nested cards with the action bar
 /// underneath; a modal, when open, is stacked over everything on a dimmed layer.
-fn view(state: &PiumaSetup) -> Element<Message> {
+fn view(state: &PiumaSetup) -> Element<'_, Message> {
     // Roadmap N4: a left tab rail picks the category and only that
     // category's card renders — the header (file info) and the footer
     // (Load/Save/status) stay visible on every tab.
@@ -2002,7 +2005,7 @@ fn sidebar(state: &PiumaSetup) -> Element<'_, Message> {
 }
 
 /// Fixed bottom bar: edited file + status on the left, actions on the right.
-fn footer(state: &PiumaSetup) -> Element<Message> {
+fn footer(state: &PiumaSetup) -> Element<'_, Message> {
     let info = column![
         text(format!("editing: {}", state.current_file)).size(BODY)
             .style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.5, 0.5, 0.55)), ..TextStyle::default() }),
@@ -2029,7 +2032,7 @@ fn footer(state: &PiumaSetup) -> Element<Message> {
 }
 
 /// Dimmed full-window layer with the active modal card centered on top.
-fn modal_overlay(state: &PiumaSetup) -> Element<Message> {
+fn modal_overlay(state: &PiumaSetup) -> Element<'_, Message> {
     container(modal_card(state))
         .width(Length::Fill)
         .height(Length::Fill)
@@ -2043,7 +2046,7 @@ fn modal_overlay(state: &PiumaSetup) -> Element<Message> {
 }
 
 /// The card of the currently open modal (an empty element when none).
-fn modal_card(state: &PiumaSetup) -> Element<Message> {
+fn modal_card(state: &PiumaSetup) -> Element<'_, Message> {
     // Errors are rendered inside the modal so they are visible over the overlay.
     let error = if state.status_is_error { state.status_message.clone() } else { None };
 
@@ -2136,7 +2139,7 @@ fn dialog_actions<'a>(action: Message, label: &'a str) -> Row<'a, Message> {
         .align_y(Alignment::Center)
 }
 
-fn config_header(_state: &PiumaSetup) -> Element<Message> {
+fn config_header(_state: &PiumaSetup) -> Element<'_, Message> {
     let title = text("Piuma Configuration Setup").size(22).style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.8, 0.8, 0.8)), ..TextStyle::default() });
     let subtitle = text("Configure your Piuma status bar").size(14).style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.6, 0.6, 0.6)), ..TextStyle::default() });
 
@@ -2362,7 +2365,7 @@ fn autostart_apps_settings(state: &PiumaSetup) -> Element<'_, Message> {
 }
 
 /// Panel-wide settings as a two-column form grid inside a card.
-fn panel_settings(state: &PiumaSetup) -> Element<Message> {
+fn panel_settings(state: &PiumaSetup) -> Element<'_, Message> {
     let font_size = state.config.font_size;
     let thickness = state.config.thickness;
     let anchor = state.config.anchor.clone().unwrap_or_default();
@@ -2543,7 +2546,7 @@ fn notifications_settings<'a>(state: &'a PiumaSetup) -> Element<'a, Message> {
 }
 
 /// The "Sections" block: one card per section, plus the add button.
-fn sections_list(state: &PiumaSetup) -> Element<Message> {
+fn sections_list(state: &PiumaSetup) -> Element<'_, Message> {
     let mut section_list = Column::new().spacing(15);
     for (i, section) in state.config.sections.iter().enumerate() {
         section_list = section_list.push(section_view(state, i, section));
@@ -2745,7 +2748,7 @@ fn source_label(canonical: &str) -> &'static str {
 /// Sensor card: identity header, source, action, then the collapsible
 /// "Style overrides" block (closed by default: overrides are optional).
 /// `sensor_count` bounds the ▼ arrow (disabled on the last sensor).
-fn sensor_view(section_index: usize, sensor_index: usize, sensor_count: usize, sensor: &Sensor, style_open: bool) -> Element<Message> {
+fn sensor_view(section_index: usize, sensor_index: usize, sensor_count: usize, sensor: &Sensor, style_open: bool) -> Element<'_, Message> {
     let header = Row::new()
         .push(input("Name", sensor.name.as_deref().unwrap_or(""), move |value| Message::SensorNameChanged(section_index, sensor_index, value))
             .width(Length::Fill))
@@ -2867,7 +2870,7 @@ fn sensor_view(section_index: usize, sensor_index: usize, sensor_count: usize, s
 
 /// The "Sensor Defaults" card: global style applied to every sensor,
 /// collapsed by default because it only overrides group-wide values.
-fn sensor_defaults_view(state: &PiumaSetup) -> Element<Message> {
+fn sensor_defaults_view(state: &PiumaSetup) -> Element<'_, Message> {
     let d = &state.config.sensor_defaults;
 
     let summary = style_summary(
@@ -2921,7 +2924,7 @@ fn sensor_defaults_view(state: &PiumaSetup) -> Element<Message> {
 
 /// The "Section Defaults" card: style applied to every section, overridden
 /// per section (same group rule as the sensor defaults).
-fn section_defaults_view(state: &PiumaSetup) -> Element<Message> {
+fn section_defaults_view(state: &PiumaSetup) -> Element<'_, Message> {
     let d = &state.config.section_defaults;
 
     let summary = style_summary(
@@ -2987,7 +2990,7 @@ fn action_buttons() -> Element<'static, Message> {
         .into()
 }
 
-fn status_bar(state: &PiumaSetup) -> Element<Message> {
+fn status_bar(state: &PiumaSetup) -> Element<'_, Message> {
     match &state.status_message {
         Some(msg) => {
             let is_error = state.status_is_error;
