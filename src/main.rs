@@ -47,8 +47,13 @@ mod workspace;
 
 // ── globals ────────────────────────────────────────────────────────
 
-static mut CONFIG: Option<config::Config> = None;
-static mut CONFIG_PATH: Option<String> = None;
+/// Startup config, handed to the first window factory call and to any
+/// later surface: written once before the threads start, read from any
+/// thread afterwards (`OnceLock` keeps that sound without `unsafe`).
+static CONFIG: std::sync::OnceLock<config::Config> = std::sync::OnceLock::new();
+/// The config file watched for hot reloads (string for the log lines);
+/// also written once at startup.
+static CONFIG_PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 static mut PANEL_SHOULD_CLOSE: bool = false;
 static mut SCREEN_WIDTH: u32 = 1920;
 static mut SCREEN_HEIGHT: u32 = 1080;
@@ -183,7 +188,6 @@ struct SectionData {
     /// with `section_defaults.respect_screen_edges` active (roadmap M3):
     /// those sides render square instead of rounded.
     touch: [bool; 4],
-    weight: f32,
     sensors: Vec<SensorValue>,
 }
 
@@ -319,7 +323,8 @@ struct CalendarPopup {
 #[to_layer_message(multi)]
 #[derive(Debug, Clone)]
 enum Message {
-    Tick(Instant),
+    /// Marks a second edge: the tick handler reloads, polls and advances.
+    Tick,
     /// A cursor/input event with the id of the window it happened on:
     /// coordinates are per-window and only the bar's own belong into
     /// `last_cursor`.
@@ -448,27 +453,6 @@ impl Operation<Message> for FindSensorRect {
 
 fn resolve_color<'a>(cfg: Option<Color>, default: Color) -> Color {
     cfg.unwrap_or(default)
-}
-
-fn text_color_style(color: Color) -> impl Fn(&iced::Theme) -> ContainerStyle {
-    move |_theme: &iced::Theme| ContainerStyle {
-        text_color: Some(color),
-        ..ContainerStyle::default()
-    }
-}
-
-fn container_with_bg<'a>(
-    child: Element<'a, Message>,
-    bg_color: Color,
-) -> Element<'a, Message> {
-    container(child)
-        .width(Length::Shrink)
-        .height(Length::Shrink)
-        .style(move |_theme: &iced::Theme| ContainerStyle {
-            background: Some(Background::Color(bg_color)),
-            ..ContainerStyle::default()
-        })
-        .into()
 }
 
 /// A solid bar widget used to compose partial sensor borders.
@@ -639,7 +623,7 @@ pub(crate) fn styled_box<'a>(
 /// State of the watched config file: `(modified time, length)`.
 /// `None` when no path is set or the file is missing/unreadable.
 fn config_file_state() -> Option<(SystemTime, u64)> {
-    let path = unsafe { CONFIG_PATH.clone()? };
+    let path = CONFIG_PATH.get()?.clone();
     let meta = std::fs::metadata(path).ok()?;
     Some((meta.modified().ok()?, meta.len()))
 }
@@ -656,7 +640,7 @@ fn maybe_reload(panel: &mut Panel) -> Option<(config::Config, String)> {
     if panel.last_reload == Some(state) {
         return None;
     }
-    let path = unsafe { CONFIG_PATH.clone()? };
+    let path = CONFIG_PATH.get()?.clone();
     panel.last_reload = Some(state);
 
     let contents = std::fs::read_to_string(&path).ok()?;
@@ -675,11 +659,11 @@ fn maybe_reload(panel: &mut Panel) -> Option<(config::Config, String)> {
 // ── update ──────────────────────────────────────────────────────────
 
 /// Applies a message to the panel. `timed`'s `Instant` parameter was dropped
-/// in the migration to the `daemon` build pattern (multi-surface): each
-/// `Tick` already carries its own `Instant`.
+/// in the migration to the `daemon` build pattern (multi-surface), and the
+/// `Tick` payload with it: the tick only marks the second edge.
 fn update(panel: &mut Panel, message: Message) -> Command<Message> {
     match message {
-        Message::Tick(_) => {
+        Message::Tick => {
             // Hot reload: pick up config file changes (content and, when
             // layout/align differ from what is applied, surface geometry).
             let mut geometry_changed = false;
@@ -952,7 +936,6 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                     } else {
                         [false; 4]
                     },
-                    weight: panel.config.panel.default_section_weight.as_ref().map(|w| (*w as u32) as f32).unwrap_or(1.0),
                     sensors,
                 });
             }
@@ -1096,13 +1079,13 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                     cmds.push(iced::window::close(id));
                 }
             }
-            cmds.push(update(panel, Message::Tick(Instant::now())));
+            cmds.push(update(panel, Message::Tick));
             Command::batch(cmds)
         }
         Message::NotificationsChanged => {
             // A notification arrived, was replaced, expired or closed:
             // rebuild at once (same full path as the tray poke).
-            update(panel, Message::Tick(Instant::now()))
+            update(panel, Message::Tick)
         }
         Message::PopupCardClicked(id) => {
             // Whole-card click = the spec's default action, then dismiss.
@@ -1464,7 +1447,7 @@ fn subscription(panel: &Panel) -> Subscription<Message> {
         });
     Subscription::batch(
         [
-            time::every(std::time::Duration::from_secs(1)).map(|now| Message::Tick(now)),
+            time::every(std::time::Duration::from_secs(1)).map(|_| Message::Tick),
             event::listen_with(|event, _status, id| Some(Message::IcedEvent(id, event))),
         ]
         .into_iter()
@@ -4006,7 +3989,8 @@ fn main() -> Result<(), iced_exwlshell::Error> {
     let config_path = parse_config_arg();
 
     // Initialise logging.
-    let _ = simple_logger::SimpleLogger::from_env()
+    let _ = simple_logger::SimpleLogger::new()
+        .env()
         .with_utc_timestamps()
         .init();
 
@@ -4058,10 +4042,10 @@ fn main() -> Result<(), iced_exwlshell::Error> {
         SCREEN_HEIGHT = active_screen_height().unwrap_or(1080);
     }
 
-    unsafe { CONFIG = Some(config.clone()); }
-    unsafe { CONFIG_PATH = Some(resolved_config_path.to_string_lossy().into_owned()); }
+    let _ = CONFIG.set(config.clone());
+    let _ = CONFIG_PATH.set(resolved_config_path.to_string_lossy().into_owned());
 
-    let panel_config = unsafe { CONFIG.as_ref().cloned().unwrap_or_else(|| config::default_config()) };
+    let panel_config = CONFIG.get().cloned().unwrap_or_else(|| config::default_config());
 
     // Run the iced app on a dedicated thread so the close action can be
     // observed from the main thread without blocking the event loop.
@@ -4070,7 +4054,10 @@ fn main() -> Result<(), iced_exwlshell::Error> {
         .spawn(move || {
             let outcome = daemon(
                 || {
-                    let cfg = unsafe { CONFIG.as_ref().map(|c| c.clone()).unwrap_or_else(|| config::default_config()) };
+                    let cfg = CONFIG
+                        .get()
+                        .cloned()
+                        .unwrap_or_else(|| config::default_config());
                     // Initial geometry (size, anchor, exclusive zone) must
                     // match what wl_settings applies at startup, so reloads
                     // only emit LayoutChange/ExclusiveZoneChange on change.
