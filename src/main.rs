@@ -2140,20 +2140,16 @@ fn panel_thickness(config: &config::Config) -> u32 {
 }
 
 /// Icon edge (px) that fits inside a tray sensor box: panel thickness minus
-/// everything the layout draws on the thickness axis inside it — section
-/// border and content padding on both sides, the section title when sensors
-/// are stacked vertically (`title_extra`), and the sensor's own padding and
-/// border — clamped to a usable range so a hairline bar and a very thick
-/// bar both stay sane.
-fn tray_icon_target(
-    thickness: u32,
-    section_border: u32,
-    title_extra: u32,
-    padding: u32,
-    border: u32,
-) -> u16 {
-    let chrome =
-        2 * (section_border + u32::from(SECTION_CONTENT_PAD) + padding + border) + title_extra;
+/// everything the layout actually spends on the thickness axis inside it —
+/// the section content padding on both sides, the sensor's own padding, and
+/// the section title when sensors are stacked vertically (`title_extra`) —
+/// clamped to a usable range so a hairline bar and a very thick bar both
+/// stay sane. Borders are not subtracted: iced draws them inside the box (a
+/// pill measures the same with or without one), so they never eat thickness —
+/// the sensor row really is this tall, and this is the height the row's text
+/// already fills.
+fn tray_icon_target(thickness: u32, title_extra: u32, padding: u32) -> u16 {
+    let chrome = 2 * (u32::from(SECTION_CONTENT_PAD) + padding) + title_extra;
     thickness.saturating_sub(chrome).clamp(4, 48) as u16
 }
 
@@ -2176,13 +2172,7 @@ fn update_tray_icon_target(panel: &Panel) {
         };
         for sensor in &section.sensors {
             if sensor.tray.is_some() {
-                let target = tray_icon_target(
-                    thickness,
-                    u32::from(section.border_width),
-                    title_extra,
-                    u32::from(sensor.padding),
-                    u32::from(sensor.border_width),
-                );
+                let target = tray_icon_target(thickness, title_extra, u32::from(sensor.padding));
                 smallest = Some(smallest.map_or(target, |m| m.min(target)));
             }
         }
@@ -4315,26 +4305,26 @@ mod tests {
     /// A bare 26px bar: only the section content padding (4px a side).
     #[test]
     fn tray_icon_target_subtracts_section_padding() {
-        assert_eq!(tray_icon_target(26, 0, 0, 0, 0), 18);
+        assert_eq!(tray_icon_target(26, 0, 0), 18);
     }
 
-    /// Section border + sensor padding/border, both sides, subtracted too.
+    /// The sensor's own padding (6px a side) subtracts on top of it.
     #[test]
-    fn tray_icon_target_subtracts_chrome() {
-        assert_eq!(tray_icon_target(44, 1, 0, 6, 2), 44 - 2 - 8 - 12 - 4);
+    fn tray_icon_target_subtracts_sensor_padding() {
+        assert_eq!(tray_icon_target(44, 0, 6), 24);
     }
 
     /// A stacked section title eats thickness as well (font 14 → 14+2+8).
     #[test]
     fn tray_icon_target_subtracts_stacked_title() {
-        assert_eq!(tray_icon_target(44, 0, 24, 0, 0), 44 - 8 - 24);
+        assert_eq!(tray_icon_target(44, 24, 0), 12);
     }
 
     /// Clamped: never smaller than 4px, never larger than 48px.
     #[test]
     fn tray_icon_target_clamps() {
-        assert_eq!(tray_icon_target(10, 0, 0, 0, 0), 4);
-        assert_eq!(tray_icon_target(400, 0, 0, 0, 0), 48);
+        assert_eq!(tray_icon_target(10, 0, 0), 4);
+        assert_eq!(tray_icon_target(400, 0, 0), 48);
     }
 
     /// The height is exact (rows × row height + padding — the surface
