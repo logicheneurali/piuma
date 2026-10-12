@@ -87,6 +87,10 @@ pub struct PanelConfig {
     pub font_size: Option<u32>,
     /// Bold panel text (roadmap M2); absent = false.
     pub bold: Option<bool>,
+    /// Font family for the sensors' value text only; absent = the panel
+    /// font. A monospaced family makes the digits one width wide, so
+    /// the values never jitter as they change.
+    pub value_font: Option<String>,
     /// Theme used to resolve the sensors' `icon` names (roadmap N1);
     /// absent = the tray's rule (GTK icon-theme setting, then `hicolor`).
     pub icon_theme: Option<String>,
@@ -225,6 +229,16 @@ pub struct SectionConfig {
     pub sensors: Vec<SensorConfig>,
 }
 
+/// A value-threshold colour rule: while the sensor's displayed value
+/// parses to at least `min`, its text renders in `color`; the highest
+/// matching rule wins. Rules below every reading and unparsable
+/// colours/values are ignored.
+#[derive(Deserialize, serde::Serialize, Clone)]
+pub struct ColorRule {
+    pub min: f64,
+    pub color: String,
+}
+
 #[derive(Deserialize, serde::Serialize, Clone)]
 #[allow(clippy::upper_variable_names, clippy::struct_field_names)]
 pub struct SensorConfig {
@@ -261,6 +275,11 @@ pub struct SensorConfig {
     /// `temp_cpu`); on the others the toggle is inert.
     #[serde(default)]
     pub draw_graph: bool,
+    /// Threshold colours for the displayed value (`color_rules`): the
+    /// highest `min` the reading reaches wins; hover still overrides
+    /// (`text_color_hover`). Absent = plain `text_color`.
+    #[serde(default)]
+    pub color_rules: Option<Vec<ColorRule>>,
 }
 
 /// Sensor sources. JSON `type` values follow the naming convention:
@@ -362,16 +381,17 @@ pub fn default_config() -> Config {
         border_radius: None,
         border_type: None,
         sensors: vec![
-            SensorConfig { name: "CPU".to_string(), description: None, icon: None, source: SensorSource::PercCpu {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false },
-            SensorConfig { name: "GPU".to_string(), description: None, icon: None, source: SensorSource::PercGpu {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false },
-            SensorConfig { name: "MEM".to_string(), description: None, icon: None, source: SensorSource::DetailMem {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false },
-            SensorConfig { name: "DISK".to_string(), description: None, icon: None, source: SensorSource::PercDisk {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false },
-            SensorConfig { name: "UPTIME".to_string(), description: None, icon: None, source: SensorSource::Uptime {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false },
+            SensorConfig { name: "CPU".to_string(), description: None, icon: None, source: SensorSource::PercCpu {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false, color_rules: None },
+            SensorConfig { name: "GPU".to_string(), description: None, icon: None, source: SensorSource::PercGpu {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false, color_rules: None },
+            SensorConfig { name: "MEM".to_string(), description: None, icon: None, source: SensorSource::DetailMem {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false, color_rules: None },
+            SensorConfig { name: "DISK".to_string(), description: None, icon: None, source: SensorSource::PercDisk {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false, color_rules: None },
+            SensorConfig { name: "UPTIME".to_string(), description: None, icon: None, source: SensorSource::Uptime {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false, color_rules: None },
         ],
     };
 
     Config {
         panel: PanelConfig {
+            value_font: None,
             font: Some("Noto Sans".to_string()),
             font_size: Some(14),
             bold: None,

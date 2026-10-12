@@ -65,6 +65,14 @@ const GRID_ALPHA: f32 = 0.25;
 const AVG_ALPHA: f32 = 0.55;
 /// Quarter steps per axis: 4 divisions = the 0/25/50/75/100% lines.
 const GRID_STEPS: u32 = 4;
+/// Alpha of the gradient fill under the trend line.
+const AREA_ALPHA: f32 = 0.28;
+/// Alpha of the axis edge labels (dimmed trend colour).
+const AXIS_LABEL_ALPHA: f32 = 0.7;
+/// Font size of the axis edge labels.
+const AXIS_LABEL_SIZE: f32 = 9.0;
+/// Radius of the "now" dot on the trend's last sample.
+const LAST_DOT_R: f32 = 2.5;
 
 /// y of a 0..1 fraction of the axis: 0 = bottom (minimum), 1 = top
 /// (maximum). The single source for grid, data, guide line and the
@@ -114,6 +122,18 @@ pub fn avg_label(avg: f32, unit: &str) -> String {
         "%" => format!("avg {avg:.0}{unit}"),
         "" => format!("avg {avg:.1}"),
         _ => format!("avg {avg:.1}{unit}"),
+    }
+}
+
+/// Edge label of the canvas scale: the axis bounds in the sensor's
+/// unit, formatted like the average label (`100%`, `61.5°C`,
+/// `9318 B/s`).
+pub fn axis_label(v: f32, unit: &str) -> String {
+    match unit {
+        "B/s" => format!("{v:.0} {unit}"),
+        "%" => format!("{v:.0}{unit}"),
+        "" => format!("{v:.1}"),
+        _ => format!("{v:.1}{unit}"),
     }
 }
 
@@ -251,16 +271,24 @@ pub struct Graph {
     samples: Vec<f32>,
     scale: Scale,
     color: Color,
+    /// Sensor unit for the axis edge labels (`%`, `°C`, `B/s`, "").
+    unit: &'static str,
 }
 
 /// The popup's canvas widget for one sensor's window: it fills the
 /// space the popup view gives it (the window size rules the canvas
 /// bounds, the draw pass reads them from `bounds`).
-pub fn widget(samples: Vec<f32>, scale: Scale, color: Color) -> iced::Element<'static, crate::Message> {
+pub fn widget(
+    samples: Vec<f32>,
+    scale: Scale,
+    color: Color,
+    unit: &'static str,
+) -> iced::Element<'static, crate::Message> {
     canvas::Canvas::new(Graph {
         samples,
         scale,
         color,
+        unit,
     })
     .width(iced::Length::Fill)
     .height(iced::Length::Fill)
@@ -302,14 +330,18 @@ impl<Message> canvas::Program<Message> for Graph {
                     }),
             );
         }
-        // The trend itself.
+        // The trend itself: a gradient fill under the line gives it
+        // mass (a value riding low on the axis still reads), then the
+        // line, then the "now" dot on the last sample.
         if self.samples.len() >= 2 {
             let (lo, hi) = y_bounds(self.scale, &self.samples);
             let last = (self.samples.len() - 1) as f32;
+            let mut top = h;
             let line = Path::new(|path| {
                 for (i, v) in self.samples.iter().enumerate() {
                     let x = w * i as f32 / last;
                     let y = axis_y(h, (v - lo) / (hi - lo));
+                    top = top.min(y);
                     if i == 0 {
                         path.move_to(iced::Point::new(x, y));
                     } else {
@@ -317,10 +349,40 @@ impl<Message> canvas::Program<Message> for Graph {
                     }
                 }
             });
+            let area = Path::new(|path| {
+                path.move_to(iced::Point::new(0.0, h));
+                for (i, v) in self.samples.iter().enumerate() {
+                    let x = w * i as f32 / last;
+                    path.line_to(iced::Point::new(x, axis_y(h, (v - lo) / (hi - lo))));
+                }
+                path.line_to(iced::Point::new(w, h));
+                path.close();
+            });
+            frame.fill(
+                &area,
+                canvas::gradient::Linear::new(iced::Point::new(0.0, top), iced::Point::new(0.0, h))
+                    .add_stop(
+                        0.0,
+                        Color {
+                            a: AREA_ALPHA,
+                            ..self.color
+                        },
+                    )
+                    .add_stop(
+                        1.0,
+                        Color {
+                            a: 0.0,
+                            ..self.color
+                        },
+                    ),
+            );
             frame.stroke(
                 &line,
                 Stroke::default().with_width(2.0).with_color(self.color),
             );
+            let now =
+                iced::Point::new(w, axis_y(h, (self.samples[last as usize] - lo) / (hi - lo)));
+            frame.fill(&Path::circle(now, LAST_DOT_R), self.color);
         }
         // Average guide over the whole window; the popup view labels it
         // through the same `axis_y` math (see `avg_label`).
@@ -338,6 +400,30 @@ impl<Message> canvas::Program<Message> for Graph {
                     ..self.color
                 }),
             );
+        }
+        // Axis edge labels: the top and bottom of the visible range on
+        // the canvas's right edge, dimmed in the trend colour.
+        {
+            let (lo, hi) = y_bounds(self.scale, &self.samples);
+            let dim = Color {
+                a: AXIS_LABEL_ALPHA,
+                ..self.color
+            };
+            for (value, y, align_y) in [
+                (hi, 1.0, iced::alignment::Vertical::Top),
+                (lo, h - 1.0, iced::alignment::Vertical::Bottom),
+            ] {
+                frame.fill_text(canvas::Text {
+                    content: axis_label(value, self.unit),
+                    position: iced::Point::new(w - 2.0, y),
+                    max_width: w,
+                    color: dim,
+                    size: iced::Pixels::from(AXIS_LABEL_SIZE),
+                    align_x: iced::widget::text::Alignment::Right,
+                    align_y,
+                    ..Default::default()
+                });
+            }
         }
         vec![frame.into_geometry()]
     }
@@ -594,6 +680,17 @@ mod tests {
         assert_eq!(avg_label(61.54, "°C"), "avg 61.5°C");
         assert_eq!(avg_label(9318.4, "B/s"), "avg 9318 B/s");
         assert_eq!(avg_label(1.0, ""), "avg 1.0");
+    }
+
+    /// The canvas scale edges label like the average: whole percents,
+    /// one decimal with the unit, bytes without decimals.
+    #[test]
+    fn axis_labels_carry_the_units() {
+        assert_eq!(axis_label(100.0, "%"), "100%");
+        assert_eq!(axis_label(0.0, "%"), "0%");
+        assert_eq!(axis_label(61.54, "°C"), "61.5°C");
+        assert_eq!(axis_label(9318.4, "B/s"), "9318 B/s");
+        assert_eq!(axis_label(1.0, ""), "1.0");
     }
 
     /// The connector drops from the sensor's bottom edge, rails across

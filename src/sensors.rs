@@ -263,6 +263,19 @@ fn parse_percent(value: &str) -> Option<f32> {
     value.trim().trim_end_matches('%').parse::<f32>().ok()
 }
 
+/// The number at the start of a displayed value (`"62°C"` → 62,
+/// `"1.4 KB/s"` → 1.4, `"N/A"` → None): threshold colour rules read
+/// the value the bar already shows, whatever unit suffix follows it.
+pub fn leading_number(value: &str) -> Option<f32> {
+    let t = value.trim_start();
+    let end = t
+        .char_indices()
+        .take_while(|(_, c)| c.is_ascii_digit() || matches!(c, '.' | 'e' | 'E' | '+' | '-'))
+        .last()
+        .map(|(i, c)| i + c.len_utf8())?;
+    t[..end].parse::<f32>().ok()
+}
+
 /// Get audio volume as (text, percent value) (e.g. `50`): tries
 /// amixer → wpctl → pactl (ALSA, PipeWire, PulseAudio) and remembers
 /// the first that works; empty device = Master (amixer control name;
@@ -820,6 +833,20 @@ mod tests {
         assert_eq!(parse_percent("50"), Some(50.0));
         assert_eq!(parse_percent("0"), Some(0.0));
         assert_eq!(parse_percent("N/A"), None);
+    }
+
+    /// Threshold rules read the leading number whatever suffix follows;
+    /// negative readings (below-zero temperatures) keep their sign and
+    /// unparsable values give nothing.
+    #[test]
+    fn leading_number_takes_the_value_head() {
+        assert_eq!(leading_number("62°C"), Some(62.0));
+        assert_eq!(leading_number("1.4 KB/s"), Some(1.4));
+        assert_eq!(leading_number("50"), Some(50.0));
+        assert_eq!(leading_number("100%"), Some(100.0));
+        assert_eq!(leading_number("-3°C"), Some(-3.0));
+        assert_eq!(leading_number("N/A"), None);
+        assert_eq!(leading_number(""), None);
     }
 
     /// Empty device falls back to the amixer `Master` control.

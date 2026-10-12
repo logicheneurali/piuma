@@ -136,6 +136,10 @@ struct SensorValue {
     description: String,
     value: String,
     text_color: Option<iced::Color>,
+    /// Threshold colour rules (config `color_rules`) parsed to colours
+    /// and sorted ascending by `min`: the view tints the value with
+    /// the highest rule the displayed reading reaches.
+    color_rules: Vec<(f32, Color)>,
     bg_color: Option<Color>,
     text_color_hover: Option<iced::Color>,
     bg_color_hover: Option<Color>,
@@ -818,6 +822,21 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                         let sensor_bg_hover: Option<Color> = bg_h_str.and_then(|sc| config::parse_color(sc).ok());
                         let sensor_tc_hover: Option<iced::Color> = tc_h_str.and_then(|sc| config::parse_color(sc).ok());
                         let sensor_border: Option<Color> = bc_str.and_then(|sc| config::parse_color(sc).ok());
+                        // Threshold colour rules, colours resolved once
+                        // per rebuild and sorted ascending: the view
+                        // picks the highest rule the reading reaches.
+                        let mut color_rules: Vec<(f32, Color)> = s
+                            .color_rules
+                            .as_deref()
+                            .unwrap_or_default()
+                            .iter()
+                            .filter_map(|r| {
+                                config::parse_color(&r.color)
+                                    .ok()
+                                    .map(|c| (r.min as f32, c))
+                            })
+                            .collect();
+                        color_rules.sort_by(|a, b| a.0.total_cmp(&b.0));
                         SensorValue {
                             // static_text and tray sensors render only their
                             // content: the name stays in the config (setup
@@ -836,6 +855,7 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                             description: s.description.as_ref().map(|d| d.to_string()).unwrap_or_default(),
                             value,
                             text_color: Some(sensor_tc),
+                            color_rules,
                             bg_color: sensor_bg,
                             text_color_hover: sensor_tc_hover,
                             bg_color_hover: sensor_bg_hover,
@@ -859,7 +879,7 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                                 config::SensorSource::UsedNetup { .. }
                                     | config::SensorSource::UsedNetdown { .. }
                             ) {
-                                let font = panel_font(&panel.config);
+                                let font = value_font(&panel.config);
                                 let size =
                                     panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
                                 Some(text_width::widest(
@@ -1470,9 +1490,9 @@ static BAR_ID: std::sync::OnceLock<iced::window::Id> = std::sync::OnceLock::new(
 static FONT_NAMES: std::sync::Mutex<Vec<(&'static str, String)>> =
     std::sync::Mutex::new(Vec::new());
 
-/// The `'static` family name of the configured font (roadmap M2).
-fn font_name_static(config: &config::Config) -> &'static str {
-    let name = config.panel.font.as_deref().unwrap_or(DEFAULT_FONT);
+/// The `'static` family name of `name` (roadmap M2): one leak per
+/// distinct family, so `Font::with_name` can take it repeatedly.
+fn family_name_static(name: &str) -> &'static str {
     let mut names = FONT_NAMES
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1493,7 +1513,30 @@ fn panel_font(config: &config::Config) -> Font {
     } else {
         iced::font::Weight::Normal
     };
-    Font { weight, ..Font::with_name(font_name_static(config)) }
+    Font {
+        weight,
+        ..Font::with_name(family_name_static(
+            config.panel.font.as_deref().unwrap_or(DEFAULT_FONT),
+        ))
+    }
+}
+
+/// The font of the sensors' value texts: `panel.value_font` when set
+/// (a monospaced family keeps the digits one width wide, so the
+/// values never jitter), the panel font otherwise — same weight.
+fn value_font(config: &config::Config) -> Font {
+    let weight = if config.panel.bold.unwrap_or(false) {
+        iced::font::Weight::Bold
+    } else {
+        iced::font::Weight::Normal
+    };
+    match config.panel.value_font.as_deref() {
+        Some(name) => Font {
+            weight,
+            ..Font::with_name(family_name_static(name))
+        },
+        None => panel_font(config),
+    }
 }
 
 fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> {
@@ -1524,6 +1567,8 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
     }
     let _ = BAR_ID.set(window);
     let font_obj = panel_font(&panel.config);
+    // Value texts can ride a separate (typically monospaced) family.
+    let value_font_obj = value_font(&panel.config);
     let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
 
     // Panel orientation: the `thickness` axis (the "cross" axis of the panel)
@@ -1582,11 +1627,22 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
             }
             let sensor_text_color = s.text_color.as_ref().map(|c| *c).unwrap_or(section_text);
 
-            // Text color: hover variant when the cursor is over this sensor.
+            // Text colour: a threshold rule the reading reaches (the
+            // highest `min` ≤ value) tints the value; the hover variant
+            // still wins while the cursor is over the sensor.
+            let ruled = sensors::leading_number(&s.value)
+                .and_then(|v| {
+                    s.color_rules
+                        .iter()
+                        .rev()
+                        .find(|(min, _)| v >= *min)
+                        .map(|(_, c)| *c)
+                })
+                .unwrap_or(sensor_text_color);
             let text_color = if panel.hovered == Some((section_idx, sensor_idx)) {
-                s.text_color_hover.unwrap_or_else(|| s.text_color.unwrap_or(section_text))
+                s.text_color_hover.unwrap_or(ruled)
             } else {
-                sensor_text_color
+                ruled
             };
 
             // The value text of net rates pins its box width (roadmap M5):
@@ -1595,7 +1651,7 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
             let value_text = text(&s.value)
                 .color(text_color)
                 .size(font_size)
-                .font(font_obj);
+                .font(value_font_obj);
             let value_widget: Element<'a, Message> = match s.fixed_width {
                 Some(width) => container(value_text)
                     .width(Length::Fixed(f32::from(width)))
@@ -3408,11 +3464,21 @@ fn graph_popup_view<'a>(panel: &'a Panel, gp: &GraphPopup) -> Element<'a, Messag
         .get(gp.section)
         .and_then(|sec| sec.sensors.get(gp.sensor));
     let (name, current, color) = match sensor {
-        Some(s) => (
-            s.name.clone(),
-            s.value.clone(),
-            s.text_color.unwrap_or(st.text),
-        ),
+        // The threshold rule tints the popup like the bar (header,
+        // trend, labels and average all follow the reading).
+        Some(s) => {
+            let base = s.text_color.unwrap_or(st.text);
+            let ruled = sensors::leading_number(&s.value)
+                .and_then(|v| {
+                    s.color_rules
+                        .iter()
+                        .rev()
+                        .find(|(min, _)| v >= *min)
+                        .map(|(_, c)| *c)
+                })
+                .unwrap_or(base);
+            (s.name.clone(), s.value.clone(), ruled)
+        }
         // The sensor died under the popup (its exit will follow): keep
         // the box empty rather than missing layers.
         None => (String::new(), "N/A".to_string(), st.text),
@@ -3438,7 +3504,14 @@ fn graph_popup_view<'a>(panel: &'a Panel, gp: &GraphPopup) -> Element<'a, Messag
                     .wrapping(iced::widget::text::Wrapping::None)
                     .width(Length::Fill),
             )
-            .push(text(current).size(st.font_size).color(color).font(font))
+            // The current reading leads the header: bigger than the
+            // sensor's name, in the same colour as the trend below.
+            .push(
+                text(current)
+                    .size(st.font_size.saturating_add(6))
+                    .color(color)
+                    .font(font),
+            )
             .align_y(Alignment::Center)
             .spacing(8)
             .width(Length::Fill)
@@ -3452,20 +3525,22 @@ fn graph_popup_view<'a>(panel: &'a Panel, gp: &GraphPopup) -> Element<'a, Messag
         let (lo, hi) = graphs::y_bounds(scale, &samples);
         (avg, graphs::axis_y(graph_h, (avg - lo) / (hi - lo)))
     });
-    let graph_box: Element<'_, Message> = container(graphs::widget(samples, scale, color))
+    // The sensor's unit feeds both the canvas scale labels and the
+    // average label.
+    let unit = panel
+        .config
+        .panel
+        .sections
+        .get(gp.section)
+        .and_then(|sec| sec.sensors.get(gp.sensor))
+        .map(|s| graphs::unit_of(&s.source))
+        .unwrap_or("");
+    let graph_box: Element<'_, Message> = container(graphs::widget(samples, scale, color, unit))
         .width(Length::Fill)
         .height(Length::Fixed(graph_h))
         .into();
     let graph_area: Element<'_, Message> = match guide {
         Some((avg, y)) => {
-            let unit = panel
-                .config
-                .panel
-                .sections
-                .get(gp.section)
-                .and_then(|sec| sec.sensors.get(gp.sensor))
-                .map(|s| graphs::unit_of(&s.source))
-                .unwrap_or("");
             // The label rides centred on the guide, on a tinted plate
             // that keeps it readable where it crosses the trend line
             // (line-height estimate + the plate's own padding).
