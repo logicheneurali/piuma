@@ -3315,19 +3315,22 @@ fn graph_link_geometry(panel: &Panel) -> Option<(graphs::Connector, (i32, i32), 
     let sensor = gp.sensor_rect?;
     let popup = popup_surface_rect(gp, panel.last_anchor, panel.last_exclusive_zone);
     let st = popup_style(&panel.config);
-    let (d1, d2, path) = graphs::connector_geometry(sensor, popup);
-    // The surface is the connector's bounding box (the end dots are
-    // its extremes — the rail lies between them) plus a dot-sized
-    // padding on every side; the drawing shifts into local space.
-    let x0 = d1.x.min(d2.x).floor() as i32 - GRAPH_LINK_PAD;
-    let y0 = d1.y.min(d2.y).floor() as i32 - GRAPH_LINK_PAD;
-    let x1 = d1.x.max(d2.x).ceil() as i32 + GRAPH_LINK_PAD;
-    let y1 = d1.y.max(d2.y).ceil() as i32 + GRAPH_LINK_PAD;
+    let (from, ctrl1, ctrl2, to) = graphs::connector_geometry(sensor, popup);
+    // The surface is the stem's bounding box (a cubic stays inside
+    // the hull of its controls, and those sit between the ends) plus
+    // a dot-sized padding on every side; the drawing shifts into
+    // local space.
+    let x0 = from.x.min(to.x).floor() as i32 - GRAPH_LINK_PAD;
+    let y0 = from.y.min(to.y).floor() as i32 - GRAPH_LINK_PAD;
+    let x1 = from.x.max(to.x).ceil() as i32 + GRAPH_LINK_PAD;
+    let y1 = from.y.max(to.y).ceil() as i32 + GRAPH_LINK_PAD;
     let shift = |p: iced::Point| iced::Point::new(p.x - x0 as f32, p.y - y0 as f32);
     let conn = graphs::Connector {
-        d1: shift(d1),
-        d2: shift(d2),
-        path: path.iter().copied().map(shift).collect(),
+        from: shift(from),
+        ctrl1: shift(ctrl1),
+        ctrl2: shift(ctrl2),
+        to: shift(to),
+        dot: shift(from),
         color: st.border,
         width: (st.border_width as f32).max(1.0),
     };
@@ -3396,13 +3399,7 @@ fn sync_graph_link(panel: &mut Panel) -> Option<Command<Message>> {
 fn graph_link_view<'a>(panel: &'a Panel) -> Element<'a, Message> {
     match graph_link_geometry(panel) {
         Some((conn, _, _)) => graphs::link_widget(conn),
-        None => graphs::link_widget(graphs::Connector {
-            d1: iced::Point::new(0.0, 0.0),
-            d2: iced::Point::new(0.0, 0.0),
-            path: Vec::new(),
-            color: Color::TRANSPARENT,
-            width: 0.0,
-        }),
+        None => graphs::link_widget(graphs::Connector::empty()),
     }
 }
 
