@@ -292,11 +292,20 @@ struct CalendarPopup {
     weekdays: [String; 7],
     /// The header's "month year", re-fetched on every page change.
     month_label: String,
-    /// The cursor is on the popup's surface — set by the surface's own
-    /// cursor events (and at open, where the surface maps under the
-    /// cursor), cleared by its exit. Unlike a "seen once" flag it can
-    /// return to `false`: the grace needs "is on", not "ever was".
+    /// The cursor is on the popup's surface — set and cleared by the
+    /// surface's own cursor events (position-checked both ways, plus
+    /// the window's `CursorLeft`) and by the open-time test against
+    /// `rect`. Never one-way: a single "seen" setter with only the
+    /// widget's exit as a reset pins the popup open forever when that
+    /// exit never fires (its enter can be missed: the surface maps
+    /// under an already-moving cursor before the widget state exists).
     pointer_on_popup: bool,
+    /// The surface's real output-space rect (the placement shifted by
+    /// the anchors, `shifted_surface_rect`): the pointer checks compare
+    /// against where the surface really is — a top bar pushes it down
+    /// by the exclusive zone, so the intended rect contains the cursor
+    /// while the surface does not.
+    rect: (i32, i32, i32, i32),
     /// Grace ticks spent without sensor and without pointer.
     missed: u8,
 }
@@ -1005,30 +1014,49 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             // only from the bar's window: the layer popups (graph, tray menu)
             // report their own origin, and their coordinates leaked into
             // `last_cursor`, reopening the graph popup in a wrong place.
-            if let Event::Mouse(iced::mouse::Event::CursorMoved { position }) = e {
-                if let Some(gp) = panel.graph_popup.as_mut() {
-                    if gp.id == id {
-                        // The pointer reached the popup's surface: its own
-                        // relative position is discarded, the visit counts.
-                        gp.pointer_seen = true;
+            match e {
+                Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    if let Some(gp) = panel.graph_popup.as_mut() {
+                        if gp.id == id {
+                            // The pointer reached the popup's surface: its own
+                            // relative position is discarded, the visit counts.
+                            gp.pointer_seen = true;
+                        }
+                    }
+                    if let Some(cp) = panel.calendar.as_mut() {
+                        if cp.id == id {
+                            // Position-checked both ways: inside keeps the
+                            // popup alive, a point outside clears the flag —
+                            // the widget's exit alone can be missed (see the
+                            // field's note) and a one-way flag pinned the
+                            // popup open for good.
+                            let w = (cp.rect.2 - cp.rect.0) as f32;
+                            let h = (cp.rect.3 - cp.rect.1) as f32;
+                            cp.pointer_on_popup = (0.0..w).contains(&position.x)
+                                && (0.0..h).contains(&position.y);
+                        }
+                    }
+                    if BAR_ID.get().copied() == Some(id) {
+                        panel.last_cursor = Some((position.x, position.y));
+                        // The hover can process before this event (a sensor
+                        // hovered on the very first motion): retry the popup
+                        // opens now that a position exists.
+                        if let Some((section, sensor)) = panel.hovered {
+                            return hover_sync(panel, section, sensor, true);
+                        }
                     }
                 }
-                if let Some(cp) = panel.calendar.as_mut() {
-                    if cp.id == id {
-                        // Same for the calendar popup: the cursor is on it
-                        // until its own exit event says otherwise.
-                        cp.pointer_on_popup = true;
+                // The pointer left this window: for the calendar surface the
+                // compositor's own leave is authoritative — clear the flag
+                // even where the widget's `on_exit` never fired.
+                Event::Mouse(iced::mouse::Event::CursorLeft) => {
+                    if let Some(cp) = panel.calendar.as_mut() {
+                        if cp.id == id {
+                            cp.pointer_on_popup = false;
+                        }
                     }
                 }
-                if BAR_ID.get().copied() == Some(id) {
-                    panel.last_cursor = Some((position.x, position.y));
-                    // The hover can process before this event (a sensor
-                    // hovered on the very first motion): retry the popup
-                    // opens now that a position exists.
-                    if let Some((section, sensor)) = panel.hovered {
-                        return hover_sync(panel, section, sensor, true);
-                    }
-                }
+                _ => {}
             }
             Command::none()
         }
@@ -3023,6 +3051,11 @@ fn calendar_hover_sync(
     let (sw, sh) = unsafe { (SCREEN_WIDTH as i32, SCREEN_HEIGHT as i32) };
     let (anchor, margin) = menu_placement(x, y, w, h, sw, sh);
     let rect = placement_rect(anchor, &margin, w, h, sw, sh);
+    // Where the surface really lands: the bar's reservation on the
+    // shared edge pushes it, so the pointer tests below must not use
+    // the intended rect (it contains the cursor while the surface,
+    // e.g. for a top bar, sits a zone lower).
+    let surface = shifted_surface_rect(rect, anchor, panel.last_anchor, panel.last_exclusive_zone);
     let (id, open) = Message::layershell_open(NewLayerShellSettings {
         size: LayerSize::px(w, h),
         layer: Layer::Overlay,
@@ -3044,14 +3077,19 @@ fn calendar_hover_sync(
         today,
         weekdays,
         month_label: calendar::month_label(today.0, today.1),
-        // The surface usually maps under the cursor and steals it from
-        // the bar (then the cursor *is* on it); a flipped placement
-        // opens away from it — the rect test settles both, the surface's
-        // own events keep the flag right afterwards.
-        pointer_on_popup: (x >= rect.0 && x < rect.2 && y >= rect.1 && y < rect.3),
+        // The cursor is on the surface only if it really lies inside
+        // it: on the sensor (the common open) that is false and the
+        // sensor's own hover keeps the popup alive; a flipped or
+        // pushed placement opens away from the cursor either way.
+        pointer_on_popup: (x >= surface.0 && x < surface.2 && y >= surface.1 && y < surface.3),
+        rect: surface,
         missed: 0,
     });
-    eprintln!("[piuma] calendar: open rect={rect:?} cursor=({x},{y}) size={w}x{h}");
+    eprintln!(
+        "[piuma] calendar: open rect={rect:?} surface={surface:?} cursor=({x},{y}) \
+         pointer={} size={w}x{h}",
+        x >= surface.0 && x < surface.2 && y >= surface.1 && y < surface.3,
+    );
     cmds.push(open);
     Command::batch(cmds)
 }
@@ -3228,27 +3266,37 @@ fn cursor_in_graph_popup(panel: &Panel) -> bool {
         .is_some_and(|gp| x >= gp.rect.0 && x < gp.rect.2 && y >= gp.rect.1 && y < gp.rect.3)
 }
 
-/// The popup's rect as its surface really sits on the output: a layer
+fn popup_surface_rect(gp: &GraphPopup, bar_anchor: Anchor, zone: i32) -> (i32, i32, i32, i32) {
+    shifted_surface_rect(gp.rect, gp.anchor, bar_anchor, zone)
+}
+
+/// The placement rect shifted to where the surface really lands (the
+/// graph popup's `popup_surface_rect` shares this math): a layer
 /// surface is pushed past the reservations of the edge it anchors to —
 /// and the bar's reservation lives on the edge the BAR anchors to. So
 /// the shift applies per axis, only where the two anchors point to the
 /// same side (measured on this stack: top bar, popup anchored Left|Top
 /// → +28 on y, none on x).
-fn popup_surface_rect(gp: &GraphPopup, bar_anchor: Anchor, zone: i32) -> (i32, i32, i32, i32) {
-    let (mut x0, mut y0, mut x1, mut y1) = gp.rect;
-    if gp.anchor.contains(Anchor::Top) && bar_anchor.contains(Anchor::Top) {
+fn shifted_surface_rect(
+    rect: (i32, i32, i32, i32),
+    anchor: Anchor,
+    bar_anchor: Anchor,
+    zone: i32,
+) -> (i32, i32, i32, i32) {
+    let (mut x0, mut y0, mut x1, mut y1) = rect;
+    if anchor.contains(Anchor::Top) && bar_anchor.contains(Anchor::Top) {
         y0 += zone;
         y1 += zone;
     }
-    if gp.anchor.contains(Anchor::Bottom) && bar_anchor.contains(Anchor::Bottom) {
+    if anchor.contains(Anchor::Bottom) && bar_anchor.contains(Anchor::Bottom) {
         y0 -= zone;
         y1 -= zone;
     }
-    if gp.anchor.contains(Anchor::Left) && bar_anchor.contains(Anchor::Left) {
+    if anchor.contains(Anchor::Left) && bar_anchor.contains(Anchor::Left) {
         x0 += zone;
         x1 += zone;
     }
-    if gp.anchor.contains(Anchor::Right) && bar_anchor.contains(Anchor::Right) {
+    if anchor.contains(Anchor::Right) && bar_anchor.contains(Anchor::Right) {
         x0 -= zone;
         x1 -= zone;
     }
@@ -4080,8 +4128,8 @@ mod tests {
         calendar_size, cmdline_is_piuma, corner_radius, dbusmenu, fit_menu_labels,
         focused_output_in, icons_theme, lock_pid, menu_placement, menu_row_h, menu_size,
         monitor_names_json, popup_card_h, popup_missed_tick, popup_placement, section_touch,
-        text_width, tray_icon_target, wallpaper_plan, GraphPopup, PopupStyle, MENU_INDENT,
-        MENU_MAX_W, MENU_MIN_W, MENU_PAD,
+        shifted_surface_rect, text_width, tray_icon_target, wallpaper_plan, GraphPopup,
+        PopupStyle, MENU_INDENT, MENU_MAX_W, MENU_MIN_W, MENU_PAD,
     };
     use iced::font::Font;
     use iced_exwlshell::reexport::Anchor;
@@ -4398,6 +4446,32 @@ mod tests {
         let (anchor, m) = menu_placement(100, 500, 200, 600, 1920, 1080);
         assert_eq!(anchor, Anchor::Left | Anchor::Bottom);
         assert_eq!((m.bottom, m.top), (1080 - 600, 0));
+    }
+
+    /// The surface really lands shifted past the bar's reservation on
+    /// the shared edge only — the calendar popup's pointer tests and
+    /// the graph link both rely on this math: a top bar pushes a
+    /// top-anchored popup down by the zone (the intended rect then
+    /// contains the cursor while the surface does not); mismatched
+    /// edges leave the placement untouched.
+    #[test]
+    fn surface_rect_shifts_only_the_shared_edge() {
+        let rect = (100, 15, 397, 167);
+        assert_eq!(
+            shifted_surface_rect(rect, Anchor::Left | Anchor::Top, Anchor::Top, 30),
+            (100, 45, 397, 197),
+            "top bar + top popup: +30 on y, none on x"
+        );
+        assert_eq!(
+            shifted_surface_rect(rect, Anchor::Left | Anchor::Top, Anchor::Bottom, 30),
+            rect,
+            "different edges: no shift"
+        );
+        assert_eq!(
+            shifted_surface_rect(rect, Anchor::Right | Anchor::Bottom, Anchor::Bottom, 28),
+            (100, -13, 397, 139),
+            "bottom bar + bottom popup: -28 on y"
+        );
     }
 
     /// The calendar popup's surface adapts to the panel font: doubling
