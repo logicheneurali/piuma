@@ -340,7 +340,7 @@ pub fn get_date() -> String {
 
 /// Longest window title the sensor shows (roadmap M1): longer text is cut
 /// at a char boundary (multibyte-safe) and marked with a trailing "...".
-const WINDOW_TITLE_MAX: usize = 80;
+const WINDOW_TITLE_MAX: usize = 50;
 
 /// Cut `title` to [`WINDOW_TITLE_MAX`] chars, appending "..." when cut.
 fn truncate_title(title: &str) -> String {
@@ -856,9 +856,9 @@ mod tests {
         assert_eq!(fmt_rate(2_000_000.0), format!("{f}{f}{f}1.9 MB/s"));
     }
 
-    /// Titles of 80 chars stay intact; longer ones are cut at exactly 80
-    /// chars and marked with "..."; multibyte titles cut at a char boundary
-    /// (no panic, no split byte).
+    /// Titles of `WINDOW_TITLE_MAX` chars stay intact; longer ones are cut
+    /// at exactly that many chars and marked with "..."; multibyte titles
+    /// cut at a char boundary (no panic, no split byte).
     #[test]
     fn window_title_truncation() {
         let exact: String = "a".repeat(WINDOW_TITLE_MAX);
@@ -868,7 +868,7 @@ mod tests {
         assert_eq!(cut.len(), WINDOW_TITLE_MAX + 3);
         assert!(cut.ends_with("..."));
         assert_eq!(cut.trim_end_matches('.').len(), WINDOW_TITLE_MAX);
-        // Multibyte: 81 two-byte chars -> cut stays valid UTF-8.
+        // Multibyte: one char over the limit -> cut stays valid UTF-8.
         let wide: String = "é".repeat(WINDOW_TITLE_MAX + 1);
         let cut = truncate_title(&wide);
         assert_eq!(cut.chars().count(), WINDOW_TITLE_MAX + 3);
