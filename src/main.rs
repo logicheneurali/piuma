@@ -4028,8 +4028,23 @@ fn main() -> Result<(), iced_exwlshell::Error> {
 
     // Roadmap N2: launch the freedesktop autostart applications with the
     // bar (background thread; dormant unless the config enables it).
+    // The config's per-app selection is pruned against the live
+    // directories first — a removed .desktop must not outlive its file —
+    // and the config is rewritten (atomically) before anything launches.
     if config.panel.autostart.unwrap_or(false) {
-        autostart::spawn();
+        let current = config.panel.autostart_disabled.clone().unwrap_or_default();
+        let pruned = autostart::prune_disabled(&autostart::existing_files(), &current);
+        if pruned != current {
+            let mut updated = config.clone();
+            updated.panel.autostart_disabled = (!pruned.is_empty()).then_some(pruned.clone());
+            if let Err(err) = config::save_config(&resolved_config_path, &updated) {
+                eprintln!(
+                    "[piuma] autostart: cannot prune {}: {err}",
+                    resolved_config_path.display()
+                );
+            }
+        }
+        autostart::spawn(pruned);
     }
 
     // Roadmap N3: render the GTK theme bridge from the bar's own style

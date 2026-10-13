@@ -7,7 +7,8 @@
 //! `OnlyShowIn`/`NotShowIn`, `TryExec`, `Path`, `Exec` field codes, and
 //! a user file overriding the system file with the same name.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -15,6 +16,9 @@ use std::process::Command;
 /// A parsed `.desktop` autostart entry (only the spec keys piuma honours).
 #[derive(Debug, Default, Clone)]
 struct Entry {
+    /// File name (`foo.desktop`) the entry was read from: the config's
+    /// selection (`panel.autostart_disabled`) keys on it.
+    file: String,
     /// `Exec=` command line, field codes already stripped.
     exec: String,
     /// `Path=`: working directory of `Exec` (`None` = inherited).
@@ -36,19 +40,32 @@ struct Entry {
 }
 
 /// Launch every eligible autostart entry on a background thread so the
-/// bar's startup never waits for the spawned applications.
-pub fn spawn() {
+/// bar's startup never waits for the spawned applications; `disabled`
+/// is the config's own per-app selection (file names piuma must not
+/// start — `panel.autostart_disabled`).
+pub fn spawn(disabled: Vec<String>) {
     let _ = std::thread::Builder::new()
         .name("piuma-autostart".to_string())
-        .spawn(run);
+        .spawn(move || run(disabled));
 }
 
 /// Autostart thread: merge both directories, apply the spec filters and
-/// launch what survives — never a program already running, never piuma.
-fn run() {
+/// the config's selection, launch what survives — never a program
+/// already running, never piuma. The caller pruned `disabled` against
+/// the live files first (see [`prune_disabled`]).
+fn run(disabled: Vec<String>) {
     let desktop = current_desktop();
     for entry in collect() {
         if !should_run(&entry, &desktop) {
+            continue;
+        }
+        // The user's own selection wins last (piuma-only: other desktop
+        // environments never see this list).
+        if disabled.contains(&entry.file) {
+            eprintln!(
+                "[piuma] autostart: {} disabled in config, skipping",
+                entry.file
+            );
             continue;
         }
         let program = program_of(&entry.exec);
@@ -87,25 +104,61 @@ fn autostart_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// The merged file names of the live directories: the config's disabled
+/// list is validated against exactly what the launcher can see.
+pub fn existing_files() -> BTreeSet<String> {
+    winning_files(&autostart_dirs()).into_keys().collect()
+}
+
+/// The config's disabled names reduced to the ones whose `.desktop`
+/// file still exists in `existing` (sorted, deduplicated): a removed
+/// app's entry must not outlive its file. Pure — the bar prunes before
+/// launching, piuma-setup prunes on every save.
+pub fn prune_disabled(existing: &BTreeSet<String>, disabled: &[String]) -> Vec<String> {
+    let mut kept: Vec<String> = disabled
+        .iter()
+        .filter(|name| existing.contains(*name))
+        .cloned()
+        .collect();
+    kept.sort();
+    kept.dedup();
+    kept
+}
+
 /// `$XDG_CONFIG_HOME`, falling back to `$HOME/.config` (Autostart spec).
 fn user_config_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME") {
+    config_home_from(
+        std::env::var_os("XDG_CONFIG_HOME"),
+        std::env::var_os("HOME"),
+    )
+}
+
+/// The config home out of the two spec variables: an absolute
+/// `$XDG_CONFIG_HOME` wins, a relative one falls through to `$HOME`
+/// (base-dirs spec), and the `$HOME` fallback is `$HOME/.config` —
+/// regression: returning bare `$HOME` made the scan look at
+/// `~/autostart` and miss `~/.config/autostart` entirely.
+fn config_home_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    if let Some(dir) = xdg {
         let path = PathBuf::from(dir);
         if path.is_absolute() {
             return Some(path);
         }
     }
-    let home = std::env::var_os("HOME")?;
-    let path = PathBuf::from(home);
-    path.is_absolute().then_some(path)
+    let home = PathBuf::from(home?);
+    home.is_absolute().then(|| home.join(".config"))
 }
 
 /// Merge the given directories by file name (later entries win) and
 /// parse every `.desktop` file found; unreadable files are skipped.
 fn merge(dirs: &[PathBuf]) -> Vec<Entry> {
     winning_files(dirs)
-        .values()
-        .filter_map(|path| parse(&std::fs::read_to_string(path).ok()?))
+        .into_iter()
+        .filter_map(|(file, path)| {
+            let mut entry = parse(&std::fs::read_to_string(path).ok()?)?;
+            entry.file = file;
+            Some(entry)
+        })
         .collect()
 }
 
@@ -380,166 +433,68 @@ pub mod editor {
         pub file: String,
         /// `Name=` of the winning file, falling back to the file name.
         pub label: String,
-        /// The spec switch as the merge sees it: off when the winning
-        /// file says `Hidden=true` or `X-GNOME-Autostart-enabled=false`.
+        /// The effective switch: the spec state AND the config's own
+        /// selection (absent from `panel.autostart_disabled`).
         pub enabled: bool,
+        /// The spec state alone: off = the file's own switches (`Hidden`,
+        /// GNOME) keep it out and piuma's selection has no say — the
+        /// editor's switch is inert.
+        pub spec: bool,
     }
 
     /// One [`App`] per file name over the live directories (see
     /// [`autostart_dirs`]), sorted by name — the winning file of each
-    /// name decides label and switch.
-    pub fn apps() -> Vec<App> {
-        apps_in(&autostart_dirs())
+    /// name decides label and spec state, `disabled` is the config's
+    /// selection (`panel.autostart_disabled`).
+    pub fn apps(disabled: &[String]) -> Vec<App> {
+        apps_in(&autostart_dirs(), disabled)
     }
 
     /// [`apps`] over explicit directories (the tests pass their own); a
     /// file that cannot be read is left out, exactly like the launcher's
     /// own scan skips it.
-    pub fn apps_in(dirs: &[PathBuf]) -> Vec<App> {
+    pub fn apps_in(dirs: &[PathBuf], disabled: &[String]) -> Vec<App> {
         winning_files(dirs)
             .into_iter()
             .filter_map(|(file, path)| {
                 let entry = parse_entry(&std::fs::read_to_string(path).ok()?);
+                let spec = !entry.hidden && entry.gnome_enabled != Some(false);
                 Some(App {
                     label: entry.label.unwrap_or_else(|| file.clone()),
-                    enabled: !entry.hidden && entry.gnome_enabled != Some(false),
+                    enabled: spec && !disabled.contains(&file),
+                    spec,
                     file,
                 })
             })
             .collect()
     }
 
-    /// Switch one app on or off through the user's override file; the
-    /// write rules live in [`set_enabled_in`].
-    pub fn set_app_enabled(file: &str, enabled: bool) -> std::io::Result<()> {
-        set_enabled_in(&autostart_dirs(), file, enabled)
-    }
-
-    /// The switch's write rules — the user's dir is the LAST of `dirs`
-    /// (see [`autostart_dirs`]) and is created when missing:
-    ///
-    /// * **off** → the user's file becomes the winner: the current
-    ///   winner's content plus `Hidden=true` (a full copy, because a
-    ///   switch-only file parses to nothing and would NOT override the
-    ///   system entry the way the spec demands);
-    /// * **on** → the winner loses its `Hidden=` and
-    ///   `X-GNOME-Autostart-enabled=false` lines (the two switches that
-    ///   turn an entry off; an absent switch means enabled). The
-    ///   override file stays, now mirroring what it used to suppress;
-    /// * already in the requested state → nothing is written.
-    ///
-    /// Only plain `*.desktop` file names are accepted: the name goes
-    /// straight into a path.
-    pub fn set_enabled_in(dirs: &[PathBuf], file: &str, enabled: bool) -> std::io::Result<()> {
-        if file.is_empty() || !file.ends_with(".desktop") || file.contains('/') || file.contains('\\') {
+    /// The editor's switch write rule — and the selection lives in the
+    /// config (`panel.autostart_disabled`), never in the autostart
+    /// directories: off adds the file name to the list, on removes it,
+    /// an already-correct list is left untouched. Only plain `*.desktop`
+    /// file names are accepted.
+    pub fn toggle_disabled(
+        disabled: &mut Vec<String>,
+        file: &str,
+        enabled: bool,
+    ) -> std::io::Result<()> {
+        if file.is_empty()
+            || !file.ends_with(".desktop")
+            || file.contains('/')
+            || file.contains('\\')
+        {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "not a plain .desktop file name",
             ));
         }
-        let user_dir = dirs.last().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "no autostart directories")
-        })?;
-        let winner_path = winning_files(dirs)
-            .get(file)
-            .cloned()
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no such autostart file"))?;
-        let winner = std::fs::read_to_string(&winner_path)?;
-        let entry = parse_entry(&winner);
-        let on = !entry.hidden && entry.gnome_enabled != Some(false);
-        if on == enabled {
-            return Ok(());
+        if enabled {
+            disabled.retain(|name| name != file);
+        } else if !disabled.iter().any(|name| name == file) {
+            disabled.push(file.to_string());
         }
-        let updated = if enabled {
-            strip_switches(&winner)
-        } else {
-            with_hidden(&winner)
-        };
-        let user_path = user_dir.join(file);
-        if let Some(parent) = user_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(user_path, updated)
-    }
-
-    /// The content with an in-group `Hidden=true`: the first `Hidden=`
-    /// line is flipped when there is one, otherwise the switch is added
-    /// right after the `[Desktop Entry]` header — a file without that
-    /// header (malformed anyway) gains one.
-    fn with_hidden(text: &str) -> String {
-        let mut in_group = false;
-        let has_switch = text.lines().any(|line| {
-            let line = line.trim();
-            if line.starts_with('[') {
-                in_group = line == "[Desktop Entry]";
-                return false;
-            }
-            in_group && line.starts_with("Hidden=")
-        });
-        if has_switch {
-            let mut in_group = false;
-            let mut done = false;
-            let lines: Vec<String> = text
-                .lines()
-                .map(|line| {
-                    let trimmed = line.trim();
-                    if trimmed.starts_with('[') {
-                        in_group = trimmed == "[Desktop Entry]";
-                        return line.to_string();
-                    }
-                    if !done && in_group && trimmed.starts_with("Hidden=") {
-                        done = true;
-                        return "Hidden=true".to_string();
-                    }
-                    line.to_string()
-                })
-                .collect();
-            return join_lines(lines);
-        }
-        let mut inserted = false;
-        let mut lines: Vec<String> = Vec::new();
-        for line in text.lines() {
-            lines.push(line.to_string());
-            if !inserted && line.trim() == "[Desktop Entry]" {
-                lines.push("Hidden=true".to_string());
-                inserted = true;
-            }
-        }
-        if inserted {
-            join_lines(lines)
-        } else {
-            format!("[Desktop Entry]\nHidden=true\n{text}")
-        }
-    }
-
-    /// The content with the off-switches removed: every in-group
-    /// `Hidden=` line, plus `X-GNOME-Autostart-enabled=false`.
-    fn strip_switches(text: &str) -> String {
-        let mut in_group = false;
-        let mut lines: Vec<String> = Vec::new();
-        for line in text.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with('[') {
-                in_group = trimmed == "[Desktop Entry]";
-            } else if in_group {
-                if let Some((key, value)) = trimmed.split_once('=') {
-                    let key = key.trim();
-                    if key == "Hidden" || (key == "X-GNOME-Autostart-enabled" && value.trim() == "false") {
-                        continue;
-                    }
-                }
-            }
-            lines.push(line.to_string());
-        }
-        join_lines(lines)
-    }
-
-    /// Reassembles walked lines into a file body that ends with a
-    /// newline (the parse walk is line-based either way).
-    fn join_lines(lines: Vec<String>) -> String {
-        let mut out = lines.join("\n");
-        out.push('\n');
-        out
+        Ok(())
     }
 }
 
@@ -634,17 +589,18 @@ mod tests {
         assert!(already_running(&name));
     }
 
-    /// Roadmap2 #2: the editor lists each file name once with the
-    /// winning file's label and spec switch, and switching follows the
-    /// Autostart spec — a full copy plus `Hidden=true` to disable (the
-    /// user's dir is created on demand), the switch lines removed to
-    /// enable again; plain file names only.
+    /// The editor lists each file name once with the winning file's
+    /// label and the effective switch — the spec state merged with the
+    /// config's selection — and the switch only rewrites that list: no
+    /// autostart file is ever written, so other desktop environments
+    /// keep their own, unaffected view. Plain file names only.
     #[test]
-    fn editor_lists_and_switches_apps() {
-        let root = std::env::temp_dir().join(format!("piuma-autostart-editor-{}", std::process::id()));
+    fn editor_lists_apps_and_toggles_the_config_list() {
+        let root =
+            std::env::temp_dir().join(format!("piuma-autostart-editor-{}", std::process::id()));
         let system = root.join("system");
         std::fs::create_dir_all(&system).expect("temp dir");
-        let user = root.join("user"); // deliberately not created yet
+        let user = root.join("user"); // deliberately not created: nothing is ever written there
         std::fs::write(
             system.join("a.desktop"),
             "[Desktop Entry]\nName=Alpha\nExec=alpha\n",
@@ -657,39 +613,86 @@ mod tests {
         .expect("write fixture");
         let dirs = vec![system, user.clone()];
 
-        let apps = editor::apps_in(&dirs);
+        let apps = editor::apps_in(&dirs, &[]);
         assert_eq!(apps.len(), 2, "one row per file name, sorted");
         assert_eq!(apps[0].file, "a.desktop");
         assert_eq!(apps[0].label, "Alpha");
+        assert!(apps[0].spec, "the file itself says run");
         assert!(apps[0].enabled);
         assert_eq!(apps[1].label, "Beta");
-        assert!(!apps[1].enabled, "the system's Hidden=true shows as off");
+        assert!(!apps[1].spec, "the system's Hidden=true is the spec state");
+        assert!(!apps[1].enabled, "and it shows as off");
 
-        // Disable a system-on app: the user's file becomes the winner —
-        // a complete copy (still a parseable entry) plus the switch,
-        // and the missing user's dir is created on demand.
-        editor::set_enabled_in(&dirs, "a.desktop", false).expect("disable");
-        let copy = std::fs::read_to_string(user.join("a.desktop")).expect("user override");
-        assert!(copy.contains("Hidden=true"));
-        assert!(copy.contains("Exec=alpha"), "the override replaces the file wholesale");
-        assert!(!editor::apps_in(&dirs)[0].enabled);
+        // The config's selection flips the effective switch only …
+        let mut disabled = Vec::new();
+        editor::toggle_disabled(&mut disabled, "a.desktop", false).expect("disable");
+        assert_eq!(disabled, vec!["a.desktop".to_string()]);
+        let apps = editor::apps_in(&dirs, &disabled);
+        assert!(!apps[0].enabled, "the config's selection shows as off");
+        assert!(apps[0].spec, "the spec state is unaffected");
+        // … and back.
+        editor::toggle_disabled(&mut disabled, "a.desktop", true).expect("enable");
+        assert!(disabled.is_empty());
+        assert!(editor::apps_in(&dirs, &disabled)[0].enabled);
 
-        // Enable it again: the switch lines are gone.
-        editor::set_enabled_in(&dirs, "a.desktop", true).expect("enable");
-        let copy = std::fs::read_to_string(user.join("a.desktop")).expect("user override");
-        assert!(!copy.contains("Hidden"), "the off-switch is removed");
-        assert!(editor::apps_in(&dirs)[0].enabled);
+        // Toggling twice does not duplicate the name.
+        editor::toggle_disabled(&mut disabled, "a.desktop", false).expect("disable");
+        editor::toggle_disabled(&mut disabled, "a.desktop", false).expect("disable again");
+        assert_eq!(disabled.len(), 1);
 
-        // Re-enable the system-off app the same way.
-        editor::set_enabled_in(&dirs, "b.desktop", true).expect("enable");
-        assert!(editor::apps_in(&dirs)[1].enabled);
+        // A path is refused before it ever reaches anything.
+        assert!(editor::toggle_disabled(&mut disabled, "../evil.desktop", false).is_err());
+        assert!(editor::toggle_disabled(&mut disabled, "evil", false).is_err());
+        assert!(editor::toggle_disabled(&mut disabled, "", false).is_err());
 
-        // A missing entry is an error, never a silent no-op …
-        assert!(editor::set_enabled_in(&dirs, "nope.desktop", false).is_err());
-        // … and a path is refused before it ever reaches a file system.
-        assert!(editor::set_enabled_in(&dirs, "../evil.desktop", false).is_err());
-        assert!(editor::set_enabled_in(&dirs, "evil", false).is_err());
+        // No autostart directory was created or written.
+        assert!(!user.exists(), "the editor never writes the autostart dirs");
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The config's selection is pruned against the merged files: a name
+    /// whose `.desktop` is gone disappears, the living ones stay, and
+    /// the result comes out sorted and deduplicated.
+    #[test]
+    fn prune_drops_removed_files() {
+        let existing: BTreeSet<String> = ["a.desktop", "b.desktop"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let stale = vec![
+            "b.desktop".to_string(),
+            "gone.desktop".to_string(),
+            "a.desktop".to_string(),
+            "b.desktop".to_string(),
+        ];
+        assert_eq!(
+            prune_disabled(&existing, &stale),
+            vec!["a.desktop".to_string(), "b.desktop".to_string()]
+        );
+        assert!(prune_disabled(&existing, &[]).is_empty());
+    }
+
+    /// The XDG fallback rule (regression): an absolute `$XDG_CONFIG_HOME`
+    /// wins, a relative one falls through to `$HOME`, and the `$HOME`
+    /// fallback is `$HOME/.config` — the dir the Autostart spec calls
+    /// the user's config home. Returning bare `$HOME` made the scan look
+    /// at `~/autostart` and miss `~/.config/autostart` entirely.
+    #[test]
+    fn config_home_follows_the_xdg_spec() {
+        assert_eq!(
+            config_home_from(Some("/x".into()), Some("/h".into())),
+            Some(PathBuf::from("/x"))
+        );
+        assert_eq!(
+            config_home_from(Some("relative".into()), Some("/h".into())),
+            Some(PathBuf::from("/h/.config"))
+        );
+        assert_eq!(
+            config_home_from(None, Some("/h".into())),
+            Some(PathBuf::from("/h/.config"))
+        );
+        assert_eq!(config_home_from(None, None), None);
+        assert_eq!(config_home_from(None, Some("relative".into())), None);
     }
 }

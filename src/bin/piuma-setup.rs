@@ -49,6 +49,11 @@ pub struct PiumaConfig {
     /// Freedesktop autostart launch with the bar (roadmap N2): `None` =
     /// key absent (the bar never scans or spawns anything).
     pub autostart: Option<bool>,
+    /// The user's per-app autostart selection (`panel.autostart_disabled`):
+    /// file names piuma must not launch. Empty = key absent; the bar
+    /// prunes stale names before launching, and no autostart file is
+    /// ever written — other desktop environments keep their own view.
+    pub autostart_disabled: Vec<String>,
     /// GTK theme bridge generation (roadmap N3): `None` = key absent (no
     /// file written or removed).
     pub app_theme: Option<bool>,
@@ -214,6 +219,7 @@ impl Default for PiumaConfig {
             bold: None,
             icon_theme: None,
             autostart: None,
+            autostart_disabled: Vec::new(),
             app_theme: None,
             wallpaper: None,
             section_layout: "horizontal".to_string(),
@@ -522,7 +528,8 @@ pub struct PiumaSetup {
     wallpaper_files: Vec<PathBuf>,
     /// Autostart `.desktop` files found under the freedesktop dirs
     /// (roadmap2 #2), scanned once at startup for the "Autostart apps"
-    /// tab and re-read after every switch.
+    /// tab and re-read after every switch — the switches show the spec
+    /// state merged with the config's own selection.
     autostart_apps: Vec<autostart::editor::App>,
 }
 
@@ -542,7 +549,7 @@ impl PiumaSetup {
             snapshot: String::new(),
             modal: None,
             wallpaper_files: scan_wallpaper_dirs(&wallpaper_dirs()),
-            autostart_apps: autostart::editor::apps(),
+            autostart_apps: Vec::new(),
         };
         match fs::read_to_string(file_path(&state.current_file)) {
             Ok(content) => match state.load_from_json(&content) {
@@ -562,6 +569,9 @@ impl PiumaSetup {
                 state.set_status("No config file found; starting from defaults".to_string(), false);
             }
         }
+        // One scan for the tab, with the loaded selection applied (the
+        // config was parsed just above on every path).
+        state.autostart_apps = autostart::editor::apps(&state.config.autostart_disabled);
         state
     }
 
@@ -585,6 +595,19 @@ impl PiumaSetup {
         }
         if let Some(a) = self.config.autostart {
             panel.insert("autostart".to_string(), JsonValue::Bool(a));
+        }
+        if !self.config.autostart_disabled.is_empty() {
+            panel.insert(
+                "autostart_disabled".to_string(),
+                JsonValue::Array(
+                    self.config
+                        .autostart_disabled
+                        .iter()
+                        .cloned()
+                        .map(JsonValue::String)
+                        .collect(),
+                ),
+            );
         }
         if let Some(t) = self.config.app_theme {
             panel.insert("app_theme".to_string(), JsonValue::Bool(t));
@@ -863,6 +886,13 @@ impl PiumaSetup {
     /// Writes the config to `name` (atomic tmp+rename) and refreshes
     /// `current_file`/`snapshot` so the modification check restarts clean.
     fn save_config(&mut self, name: &str) -> Result<(), String> {
+        // A removed .desktop must not leave a stale selection behind:
+        // prune `autostart_disabled` against a fresh scan before writing
+        // (the bar does the same before it launches anything).
+        let existing = autostart::existing_files();
+        self.config.autostart_disabled =
+            autostart::prune_disabled(&existing, &self.config.autostart_disabled);
+        self.autostart_apps = autostart::editor::apps(&self.config.autostart_disabled);
         let path = file_path(name);
         let json = self.serialize()?;
         // Validate against piuma's real schema before touching the file: a
@@ -891,6 +921,9 @@ impl PiumaSetup {
         self.load_from_json(&content)?;
         self.current_file = name.to_string();
         self.snapshot = self.serialize().unwrap_or_default();
+        // The newly loaded file carries its own selection: refresh the
+        // tab so its switches show it (scanned fresh, like at startup).
+        self.autostart_apps = autostart::editor::apps(&self.config.autostart_disabled);
         Ok(())
     }
 
@@ -956,6 +989,7 @@ impl PiumaSetup {
             bold: None,
             icon_theme: None,
             autostart: None,
+            autostart_disabled: Vec::new(),
             app_theme: None,
             wallpaper: None,
             section_layout: "horizontal".to_string(),
@@ -988,6 +1022,19 @@ impl PiumaSetup {
         // Absent `autostart` stays `None` (reset default): the bar reads
         // false and never scans the autostart directories (roadmap N2).
         self.config.autostart = panel.get("autostart").and_then(|v| v.as_bool());
+        // Absent `autostart_disabled` stays empty (reset default): the
+        // bar only skips what the spec itself skips. Stale names are
+        // pruned at save and again by the bar's next start.
+        self.config.autostart_disabled = panel
+            .get("autostart_disabled")
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
         // Absent `app_theme` stays `None`: no bridge file is written or
         // removed (roadmap N3).
         self.config.app_theme = panel.get("app_theme").and_then(|v| v.as_bool());
@@ -1273,12 +1320,19 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
             state.config.autostart = value.then_some(true);
         }
         Message::AutostartAppToggled(file, enabled) => {
-            // The write goes to the user's override file; the list is
-            // re-read from disk right after, so the tab always shows
-            // what the bar will read at its next start.
-            match autostart::editor::set_app_enabled(&file, enabled) {
+            // The selection lives in the config (`panel.autostart_disabled`):
+            // the switch rewrites that list and the tab re-reads the
+            // effective state; the Save persists it. No autostart file is
+            // ever written, so other desktop environments keep their own,
+            // unaffected view.
+            match autostart::editor::toggle_disabled(
+                &mut state.config.autostart_disabled,
+                &file,
+                enabled,
+            ) {
                 Ok(()) => {
-                    state.autostart_apps = autostart::editor::apps();
+                    state.autostart_apps =
+                        autostart::editor::apps(&state.config.autostart_disabled);
                     let verb = if enabled { "enabled" } else { "disabled" };
                     state.set_status(format!("{} {}", verb, file), false);
                 }
@@ -2323,24 +2377,30 @@ fn wallpaper_settings(state: &PiumaSetup) -> Element<'_, Message> {
 }
 
 /// The dedicated "Autostart apps" tab (roadmap2 #2): the global launch
-/// switch moved here from Panel Settings, plus one row per freedesktop
-/// autostart `.desktop` with its own switch — disabling writes the
-/// user's override file (`Hidden=true` on a full copy), enabling takes
-/// the off-switch out of it again. Saving is the global Save; the bar
-/// reads the directories on its next start.
+/// switch, plus one row per freedesktop autostart `.desktop` with its
+/// own switch — the selection lives in `panel.autostart_disabled` (the
+/// Save persists it, both the bar and every save prune stale names)
+/// and no autostart file is ever written, so other desktop environments
+/// keep their own, unaffected view. The bar applies the selection at
+/// its next start.
 fn autostart_apps_settings(state: &PiumaSetup) -> Element<'_, Message> {
     let mut apps = column![].spacing(4).width(Length::Fill);
     if state.autostart_apps.is_empty() {
         apps = apps.push(text("No autostart .desktop files found.").size(BODY));
     }
     for app in &state.autostart_apps {
+        // A spec-off app (its own Hidden/GNOME switches keep it out) has
+        // no piuma-side choice to make: its switch is inert.
+        let toggle = if app.spec {
+            toggler(app.enabled)
+                .on_toggle(move |value| Message::AutostartAppToggled(app.file.clone(), value))
+        } else {
+            toggler(app.enabled)
+        };
         apps = apps.push(
             Row::new()
                 .push(text(&app.label).size(BODY).width(Length::Fill))
-                .push(
-                    toggler(app.enabled)
-                        .on_toggle(move |value| Message::AutostartAppToggled(app.file.clone(), value)),
-                )
+                .push(toggle)
                 .align_y(Alignment::Center)
                 .spacing(8)
                 .width(Length::Fill),
@@ -3366,6 +3426,38 @@ mod tests {
         let bare: JsonValue =
             serde_json::from_str(&state.serialize().expect("serialize must succeed")).unwrap();
         assert!(bare["panel"].get("autostart").is_none());
+    }
+
+    /// The per-app autostart selection (`panel.autostart_disabled`)
+    /// roundtrips load→save with its names in order, the result still
+    /// parses as piuma's own schema, and an empty list never injects
+    /// the key.
+    #[test]
+    fn autostart_disabled_key_roundtrip() {
+        let json = r##"{
+  "panel": {
+    "autostart": true,
+    "autostart_disabled": ["b.desktop", "a.desktop"],
+    "section_layout": "horizontal",
+    "sections": []
+  }
+}"##;
+        let mut state = fixture();
+        state.load_from_json(json).expect("config must load");
+        assert_eq!(
+            state.config.autostart_disabled,
+            vec!["b.desktop".to_string(), "a.desktop".to_string()]
+        );
+        let saved = state.serialize().expect("serialize must succeed");
+        let out: JsonValue = serde_json::from_str(&saved).expect("saved JSON must parse");
+        assert_eq!(out["panel"]["autostart_disabled"][0], "b.desktop");
+        serde_json::from_str::<config::Config>(&saved)
+            .expect("piuma must accept the saved config (pre-save validation)");
+        // An empty list = key absent (a save never injects it).
+        state.config.autostart_disabled = Vec::new();
+        let bare: JsonValue =
+            serde_json::from_str(&state.serialize().expect("serialize must succeed")).unwrap();
+        assert!(bare["panel"].get("autostart_disabled").is_none());
     }
 
     /// The roadmap N3 key (`panel.app_theme`) roundtrips load→save with

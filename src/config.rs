@@ -97,6 +97,14 @@ pub struct PanelConfig {
     /// Launch the freedesktop autostart applications with the bar
     /// (roadmap N2); absent = false (nothing is scanned or spawned).
     pub autostart: Option<bool>,
+    /// Freedesktop `.desktop` files the bar must NOT launch: the user's
+    /// own per-app selection, managed by piuma-setup's tab. Absent or
+    /// empty = no suppression beyond the spec's own switches (`Hidden`,
+    /// `OnlyShowIn`, … keep deciding on their own). Names whose file is
+    /// gone are pruned at the next start, before anything is launched.
+    /// Piuma never writes the autostart directories: other desktop
+    /// environments keep their own, unaffected view.
+    pub autostart_disabled: Option<Vec<String>>,
     /// Generate the GTK theme bridge from the bar's style (roadmap N3);
     /// absent = false (no file is written or removed).
     pub app_theme: Option<bool>,
@@ -397,6 +405,7 @@ pub fn default_config() -> Config {
             bold: None,
             icon_theme: None,
             autostart: None,
+            autostart_disabled: None,
             app_theme: None,
             wallpaper: None,
             section_layout: Some("horizontal".to_string()),
@@ -487,6 +496,19 @@ pub fn load_config(path: Option<String>) -> (Config, PathBuf) {
     }
 
     (default_config(), default_path)
+}
+
+/// Write the config back to `path` atomically (temp file + rename): the
+/// bar's autostart pruning rewrites the file it loaded whenever the
+/// disabled list lost stale names, and a running piuma must never read
+/// a half-written config. Serialization is piuma's own schema, exactly
+/// what [`load_config`] parses.
+pub fn save_config(path: &std::path::Path, config: &Config) -> std::io::Result<()> {
+    let json = serde_json::to_string_pretty(config)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json)?;
+    std::fs::rename(&tmp, path)
 }
 
 #[cfg(test)]
@@ -590,6 +612,37 @@ mod tests {
         let bare: Config =
             serde_json::from_str(r#"{"panel":{"sections":[]}}"#).expect("bare config parses");
         assert!(bare.panel.autostart.is_none());
+    }
+
+    /// `panel.autostart_disabled` parses, keeps its order and roundtrips
+    /// through [`save_config`]: the bar's prune rewrites the file it
+    /// loaded, so a load→save cycle must come back intact.
+    #[test]
+    fn autostart_disabled_roundtrips_through_save() {
+        let json = r#"{"panel":{"autostart":true,"autostart_disabled":["b.desktop","a.desktop"],"sections":[]}}"#;
+        let cfg: Config = serde_json::from_str(json).expect("selection must parse");
+        assert_eq!(
+            cfg.panel.autostart_disabled,
+            Some(vec!["b.desktop".to_string(), "a.desktop".to_string()])
+        );
+        let out = serde_json::to_string(&cfg).expect("config must serialize");
+        assert!(
+            out.contains(r#""autostart_disabled":["b.desktop","a.desktop"]"#),
+            "got: {out}"
+        );
+
+        let dir = std::env::temp_dir().join(format!("piuma-cfg-save-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("piuma.json");
+        save_config(&path, &cfg).expect("save must succeed");
+        let back = std::fs::read_to_string(&path).expect("saved file");
+        let round: Config = serde_json::from_str(&back).expect("saved config must parse");
+        assert_eq!(round.panel.autostart_disabled, cfg.panel.autostart_disabled);
+
+        let bare: Config =
+            serde_json::from_str(r#"{"panel":{"sections":[]}}"#).expect("bare config parses");
+        assert!(bare.panel.autostart_disabled.is_none());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Roadmap N3: `panel.app_theme` parses and roundtrips; absent stays
