@@ -1,9 +1,13 @@
 //! Piuma Setup - GUI Configuration Tool
 //! A visual tool to configure Piuma panel settings using iced 0.14
 
-use iced::widget::{button, column, container, scrollable, stack, text, toggler, Button, Column, Container, Row, TextInput, Slider, PickList};
-use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Task, Theme};
+use iced::theme::Palette as IcedPalette;
 use iced::widget::text::Style as TextStyle;
+use iced::widget::{
+    button, column, container, scrollable, stack, text, toggler, Button, Column, Container,
+    PickList, Row, Slider, TextInput,
+};
+use iced::{Alignment, Background, Border, Color, Element, Font, Length, Padding, Task, Theme};
 use serde_json::{Map, Value as JsonValue};
 use std::borrow::Borrow;
 use std::collections::HashSet;
@@ -1784,8 +1788,22 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
     Task::none()
 }
 
-fn theme(_state: &PiumaSetup) -> Theme {
-    Theme::Dark
+/// The GUI theme:iced's palette fed from the bar's own config, so inputs,
+/// pick lists, togglers and scrollbars follow the bar's colours instead of
+/// a fixed dark variant.
+fn theme(state: &PiumaSetup) -> Theme {
+    let pal = palette(&state.config);
+    Theme::custom(
+        "Piuma",
+        IcedPalette {
+            background: pal.bg,
+            text: pal.fg,
+            primary: pal.accent,
+            success: IcedPalette::DARK.success,
+            warning: IcedPalette::DARK.warning,
+            danger: Color::from_rgb(0.9, 0.3, 0.3),
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1798,6 +1816,178 @@ const LABEL_WIDTH: u32 = 110;
 
 /// Body text size: the iced default (16 pt) reduced by 2 pt as requested.
 const BODY: u32 = 14;
+
+/// Bar fallbacks mirrored from `src/main.rs` (DEFAULT_FONT / DEFAULT_*_COLOR),
+/// alpha forced opaque: this is a window, not a translucent bar layer.
+const SETUP_DEFAULT_FONT: &str = "Noto Sans";
+const SETUP_DEFAULT_BG: Color = Color::from_rgba(0.06, 0.06, 0.08, 1.0);
+const SETUP_DEFAULT_FG: Color = Color::from_rgb(0.88, 0.88, 0.94);
+
+/// Visual tokens derived from the bar's own config: every surface, border
+/// and text colour below comes from `piuma.json` through the same
+/// `config::parse_color` the bar uses, so setup and bar can't disagree.
+#[derive(Clone, Copy)]
+struct Palette {
+    bg: Color,           // window background (`default_bg_color`)
+    fg: Color,           // primary text (`default_text_color`)
+    muted: Color,        // secondary text (fg blended toward bg)
+    card: Color,         // card surface (`section_defaults.bg_color`)
+    card_border: Color,  // card hairline (section border, kept visible)
+    chrome: Color,       // rail/footer (bg blended toward card)
+    inset: Color,        // child surface (card blended toward bg)
+    accent: Color,       // primary/selected (`sensor_defaults.bg_color`)
+    accent_text: Color,  // text on accent (hover text → normal text → fg)
+    accent_hover: Color, // hover ring (`border_color_hover`)
+    radius: f32,         // card corners (`section_defaults.border_radius`)
+    pill: f32,           // button corners (`sensor_defaults.border_radius`)
+}
+
+/// Linear blend `a → b` by `t` (0 = a, 1 = b).
+fn mix(a: Color, b: Color, t: f32) -> Color {
+    Color {
+        r: a.r + (b.r - a.r) * t,
+        g: a.g + (b.g - a.g) * t,
+        b: a.b + (b.b - a.b) * t,
+        a: a.a + (b.a - a.a) * t,
+    }
+}
+
+/// GTK windows (and this one) are opaque: surfaces drop their alpha, the
+/// same way the N3 theme bridge drops it in its generated file.
+fn opaque(c: Color) -> Color {
+    Color { a: 1.0, ..c }
+}
+
+/// Resolve a config colour like the bar does (main.rs): `config::parse_color`,
+/// else the mirrored bar default.
+fn resolved(value: &Option<String>, fallback: Color) -> Color {
+    opaque(
+        value
+            .as_deref()
+            .and_then(|s| config::parse_color(s).ok())
+            .unwrap_or(fallback),
+    )
+}
+
+/// The whole token set from the loaded config (cheap: re-derived per call).
+fn palette(cfg: &PiumaConfig) -> Palette {
+    let bg = resolved(&cfg.default_bg_color, SETUP_DEFAULT_BG);
+    let fg = resolved(&cfg.default_text_color, SETUP_DEFAULT_FG);
+    let opaque_visible = |value: &Option<String>| {
+        value
+            .as_deref()
+            .and_then(|s| config::parse_color(s).ok())
+            .filter(|c| c.a > 0.0)
+            .map(opaque)
+    };
+    // Surfaces: the configured colour when it draws something, otherwise a
+    // token re-derived from bg/fg so the GUI keeps visible structure.
+    let card = opaque_visible(&cfg.section_defaults.bg_color)
+        .unwrap_or_else(|| mix(bg, Color::WHITE, 0.07));
+    // A transparent section border draws nothing on the bar; the GUI still
+    // needs a hairline, re-derived from the text colour.
+    let card_border =
+        opaque_visible(&cfg.section_defaults.border_color).unwrap_or_else(|| mix(fg, bg, 0.82));
+    let accent = opaque_visible(&cfg.sensor_defaults.bg_color).unwrap_or_else(|| mix(fg, bg, 0.75));
+    let accent_text = cfg
+        .sensor_defaults
+        .text_color_hover
+        .as_deref()
+        .or(cfg.sensor_defaults.text_color.as_deref())
+        .and_then(|s| config::parse_color(s).ok())
+        .map(opaque)
+        .unwrap_or(fg);
+    let accent_hover = opaque_visible(&cfg.sensor_defaults.border_color_hover)
+        .unwrap_or_else(|| mix(accent, Color::WHITE, 0.25));
+    let radius = cfg
+        .section_defaults
+        .border_radius
+        .map(|r| (r.max(0) as f32).min(16.0))
+        .unwrap_or(6.0);
+    let pill = cfg
+        .sensor_defaults
+        .border_radius
+        .map(|r| (r.max(0) as f32).min(16.0))
+        .unwrap_or(6.0);
+    Palette {
+        bg,
+        fg,
+        muted: mix(fg, bg, 0.45),
+        card,
+        card_border,
+        chrome: mix(bg, card, 0.4),
+        inset: mix(card, bg, 0.5),
+        accent,
+        accent_text,
+        accent_hover,
+        radius,
+        pill,
+    }
+}
+
+/// Text style in the palette's primary colour (shared by the explicit
+/// `.style` calls of the editor).
+fn fg_text(pal: Palette) -> impl Fn(&Theme) -> TextStyle {
+    move |_t: &Theme| TextStyle {
+        color: Some(pal.fg),
+        ..TextStyle::default()
+    }
+}
+
+/// Text style in the palette's secondary colour.
+fn muted_text(pal: Palette) -> impl Fn(&Theme) -> TextStyle {
+    move |_t: &Theme| TextStyle {
+        color: Some(pal.muted),
+        ..TextStyle::default()
+    }
+}
+
+/// Primary button skin: the bar's sensor language — accent pill, the hover
+/// ring (`border_color_hover`) appearing only while hovered.
+fn btn_primary(pal: Palette, t: &Theme, s: button::Status) -> button::Style {
+    let mut st = button::primary(t, s); // the built-in disabled handling stays
+    match s {
+        button::Status::Disabled => {}
+        button::Status::Hovered => {
+            st.background = Some(Background::Color(mix(pal.accent, Color::WHITE, 0.12)));
+            st.text_color = pal.accent_text;
+            st.border = Border {
+                width: 1.0,
+                color: pal.accent_hover,
+                radius: pal.pill.into(),
+            };
+        }
+        _ => {
+            st.background = Some(Background::Color(pal.accent));
+            st.text_color = pal.accent_text;
+            st.border = Border {
+                width: 0.0,
+                color: pal.accent_hover,
+                radius: pal.pill.into(),
+            };
+        }
+    }
+    st
+}
+
+/// Secondary button skin: the card surface + the config hairline.
+fn btn_secondary(pal: Palette, t: &Theme, s: button::Status) -> button::Style {
+    let mut st = button::secondary(t, s);
+    if !matches!(s, button::Status::Disabled) {
+        let bg = match s {
+            button::Status::Hovered => mix(pal.card, Color::WHITE, 0.06),
+            _ => pal.card,
+        };
+        st.background = Some(Background::Color(bg));
+        st.text_color = pal.fg;
+        st.border = Border {
+            width: 1.0,
+            color: pal.card_border,
+            radius: pal.pill.into(),
+        };
+    }
+    st
+}
 
 /// Parses "#rgb"/"#rrggbb"/"#rrggbbaa" (alpha last, as piuma reads it) into a
 /// preview color; invalid or empty = neutral gray.
@@ -1821,28 +2011,37 @@ fn hex_color(value: &str) -> Color {
     }
 }
 
-/// Shared card style: subtle background, thin border, rounded corners.
-fn card_style(bg: Color, radius: f32) -> impl Fn(&Theme) -> container::Style {
+/// Shared card style: the section surface, its hairline and the radius
+/// from `panel.section_defaults`.
+fn card_style(pal: Palette) -> impl Fn(&Theme) -> container::Style {
     move |_t: &Theme| container::Style {
-        background: Some(Background::Color(bg)),
-        border: Border { width: 1.0, color: Color::from_rgb8(0x38, 0x38, 0x3e), radius: radius.into() },
+        background: Some(Background::Color(pal.card)),
+        border: Border {
+            width: 1.0,
+            color: pal.card_border,
+            radius: pal.radius.into(),
+        },
         ..container::Style::default()
     }
 }
 
 /// The visual unit of the nested layout (panel > section > sensor).
-fn card<'a>(content: impl Into<Element<'a, Message>>) -> Container<'a, Message> {
+fn card<'a>(pal: Palette, content: impl Into<Element<'a, Message>>) -> Container<'a, Message> {
     container(content.into())
         .padding(12)
         .width(Length::Fill)
-        .style(card_style(Color::from_rgb8(0x26, 0x26, 0x2b), 6.0))
+        .style(card_style(pal))
 }
 
 /// Inset background marking content as a child of the surrounding card.
-fn inset_style(_t: &Theme) -> container::Style {
-    container::Style {
-        background: Some(Background::Color(Color::from_rgb8(0x1e, 0x1e, 0x22))),
-        border: Border { width: 1.0, color: Color::from_rgb8(0x33, 0x33, 0x39), radius: 4.0.into() },
+fn inset_style(pal: Palette) -> impl Fn(&Theme) -> container::Style {
+    move |_t: &Theme| container::Style {
+        background: Some(Background::Color(pal.inset)),
+        border: Border {
+            width: 1.0,
+            color: pal.card_border,
+            radius: 4.0.into(),
+        },
         ..container::Style::default()
     }
 }
@@ -1878,9 +2077,20 @@ where
 
 /// Small arrow button reordering a list item; without `enabled` it carries no
 /// action, which iced renders as disabled (used at the list boundaries).
-fn move_btn<'a>(label: &'a str, enabled: bool, on_press: Message) -> Button<'a, Message> {
-    let b = button(text(label).size(BODY)).padding(5).style(button::secondary);
-    if enabled { b.on_press(on_press) } else { b }
+fn move_btn<'a>(
+    pal: Palette,
+    label: &'a str,
+    enabled: bool,
+    on_press: Message,
+) -> Button<'a, Message> {
+    let b = button(text(label).size(BODY))
+        .padding(5)
+        .style(move |t, s| btn_secondary(pal, t, s));
+    if enabled {
+        b.on_press(on_press)
+    } else {
+        b
+    }
 }
 
 /// Two-column form grid: fields alternate left/right, one per cell, so long
@@ -1932,20 +2142,25 @@ fn slider_control<'a>(range: RangeInclusive<i32>, value: i32, on_input: impl Fn(
 }
 
 /// Collapsible header: chevron + title + summary; pressing toggles the block.
-fn collapsible_header<'a>(title: &'a str, summary: String, expanded: bool, on_toggle: Message) -> Element<'a, Message> {
+fn collapsible_header<'a>(
+    pal: Palette,
+    title: &'a str,
+    summary: String,
+    expanded: bool,
+    on_toggle: Message,
+) -> Element<'a, Message> {
     button(
         Row::new()
             .push(text(if expanded { "▾" } else { "▸" }).size(BODY).width(14))
             .push(text(title).size(13))
-            .push(text(summary).size(10)
-                .style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.55, 0.55, 0.6)), ..TextStyle::default() }))
+            .push(text(summary).size(10).style(muted_text(pal)))
             .spacing(8)
             .align_y(Alignment::Center)
             .width(Length::Fill),
     )
     .width(Length::Fill)
     .padding(6)
-    .style(button::secondary)
+    .style(move |t, s| btn_secondary(pal, t, s))
     .on_press(on_toggle)
     .into()
 }
@@ -1971,6 +2186,7 @@ fn view(state: &PiumaSetup) -> Element<'_, Message> {
     // Roadmap N4: a left tab rail picks the category and only that
     // category's card renders — the header (file info) and the footer
     // (Load/Save/status) stay visible on every tab.
+    let pal = palette(&state.config);
     let content = column![config_header(state)]
         .push(active_card(state))
         .padding(20)
@@ -1995,8 +2211,8 @@ fn view(state: &PiumaSetup) -> Element<'_, Message> {
     )
     .width(Length::Fill)
     .height(Length::Fill)
-    .style(|_state| container::Style {
-        background: Some(Background::Color(Color::from_rgb(0.12, 0.12, 0.12))),
+    .style(move |_t: &Theme| container::Style {
+        background: Some(Background::Color(pal.bg)),
         ..container::Style::default()
     });
 
@@ -2023,6 +2239,7 @@ fn active_card(state: &PiumaSetup) -> Element<'_, Message> {
 /// highlighted; edits live in `state.config`, so switching tabs never
 /// loses unsaved work.
 fn sidebar(state: &PiumaSetup) -> Element<'_, Message> {
+    let pal = palette(&state.config);
     let mut rail = Column::new().spacing(4).padding(Padding {
         top: 20.0,
         right: 10.0,
@@ -2036,21 +2253,23 @@ fn sidebar(state: &PiumaSetup) -> Element<'_, Message> {
                 .on_press(Message::TabSelected(tab))
                 .padding(8)
                 .width(Length::Fill)
-                .style(if selected {
-                    button::primary as fn(&Theme, button::Status) -> button::Style
-                } else {
-                    button::secondary as fn(&Theme, button::Status) -> button::Style
+                .style(move |t, s| {
+                    if selected {
+                        btn_primary(pal, t, s)
+                    } else {
+                        btn_secondary(pal, t, s)
+                    }
                 }),
         );
     }
     container(rail)
         .width(Length::Fixed(170.0))
         .height(Length::Fill)
-        .style(|_t| container::Style {
-            background: Some(Background::Color(Color::from_rgb8(0x16, 0x16, 0x19))),
+        .style(move |_t| container::Style {
+            background: Some(Background::Color(pal.chrome)),
             border: Border {
                 width: 1.0,
-                color: Color::from_rgb8(0x38, 0x38, 0x3e),
+                color: pal.card_border,
                 radius: 0.0.into(),
             },
             ..container::Style::default()
@@ -2060,16 +2279,18 @@ fn sidebar(state: &PiumaSetup) -> Element<'_, Message> {
 
 /// Fixed bottom bar: edited file + status on the left, actions on the right.
 fn footer(state: &PiumaSetup) -> Element<'_, Message> {
+    let pal = palette(&state.config);
     let info = column![
-        text(format!("editing: {}", state.current_file)).size(BODY)
-            .style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.5, 0.5, 0.55)), ..TextStyle::default() }),
+        text(format!("editing: {}", state.current_file))
+            .size(BODY)
+            .style(muted_text(pal)),
         status_bar(state),
     ]
     .spacing(2);
 
     let bar = Row::new()
         .push(container(info).width(Length::Fill))
-        .push(action_buttons())
+        .push(action_buttons(pal))
         .spacing(10)
         .align_y(Alignment::Center)
         .width(Length::Fill);
@@ -2077,9 +2298,13 @@ fn footer(state: &PiumaSetup) -> Element<'_, Message> {
     container(bar)
         .padding(Padding { top: 10.0, right: 20.0, bottom: 10.0, left: 20.0 })
         .width(Length::Fill)
-        .style(|_t: &Theme| container::Style {
-            background: Some(Background::Color(Color::from_rgb8(0x1a, 0x1a, 0x1d))),
-            border: Border { width: 1.0, color: Color::from_rgb8(0x38, 0x38, 0x3e), radius: 0.0.into() },
+        .style(move |_t: &Theme| container::Style {
+            background: Some(Background::Color(pal.chrome)),
+            border: Border {
+                width: 1.0,
+                color: pal.card_border,
+                radius: 0.0.into(),
+            },
             ..container::Style::default()
         })
         .into()
@@ -2102,14 +2327,20 @@ fn modal_overlay(state: &PiumaSetup) -> Element<'_, Message> {
 /// The card of the currently open modal (an empty element when none).
 fn modal_card(state: &PiumaSetup) -> Element<'_, Message> {
     // Errors are rendered inside the modal so they are visible over the overlay.
-    let error = if state.status_is_error { state.status_message.clone() } else { None };
+    let error = if state.status_is_error {
+        state.status_message.clone()
+    } else {
+        None
+    };
+    let pal = palette(&state.config);
 
     match &state.modal {
         Some(Modal::ConfirmSave) => dialog_frame(
+            pal,
             "Unsaved changes",
             text(format!("Overwrite {} with the current configuration?", state.current_file)).size(BODY).into(),
             error,
-            dialog_actions(Message::ModalConfirm, "Overwrite"),
+            dialog_actions(pal, Message::ModalConfirm, "Overwrite"),
         ),
         Some(Modal::SaveAs { name, exists }) => {
             let mut body = column![
@@ -2124,13 +2355,20 @@ fn modal_card(state: &PiumaSetup) -> Element<'_, Message> {
                         .style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(1.0, 0.6, 0.2)), ..TextStyle::default() }),
                 );
             }
-            dialog_frame("Save as", body.into(), error, dialog_actions(Message::ModalConfirm, "Save"))
+            dialog_frame(
+                pal,
+                "Save as",
+                body.into(),
+                error,
+                dialog_actions(pal, Message::ModalConfirm, "Save"),
+            )
         }
         Some(Modal::ConfirmSaveAs(file)) => dialog_frame(
+            pal,
             "File exists",
             text(format!("The file {} already exists. Overwrite it?", file)).size(BODY).into(),
             error,
-            dialog_actions(Message::ModalConfirm, "Overwrite"),
+            dialog_actions(pal, Message::ModalConfirm, "Overwrite"),
         ),
         Some(Modal::LoadFile { selected, files }) => {
             // Files as buttons (not a pick list): every choice stays visible
@@ -2143,7 +2381,13 @@ fn modal_card(state: &PiumaSetup) -> Element<'_, Message> {
                         .on_press(Message::ModalTextChanged(f.clone()))
                         .padding(8)
                         .width(Length::Fill)
-                        .style(if is_selected { button::primary as fn(&Theme, button::Status) -> button::Style } else { button::secondary as fn(&Theme, button::Status) -> button::Style }),
+                        .style(move |t, s| {
+                            if is_selected {
+                                btn_primary(pal, t, s)
+                            } else {
+                                btn_secondary(pal, t, s)
+                            }
+                        }),
                 );
             }
             let body: Element<Message> = if files.is_empty() {
@@ -2151,7 +2395,13 @@ fn modal_card(state: &PiumaSetup) -> Element<'_, Message> {
             } else {
                 list.into()
             };
-            dialog_frame("Load configuration", body, error, dialog_actions(Message::ModalConfirm, "Load"))
+            dialog_frame(
+                pal,
+                "Load configuration",
+                body,
+                error,
+                dialog_actions(pal, Message::ModalConfirm, "Load"),
+            )
         }
         None => text("").into(),
     }
@@ -2159,6 +2409,7 @@ fn modal_card(state: &PiumaSetup) -> Element<'_, Message> {
 
 /// Modal card frame: title, body, optional error hint, action buttons.
 fn dialog_frame<'a>(
+    pal: Palette,
     title: &'a str,
     body: Element<'a, Message>,
     error: Option<String>,
@@ -2176,26 +2427,45 @@ fn dialog_frame<'a>(
 
     container(col)
         .padding(16)
-        .style(|_t: &Theme| container::Style {
-            background: Some(Background::Color(Color::from_rgb8(0x26, 0x26, 0x2b))),
-            border: Border { width: 1.0, color: Color::from_rgb8(0x4a, 0x4a, 0x52), radius: 8.0.into() },
+        .style(move |_t: &Theme| container::Style {
+            background: Some(Background::Color(pal.card)),
+            border: Border {
+                width: 1.0,
+                color: pal.card_border,
+                radius: pal.radius.into(),
+            },
             ..container::Style::default()
         })
         .into()
 }
 
 /// Cancel + primary action button row shared by all modals.
-fn dialog_actions<'a>(action: Message, label: &'a str) -> Row<'a, Message> {
+fn dialog_actions<'a>(pal: Palette, action: Message, label: &'a str) -> Row<'a, Message> {
     Row::new()
-        .push(button(text("Cancel").size(BODY)).on_press(Message::ModalCancel).padding(8).style(button::secondary))
-        .push(button(text(label).size(BODY)).on_press(action).padding(8).style(button::primary))
+        .push(
+            button(text("Cancel").size(BODY))
+                .on_press(Message::ModalCancel)
+                .padding(8)
+                .style(move |t, s| btn_secondary(pal, t, s)),
+        )
+        .push(
+            button(text(label).size(BODY))
+                .on_press(action)
+                .padding(8)
+                .style(move |t, s| btn_primary(pal, t, s)),
+        )
         .spacing(10)
         .align_y(Alignment::Center)
 }
 
-fn config_header(_state: &PiumaSetup) -> Element<'_, Message> {
-    let title = text("Piuma Configuration Setup").size(22).style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.8, 0.8, 0.8)), ..TextStyle::default() });
-    let subtitle = text("Configure your Piuma status bar").size(14).style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.6, 0.6, 0.6)), ..TextStyle::default() });
+fn config_header(state: &PiumaSetup) -> Element<'_, Message> {
+    let pal = palette(&state.config);
+    let title = text("Piuma Configuration Setup")
+        .size(22)
+        .style(fg_text(pal));
+    let subtitle = text("Configure your Piuma status bar")
+        .size(14)
+        .style(muted_text(pal));
 
     column![text(""), title, subtitle, text("")]
         .spacing(10)
@@ -2304,6 +2574,7 @@ fn wallpaper_set(config: &mut PiumaConfig, edit: impl FnOnce(&mut WallpaperCfg))
 fn wallpaper_settings(state: &PiumaSetup) -> Element<'_, Message> {
     let cfg = state.config.wallpaper.clone().unwrap_or_default();
     let current = cfg.path.clone();
+    let pal = palette(&state.config);
 
     // The scanned images as a pickable list; the current path is marked.
     let mut files = column![].spacing(2).width(Length::Fill);
@@ -2311,14 +2582,23 @@ fn wallpaper_settings(state: &PiumaSetup) -> Element<'_, Message> {
         let label = file.to_string_lossy().to_string();
         let selected = current == label;
         files = files.push(
-            button(text(if selected { format!("• {label}") } else { label.clone() }).size(BODY))
-                .on_press(Message::WallpaperPathChanged(label))
-                .style(if selected {
-                    button::primary as fn(&Theme, button::Status) -> button::Style
+            button(
+                text(if selected {
+                    format!("• {label}")
                 } else {
-                    button::secondary as fn(&Theme, button::Status) -> button::Style
+                    label.clone()
                 })
-                .width(Length::Fill),
+                .size(BODY),
+            )
+            .on_press(Message::WallpaperPathChanged(label))
+            .style(move |t, s| {
+                if selected {
+                    btn_primary(pal, t, s)
+                } else {
+                    btn_secondary(pal, t, s)
+                }
+            })
+            .width(Length::Fill),
         );
     }
     let list = scrollable(files).height(Length::Fixed(240.0)).width(Length::Fill);
@@ -2336,11 +2616,9 @@ fn wallpaper_settings(state: &PiumaSetup) -> Element<'_, Message> {
     };
 
     card(
+        pal,
         column![
-            text("Wallpaper").size(16).style(|_t: &Theme| TextStyle {
-                color: Some(Color::from_rgb(0.8, 0.8, 0.8)),
-                ..TextStyle::default()
-            }),
+            text("Wallpaper").size(16).style(fg_text(pal)),
             toggler(cfg.enabled)
                 .label("Draw the wallpaper behind the desktop")
                 .on_toggle(Message::WallpaperEnabled),
@@ -2350,9 +2628,9 @@ fn wallpaper_settings(state: &PiumaSetup) -> Element<'_, Message> {
                     container(preview)
                         .width(Length::Fixed(360.0))
                         .height(Length::Fixed(240.0))
-                        .style(|_t: &Theme| container::Style {
+                        .style(move |_t: &Theme| container::Style {
                             border: Border {
-                                color: Color::from_rgb8(0x44, 0x44, 0x44),
+                                color: pal.card_border,
                                 width: 1.0,
                                 radius: 4.0.into(),
                             },
@@ -2384,6 +2662,7 @@ fn wallpaper_settings(state: &PiumaSetup) -> Element<'_, Message> {
 /// keep their own, unaffected view. The bar applies the selection at
 /// its next start.
 fn autostart_apps_settings(state: &PiumaSetup) -> Element<'_, Message> {
+    let pal = palette(&state.config);
     let mut apps = column![].spacing(4).width(Length::Fill);
     if state.autostart_apps.is_empty() {
         apps = apps.push(text("No autostart .desktop files found.").size(BODY));
@@ -2408,11 +2687,9 @@ fn autostart_apps_settings(state: &PiumaSetup) -> Element<'_, Message> {
     }
 
     card(
+        pal,
         column![
-            text("Autostart apps").size(16).style(|_t: &Theme| TextStyle {
-                color: Some(Color::from_rgb(0.8, 0.8, 0.8)),
-                ..TextStyle::default()
-            }),
+            text("Autostart apps").size(16).style(fg_text(pal)),
             toggler(state.config.autostart.unwrap_or(false))
                 .label("Launch freedesktop autostart apps")
                 .on_toggle(Message::AutostartChanged),
@@ -2426,6 +2703,7 @@ fn autostart_apps_settings(state: &PiumaSetup) -> Element<'_, Message> {
 
 /// Panel-wide settings as a two-column form grid inside a card.
 fn panel_settings(state: &PiumaSetup) -> Element<'_, Message> {
+    let pal = palette(&state.config);
     let font_size = state.config.font_size;
     let thickness = state.config.thickness;
     let anchor = state.config.anchor.clone().unwrap_or_default();
@@ -2482,8 +2760,9 @@ fn panel_settings(state: &PiumaSetup) -> Element<'_, Message> {
     ];
 
     card(
+        pal,
         column![
-            text("Panel Settings").size(16).style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.8, 0.8, 0.8)), ..TextStyle::default() }),
+            text("Panel Settings").size(16).style(fg_text(pal)),
             form_grid(fields),
         ]
         .spacing(10)
@@ -2496,6 +2775,7 @@ fn panel_settings(state: &PiumaSetup) -> Element<'_, Message> {
 /// presence (it turns piuma's D-Bus server on/off), the three fields
 /// are the block's settings; they only exist while the block does.
 fn notifications_settings<'a>(state: &'a PiumaSetup) -> Element<'a, Message> {
+    let pal = palette(&state.config);
     let enabled = state.config.notifications.is_some();
     let mut body = column![
         toggler(enabled)
@@ -2532,10 +2812,7 @@ fn notifications_settings<'a>(state: &'a PiumaSetup) -> Element<'a, Message> {
             .push(
                 text("Popup placement — where the cards appear on screen")
                     .size(10)
-                    .style(|_t: &Theme| TextStyle {
-                        color: Some(Color::from_rgb(0.55, 0.55, 0.6)),
-                        ..TextStyle::default()
-                    }),
+                    .style(muted_text(pal)),
             )
             .push(form_grid(vec![
                 ("Position", picklist(
@@ -2563,10 +2840,7 @@ fn notifications_settings<'a>(state: &'a PiumaSetup) -> Element<'a, Message> {
             .push(
                 text("Popup style — how the notification cards look")
                     .size(10)
-                    .style(|_t: &Theme| TextStyle {
-                        color: Some(Color::from_rgb(0.55, 0.55, 0.6)),
-                        ..TextStyle::default()
-                    }),
+                    .style(muted_text(pal)),
             )
             .push(form_grid(vec![
                 ("Font Size", slider_control(8..=32, n.font_size as i32, |value| Message::NotifNumberChanged("font_size".to_string(), value))),
@@ -2595,8 +2869,9 @@ fn notifications_settings<'a>(state: &'a PiumaSetup) -> Element<'a, Message> {
     }
 
     card(
+        pal,
         column![
-            text("Desktop Notifications").size(16).style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.8, 0.8, 0.8)), ..TextStyle::default() }),
+            text("Desktop Notifications").size(16).style(fg_text(pal)),
             body,
         ]
         .spacing(10)
@@ -2607,6 +2882,7 @@ fn notifications_settings<'a>(state: &'a PiumaSetup) -> Element<'a, Message> {
 
 /// The "Sections" block: one card per section, plus the add button.
 fn sections_list(state: &PiumaSetup) -> Element<'_, Message> {
+    let pal = palette(&state.config);
     let mut section_list = Column::new().spacing(15);
     for (i, section) in state.config.sections.iter().enumerate() {
         section_list = section_list.push(section_view(state, i, section));
@@ -2617,7 +2893,7 @@ fn sections_list(state: &PiumaSetup) -> Element<'_, Message> {
         .padding(10);
 
     column![
-        text("Sections").size(16).style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.8, 0.8, 0.8)), ..TextStyle::default() }),
+        text("Sections").size(16).style(fg_text(pal)),
         section_list,
         add_section,
     ]
@@ -2627,15 +2903,34 @@ fn sections_list(state: &PiumaSetup) -> Element<'_, Message> {
 
 /// Section card: header with name + remove, settings grid, then the sensor
 /// cards nested on an inset background to mark the hierarchy.
-fn section_view<'a>(state: &'a PiumaSetup, index: usize, section: &'a Section) -> Element<'a, Message> {
+fn section_view<'a>(
+    state: &'a PiumaSetup,
+    index: usize,
+    section: &'a Section,
+) -> Element<'a, Message> {
+    let pal = palette(&state.config);
     let header = Row::new()
-        .push(text("SECTION").size(9)
-            .style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.5, 0.5, 0.55)), ..TextStyle::default() }))
-        .push(input("Section name", section.name.as_deref().unwrap_or(""), move |value| Message::SectionNameChanged(index, value))
-            .width(Length::Fill))
-        .push(move_btn("▲", index > 0, Message::SectionMoveUp(index)))
-        .push(move_btn("▼", index + 1 < state.config.sections.len(), Message::SectionMoveDown(index)))
-        .push(button(text("Remove").size(BODY)).on_press(Message::SectionRemoved(index)).padding(5))
+        .push(text("SECTION").size(9).style(muted_text(pal)))
+        .push(
+            input(
+                "Section name",
+                section.name.as_deref().unwrap_or(""),
+                move |value| Message::SectionNameChanged(index, value),
+            )
+            .width(Length::Fill),
+        )
+        .push(move_btn(pal, "▲", index > 0, Message::SectionMoveUp(index)))
+        .push(move_btn(
+            pal,
+            "▼",
+            index + 1 < state.config.sections.len(),
+            Message::SectionMoveDown(index),
+        ))
+        .push(
+            button(text("Remove").size(BODY))
+                .on_press(Message::SectionRemoved(index))
+                .padding(5),
+        )
         .spacing(8)
         .align_y(Alignment::Center)
         .width(Length::Fill);
@@ -2668,14 +2963,30 @@ fn section_view<'a>(state: &'a PiumaSetup, index: usize, section: &'a Section) -
     let mut sensor_list = Column::new().spacing(8).width(Length::Fill);
     for (j, sensor) in section.sensors.iter().enumerate() {
         let style_open = state.sensor_style_open.contains(&(index, j));
-        sensor_list = sensor_list.push(sensor_view(index, j, section.sensors.len(), sensor, style_open));
+        sensor_list = sensor_list.push(sensor_view(
+            pal,
+            index,
+            j,
+            section.sensors.len(),
+            sensor,
+            style_open,
+        ));
     }
     sensor_list = sensor_list.push(
         button(text("+ Add Sensor").size(BODY)).on_press(Message::SensorAdded(index)).padding(6),
     );
-    let sensors = container(sensor_list).padding(10).width(Length::Fill).style(inset_style);
+    let sensors = container(sensor_list)
+        .padding(10)
+        .width(Length::Fill)
+        .style(inset_style(pal));
 
-    card(column![header, settings, sensors].spacing(10).width(Length::Fill)).into()
+    card(
+        pal,
+        column![header, settings, sensors]
+            .spacing(10)
+            .width(Length::Fill),
+    )
+    .into()
 }
 
 /// Legacy PascalCase source type → canonical prefixed/lowercase name, so
@@ -2808,15 +3119,46 @@ fn source_label(canonical: &str) -> &'static str {
 /// Sensor card: identity header, source, action, then the collapsible
 /// "Style overrides" block (closed by default: overrides are optional).
 /// `sensor_count` bounds the ▼ arrow (disabled on the last sensor).
-fn sensor_view(section_index: usize, sensor_index: usize, sensor_count: usize, sensor: &Sensor, style_open: bool) -> Element<'_, Message> {
+fn sensor_view(
+    pal: Palette,
+    section_index: usize,
+    sensor_index: usize,
+    sensor_count: usize,
+    sensor: &Sensor,
+    style_open: bool,
+) -> Element<'_, Message> {
     let header = Row::new()
-        .push(input("Name", sensor.name.as_deref().unwrap_or(""), move |value| Message::SensorNameChanged(section_index, sensor_index, value))
-            .width(Length::Fill))
-        .push(input("Description", sensor.description.as_deref().unwrap_or(""), move |value| Message::SensorDescriptionChanged(section_index, sensor_index, value))
-            .width(Length::Fill))
-        .push(move_btn("▲", sensor_index > 0, Message::SensorMoveUp(section_index, sensor_index)))
-        .push(move_btn("▼", sensor_index + 1 < sensor_count, Message::SensorMoveDown(section_index, sensor_index)))
-        .push(button(text("Remove").size(BODY)).on_press(Message::SensorRemoved(section_index, sensor_index)).padding(5))
+        .push(
+            input("Name", sensor.name.as_deref().unwrap_or(""), move |value| {
+                Message::SensorNameChanged(section_index, sensor_index, value)
+            })
+            .width(Length::Fill),
+        )
+        .push(
+            input(
+                "Description",
+                sensor.description.as_deref().unwrap_or(""),
+                move |value| Message::SensorDescriptionChanged(section_index, sensor_index, value),
+            )
+            .width(Length::Fill),
+        )
+        .push(move_btn(
+            pal,
+            "▲",
+            sensor_index > 0,
+            Message::SensorMoveUp(section_index, sensor_index),
+        ))
+        .push(move_btn(
+            pal,
+            "▼",
+            sensor_index + 1 < sensor_count,
+            Message::SensorMoveDown(section_index, sensor_index),
+        ))
+        .push(
+            button(text("Remove").size(BODY))
+                .on_press(Message::SensorRemoved(section_index, sensor_index))
+                .padding(5),
+        )
         .spacing(8)
         .align_y(Alignment::Center)
         .width(Length::Fill);
@@ -2889,7 +3231,10 @@ fn sensor_view(section_index: usize, sensor_index: usize, sensor_count: usize, s
         ],
     );
     let style_header = collapsible_header(
-        "Style overrides", summary, style_open,
+        pal,
+        "Style overrides",
+        summary,
+        style_open,
         Message::ToggleSensorStyle(section_index, sensor_index),
     );
 
@@ -2922,15 +3267,21 @@ fn sensor_view(section_index: usize, sensor_index: usize, sensor_count: usize, s
                 move |value| Message::SensorBorderTypeChanged(section_index, sensor_index, value),
             ).width(Length::Fill).into()),
         ];
-        root = root.push(container(form_grid(fields)).padding(10).width(Length::Fill).style(inset_style));
+        root = root.push(
+            container(form_grid(fields))
+                .padding(10)
+                .width(Length::Fill)
+                .style(inset_style(pal)),
+        );
     }
 
-    card(root).into()
+    card(pal, root).into()
 }
 
 /// The "Sensor Defaults" card: global style applied to every sensor,
 /// collapsed by default because it only overrides group-wide values.
 fn sensor_defaults_view(state: &PiumaSetup) -> Element<'_, Message> {
+    let pal = palette(&state.config);
     let d = &state.config.sensor_defaults;
 
     let summary = style_summary(
@@ -2944,13 +3295,21 @@ fn sensor_defaults_view(state: &PiumaSetup) -> Element<'_, Message> {
             ("brd", &d.border_width), ("rad", &d.border_radius), ("pad", &d.padding),
         ],
     );
-    let header = collapsible_header("Sensor Defaults", summary, state.defaults_expanded, Message::ToggleDefaults);
+    let header = collapsible_header(
+        pal,
+        "Sensor Defaults",
+        summary,
+        state.defaults_expanded,
+        Message::ToggleDefaults,
+    );
 
     let mut root = column![header].spacing(10).width(Length::Fill);
     if state.defaults_expanded {
-        root = root.push(text("Style applied to every sensor; single sensors override these values.")
-            .size(10)
-            .style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.55, 0.55, 0.6)), ..TextStyle::default() }));
+        root = root.push(
+            text("Style applied to every sensor; single sensors override these values.")
+                .size(10)
+                .style(muted_text(pal)),
+        );
 
         // Style numbers: -1 = disabled (the defaults apply), 0..=N = enabled.
         let fields = vec![
@@ -2979,12 +3338,13 @@ fn sensor_defaults_view(state: &PiumaSetup) -> Element<'_, Message> {
         root = root.push(form_grid(fields));
     }
 
-    card(root).into()
+    card(pal, root).into()
 }
 
 /// The "Section Defaults" card: style applied to every section, overridden
 /// per section (same group rule as the sensor defaults).
 fn section_defaults_view(state: &PiumaSetup) -> Element<'_, Message> {
+    let pal = palette(&state.config);
     let d = &state.config.section_defaults;
 
     let summary = style_summary(
@@ -2994,13 +3354,21 @@ fn section_defaults_view(state: &PiumaSetup) -> Element<'_, Message> {
         ],
         &[("brd", &d.border_width), ("rad", &d.border_radius)],
     );
-    let header = collapsible_header("Section Defaults", summary, state.sec_defaults_expanded, Message::ToggleSecDefaults);
+    let header = collapsible_header(
+        pal,
+        "Section Defaults",
+        summary,
+        state.sec_defaults_expanded,
+        Message::ToggleSecDefaults,
+    );
 
     let mut root = column![header].spacing(10).width(Length::Fill);
     if state.sec_defaults_expanded {
-        root = root.push(text("Style applied to every section; single sections override these values.")
-            .size(10)
-            .style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(0.55, 0.55, 0.6)), ..TextStyle::default() }));
+        root = root.push(
+            text("Style applied to every section; single sections override these values.")
+                .size(10)
+                .style(muted_text(pal)),
+        );
 
         // Style numbers: -1 = disabled (built-in fallback), 0..=N = enabled.
         let fields = vec![
@@ -3031,15 +3399,26 @@ fn section_defaults_view(state: &PiumaSetup) -> Element<'_, Message> {
         root = root.push(form_grid(fields));
     }
 
-    card(root).into()
+    card(pal, root).into()
 }
 
 /// Load / Save / Save As / Reset actions for the fixed bottom bar.
-fn action_buttons() -> Element<'static, Message> {
-    let load_btn = button(text("Load…").size(BODY)).on_press(Message::LoadConfig).padding(10).style(button::secondary);
-    let save_btn = button(text("Save").size(BODY)).on_press(Message::SaveConfig).padding(10).style(button::primary);
-    let save_as_btn = button(text("Save As…").size(BODY)).on_press(Message::SaveAs).padding(10).style(button::secondary);
-    let reset_btn = button(text("Reset").size(BODY)).on_press(Message::ResetConfig).padding(10);
+fn action_buttons(pal: Palette) -> Element<'static, Message> {
+    let load_btn = button(text("Load…").size(BODY))
+        .on_press(Message::LoadConfig)
+        .padding(10)
+        .style(move |t, s| btn_secondary(pal, t, s));
+    let save_btn = button(text("Save").size(BODY))
+        .on_press(Message::SaveConfig)
+        .padding(10)
+        .style(move |t, s| btn_primary(pal, t, s));
+    let save_as_btn = button(text("Save As…").size(BODY))
+        .on_press(Message::SaveAs)
+        .padding(10)
+        .style(move |t, s| btn_secondary(pal, t, s));
+    let reset_btn = button(text("Reset").size(BODY))
+        .on_press(Message::ResetConfig)
+        .padding(10);
 
     Row::new()
         .push(load_btn)
@@ -3060,10 +3439,41 @@ fn status_bar(state: &PiumaSetup) -> Element<'_, Message> {
     }
 }
 
+/// The GUI font from `piuma.json` (`panel.font` + `panel.bold`, same
+/// fallbacks as the bar): iced needs the default font before the state
+/// boots, so the file is read here once — the family name is leaked once
+/// at startup (iced wants a `'static` name, like `family_name_static` in
+/// src/main.rs, but here the font never changes at runtime).
+fn gui_font() -> Font {
+    let panel = fs::read_to_string(file_path(DEFAULT_FILE))
+        .ok()
+        .and_then(|c| serde_json::from_str::<JsonValue>(&c).ok())
+        .and_then(|v| v.get("panel").cloned());
+    let name = panel
+        .as_ref()
+        .and_then(|p| p.get("font").and_then(JsonValue::as_str))
+        .unwrap_or(SETUP_DEFAULT_FONT)
+        .to_owned();
+    let bold = panel
+        .as_ref()
+        .and_then(|p| p.get("bold").and_then(JsonValue::as_bool))
+        .unwrap_or(false);
+    Font {
+        family: iced::font::Family::Name(&*Box::leak(name.into_boxed_str())),
+        weight: if bold {
+            iced::font::Weight::Bold
+        } else {
+            iced::font::Weight::Normal
+        },
+        ..Font::DEFAULT
+    }
+}
+
 fn app() -> iced::Result {
     iced::application(PiumaSetup::new, update, view)
         .title("Piuma Setup")
         .theme(theme)
+        .default_font(gui_font())
         .window_size((920, 680))
         .resizable(true)
         .run()
