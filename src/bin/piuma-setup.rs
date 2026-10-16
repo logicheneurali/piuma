@@ -11,10 +11,11 @@ use iced::widget::{
 use iced::{Alignment, Background, Border, Color, Element, Font, Length, Padding, Task, Theme};
 use serde_json::{Map, Value as JsonValue};
 use std::borrow::Borrow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 // piuma's real config schema (same package, different bin target): the
 // save path validates against it before writing, so a config piuma
@@ -31,6 +32,12 @@ mod config;
 #[allow(dead_code)]
 #[path = "../autostart.rs"]
 mod autostart;
+
+// Freedesktop icon-name → file lookup shared with the bar (roadmap N1):
+// the setup renders the same resolve/widget pair at the same theme and
+// size, so the icon preview shows exactly what the bar will draw.
+#[path = "../icons.rs"]
+mod icons;
 
 /// The `panel.wallpaper` block (roadmap2 #1): whether the bar draws the
 /// desktop background itself and which image covers the output.
@@ -382,6 +389,10 @@ pub enum Message {
     SensorDescriptionChanged(usize, usize, String),
     /// Icon name of the sensor (roadmap N1); empty = absent.
     SensorIconChanged(usize, usize, String),
+    /// Opens the icon browser for one sensor (searchable theme names).
+    BrowseIconsPressed(usize, usize),
+    /// Icon chosen in the browser: (section, sensor, name); closes it.
+    IconPicked(usize, usize, String),
     SensorSourceTypeChanged(usize, usize, String),
     SensorSourceTypeConfigChanged(usize, usize, String, String),
     SensorTextColorChanged(usize, usize, String),
@@ -445,6 +456,8 @@ pub enum Modal {
     ConfirmRemoveSection(usize),
     /// Removal confirmation for one sensor.
     ConfirmRemoveSensor(usize, usize),
+    /// Icon browser: target sensor and the query filtering theme names.
+    BrowseIcons { section_index: usize, sensor_index: usize, query: String },
 }
 
 /// Default config file: the one the running piuma reads.
@@ -1668,6 +1681,33 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                 }
             }
         }
+        Message::BrowseIconsPressed(section_index, sensor_index) => {
+            let in_bounds = section_index < state.config.sections.len()
+                && sensor_index < state.config.sections[section_index].sensors.len();
+            if in_bounds {
+                // The search starts from the current name, so refining an
+                // existing icon needs no retype.
+                let current = state.config.sections[section_index].sensors[sensor_index]
+                    .icon
+                    .clone()
+                    .unwrap_or_default();
+                state.modal = Some(Modal::BrowseIcons {
+                    section_index,
+                    sensor_index,
+                    query: current,
+                });
+            }
+        }
+        Message::IconPicked(section_index, sensor_index, name) => {
+            if section_index < state.config.sections.len() {
+                let section = &mut state.config.sections[section_index];
+                if sensor_index < section.sensors.len() {
+                    section.sensors[sensor_index].icon =
+                        if name.is_empty() { None } else { Some(name) };
+                }
+            }
+            state.modal = None;
+        }
         Message::SensorSourceTypeChanged(section_index, sensor_index, value) => {
             if section_index < state.config.sections.len() {
                 let section = &mut state.config.sections[section_index];
@@ -1834,6 +1874,7 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
             }
             Some(Modal::LoadFile { selected, .. }) => *selected = value,
             Some(Modal::AddSection { name }) | Some(Modal::AddSensor { name, .. }) => *name = value,
+            Some(Modal::BrowseIcons { query, .. }) => *query = value,
             _ => {}
         },
         Message::ModalTypeChanged(kind) => {
@@ -1947,6 +1988,11 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                         }
                     });
                 }
+            }
+            Some(m @ Modal::BrowseIcons { .. }) => {
+                // No confirm action in the browser: a picked cell already
+                // applies, so Enter keeps the modal open as it is.
+                state.modal = Some(m);
             }
             None => {}
         },
@@ -2281,6 +2327,287 @@ fn move_btn<'a>(
     } else {
         b
     }
+}
+
+// --- Sensor icons: WYSIWYG preview + theme-name browser ----------------
+
+/// The icon theme and size exactly as the bar computes them (config
+/// theme or the system one, font size clamped to u16): the preview must
+/// agree with the bar, size variance included.
+fn icon_theme_and_size(cfg: &PiumaConfig) -> (&str, u16) {
+    let theme = cfg.icon_theme.as_deref().unwrap_or_else(|| icons::icon_theme());
+    let size = cfg.font_size.min(u32::from(u16::MAX)) as u16;
+    (theme, size)
+}
+
+/// The themed icon widget at the bar's size, or `None` when the name is
+/// empty or the theme has no such icon — the one resolve path shared by
+/// the preview box, the browser cells and the compact sensor rows.
+fn resolved_icon<'a>(cfg: &PiumaConfig, name: Option<&str>) -> Option<Element<'a, Message>> {
+    let (theme, size) = icon_theme_and_size(cfg);
+    name.filter(|n| !n.is_empty())
+        .and_then(|n| icons::resolve(theme, n, size))
+        .map(|path| icons::widget(&path, size as f32))
+}
+
+/// Live preview beside the icon input: the resolved icon in a small
+/// inset box, a red ✕ for an unknown name, the empty box while nothing
+/// is typed — the name's fate is visible while typing it.
+fn icon_preview<'a>(cfg: &PiumaConfig, name: Option<&str>) -> Element<'a, Message> {
+    let pal = palette(cfg);
+    let (_, size) = icon_theme_and_size(cfg);
+    let inner: Element<'a, Message> = match name.filter(|n| !n.is_empty()) {
+        Some(n) => match resolved_icon(cfg, Some(n)) {
+            Some(icon) => icon,
+            None => text("✕")
+                .size(BODY)
+                .style(|_t: &Theme| TextStyle {
+                    color: Some(Color::from_rgb(1.0, 0.35, 0.35)),
+                    ..TextStyle::default()
+                })
+                .into(),
+        },
+        None => text("").into(),
+    };
+    let box_size = f32::from(size) + 12.0;
+    container(inner)
+        .width(Length::Fixed(box_size))
+        .height(Length::Fixed(box_size))
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center)
+        .style(inset_style(pal))
+        .into()
+}
+
+/// Sentinel label of the "no configured theme" picklist entry: the bar
+/// then falls back to the system icon-theme setting.
+const SYSTEM_ICON_THEME: &str = "system default";
+
+/// Icon-theme picklist options: sentinel first, then the installed
+/// themes sorted; a hand-typed name missing from the list joins it, so
+/// the current value never falls out of the options.
+fn icon_theme_options(current: Option<&str>) -> Vec<String> {
+    let mut themes: Vec<String> = freedesktop_icons::list_themes();
+    themes.sort();
+    themes.dedup();
+    if let Some(c) = current.filter(|c| !c.is_empty() && !themes.iter().any(|t| t == c)) {
+        themes.insert(0, c.to_string());
+    }
+    themes.insert(0, SYSTEM_ICON_THEME.to_string());
+    themes
+}
+
+/// The panel's icon-theme picker; the empty config maps to the sentinel
+/// and back (empty = the bar's system fallback).
+fn icon_theme_picker(state: &PiumaSetup) -> Element<'_, Message> {
+    let current = state.config.icon_theme.clone().unwrap_or_default();
+    let selected = if current.is_empty() {
+        SYSTEM_ICON_THEME.to_string()
+    } else {
+        current
+    };
+    picklist(
+        icon_theme_options(state.config.icon_theme.as_deref()),
+        Some(selected),
+        |value: String| {
+            Message::IconThemeChanged(if value == SYSTEM_ICON_THEME { String::new() } else { value })
+        },
+    )
+    .width(Length::Fill)
+    .into()
+}
+
+/// The XDG data dirs of the lookup: the user's data home, then
+/// $XDG_DATA_DIRS (defaulting to /usr/local/share and /usr/share).
+fn xdg_data_dirs() -> Vec<PathBuf> {
+    let mut dirs_: Vec<PathBuf> = dirs::data_dir().into_iter().collect();
+    let data_dirs =
+        std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".to_string());
+    dirs_.extend(data_dirs.split(':').filter(|d| !d.is_empty()).map(PathBuf::from));
+    dirs_
+}
+
+/// Theme roots: the XDG data dirs' `icons` plus the legacy ~/.icons.
+fn icon_theme_roots() -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = xdg_data_dirs().iter().map(|d| d.join("icons")).collect();
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home.join(".icons"));
+    }
+    roots
+}
+
+/// Flat pixmaps dirs of the same data dirs: the lookup's last resort,
+/// where distro logos live outside every theme (/usr/share/pixmaps).
+fn icon_pixmap_dirs() -> Vec<PathBuf> {
+    xdg_data_dirs().into_iter().map(|d| d.join("pixmaps")).collect()
+}
+
+/// Whether a file is an icon image (the extensions the lookup builds).
+fn is_icon_image(path: &Path) -> bool {
+    path.extension().is_some_and(|e| {
+        matches!(
+            e.to_string_lossy().to_ascii_lowercase().as_str(),
+            "svg" | "svgz" | "png" | "xpm"
+        )
+    })
+}
+
+/// The `Inherits=` parents of a theme's index.theme (unlocalized key):
+/// the fallback chain the lookup walks one level deep.
+fn index_theme_inherits(dir: &Path) -> Vec<String> {
+    let Ok(text) = fs::read_to_string(dir.join("index.theme")) else {
+        return Vec::new();
+    };
+    text.lines()
+        .find_map(|line| line.strip_prefix("Inherits=").map(str::to_string))
+        .map(|v| {
+            v.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Dirs of every root hosting a child with this exact theme name: the
+/// lookup keys themes by directory name, so the match is exact ("Breeze"
+/// with only `breeze` installed misses, exactly like the bar misses).
+fn theme_dirs_by_key(theme: &str) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for root in icon_theme_roots() {
+        let Ok(entries) = fs::read_dir(&root) else { continue };
+        for path in entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
+            let named = path.file_name().is_some_and(|n| n == std::ffi::OsStr::new(theme));
+            if named && !found.contains(&path) {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// Recursively collects the icon stems (image files) of a theme dir:
+/// the theme module of freedesktop-icons is private, so the browser
+/// does its own one-shot directory walk.
+fn collect_icon_names(dir: &Path, out: &mut HashSet<String>) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_icon_names(&path, out);
+        } else if let (true, Some(stem)) = (is_icon_image(&path), path.file_stem().and_then(|s| s.to_str())) {
+            out.insert(stem.to_string());
+        }
+    }
+}
+
+/// Image stems directly inside a flat dir (no recursion: the base-path
+/// fallback of the lookup only checks files at its top level).
+fn collect_flat_icon_names(dir: &Path, out: &mut HashSet<String>) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if let (true, Some(stem)) = (is_icon_image(&path), path.file_stem().and_then(|s| s.to_str())) {
+            out.insert(stem.to_string());
+        }
+    }
+}
+
+/// Icon names the bar can resolve under `theme`, mirroring the lookup
+/// chain of freedesktop-icons: the theme's own dirs (keyed by dir name,
+/// an unknown name starts from hicolor), the `Inherits` parents, then
+/// the flat base/pixmaps dirs. Sorted, deduped, cached per theme name.
+fn theme_icon_names(theme: &str) -> Vec<String> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Vec<String>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(names) = guard.get(theme) {
+        return names.clone();
+    }
+    let mut set = HashSet::new();
+    // 1) the theme's dirs; an unknown theme name starts from hicolor.
+    let mut dirs = theme_dirs_by_key(theme);
+    if dirs.is_empty() {
+        dirs = theme_dirs_by_key("hicolor");
+    }
+    let mut parents: Vec<String> = Vec::new();
+    for dir in &dirs {
+        collect_icon_names(dir, &mut set);
+        parents.extend(index_theme_inherits(dir));
+    }
+    // 2) the inherited parents, one level like the lookup walks them.
+    let mut seen = HashSet::new();
+    for parent in parents {
+        if !seen.insert(parent.to_ascii_lowercase()) {
+            continue;
+        }
+        for dir in theme_dirs_by_key(&parent) {
+            collect_icon_names(&dir, &mut set);
+        }
+    }
+    // 3) the flat base dirs (icons roots + pixmaps): the last resort,
+    // where distro logos live outside every theme.
+    for dir in icon_theme_roots().into_iter().chain(icon_pixmap_dirs()) {
+        collect_flat_icon_names(&dir, &mut set);
+    }
+    let mut names: Vec<String> = set.into_iter().collect();
+    names.sort();
+    guard.insert(theme.to_string(), names.clone());
+    names
+}
+
+/// Grid bounds of the icon browser: a broad query still renders a
+/// bounded widget count (names shown = cap at most).
+const ICON_GRID_CAP: usize = 120;
+const ICONS_PER_ROW: usize = 4;
+
+/// Case-insensitive substring filter over the theme names, sorted and
+/// capped for the browser grid.
+fn filter_icon_names<'a>(names: &'a [String], query: &str) -> Vec<&'a str> {
+    let q = query.trim().to_ascii_lowercase();
+    let mut hits: Vec<&'a str> = names
+        .iter()
+        .map(String::as_str)
+        .filter(|n| q.is_empty() || n.to_ascii_lowercase().contains(&q))
+        .collect();
+    hits.sort_unstable();
+    hits.truncate(ICON_GRID_CAP);
+    hits
+}
+
+/// Number of names the query matches, uncapped (the grid's caption).
+fn count_icon_matches(names: &[String], query: &str) -> usize {
+    let q = query.trim().to_ascii_lowercase();
+    names
+        .iter()
+        .filter(|n| q.is_empty() || n.to_ascii_lowercase().contains(&q))
+        .count()
+}
+
+/// One browser cell: the icon at the bar's size over its name; pressing
+/// writes the name into the sensor's field and closes the modal.
+fn icon_grid_cell(
+    pal: Palette,
+    cfg: &PiumaConfig,
+    name: &str,
+    section_index: usize,
+    sensor_index: usize,
+) -> Element<'static, Message> {
+    // The name is copied into the widgets, so the cell keeps no borrow:
+    // it can outlive the filtered list that produced it.
+    let preview: Element<'static, Message> =
+        resolved_icon(cfg, Some(name)).unwrap_or_else(|| text("✕").size(BODY).into());
+    button(
+        column![preview, text(name.to_string()).size(9)]
+            .spacing(4)
+            .align_x(Alignment::Center)
+            .width(Length::Fill),
+    )
+    .on_press(Message::IconPicked(section_index, sensor_index, name.to_string()))
+    .padding(6)
+    .width(Length::Fixed(96.0))
+    .style(move |t, s| btn_secondary(pal, t, s))
+    .into()
 }
 
 /// Scrollable holding the tab content: the add-section/add-sensor tasks
@@ -2670,6 +2997,70 @@ fn modal_card(state: &PiumaSetup) -> Element<'_, Message> {
                 dialog_actions(pal, Message::ModalConfirm, "Remove"),
             )
         }
+        Some(Modal::BrowseIcons { section_index, sensor_index, query }) => {
+            // Theme names as a grid of live previews: type to narrow the
+            // list, press a cell to pick; the directory walk is cached
+            // per theme, so only filtering happens per keystroke.
+            let theme = state
+                .config
+                .icon_theme
+                .clone()
+                .unwrap_or_else(|| icons::icon_theme().to_string());
+            let names = theme_icon_names(&theme);
+            let hits = filter_icon_names(&names, query);
+            let mut grid = column![].spacing(8).width(Length::Fill);
+            let mut cells = Row::new().spacing(8);
+            for (i, name) in hits.iter().enumerate() {
+                cells = cells.push(icon_grid_cell(
+                    pal,
+                    &state.config,
+                    name,
+                    *section_index,
+                    *sensor_index,
+                ));
+                if (i + 1) % ICONS_PER_ROW == 0 {
+                    grid = grid.push(cells);
+                    cells = Row::new().spacing(8);
+                }
+            }
+            if hits.len() % ICONS_PER_ROW != 0 {
+                grid = grid.push(cells);
+            }
+            let results: Element<Message> = if hits.is_empty() {
+                text("no match").size(BODY).into()
+            } else {
+                scrollable(grid.width(Length::Fill))
+                    .height(Length::Fixed(320.0))
+                    .width(Length::Fill)
+                    .into()
+            };
+            let body = column![
+                input("search (substring)", query, Message::ModalTextChanged).width(Length::Fill),
+                text(format!(
+                    "{} icons available · {} match",
+                    names.len(),
+                    count_icon_matches(&names, query)
+                ))
+                .size(10)
+                .style(muted_text(pal)),
+                results,
+            ]
+            .spacing(8)
+            .width(Length::Fill);
+            dialog_frame(
+                pal,
+                "Pick icon",
+                body.into(),
+                error,
+                // A single close button: a picked cell already applies.
+                Row::new().push(
+                    button(text("Close").size(BODY))
+                        .on_press(Message::ModalCancel)
+                        .padding(8)
+                        .style(move |t, s| btn_primary(pal, t, s)),
+                ),
+            )
+        }
         None => text("").into(),
     }
 }
@@ -2992,9 +3383,7 @@ fn panel_settings(state: &PiumaSetup) -> Element<'_, Message> {
             .label("Bold text")
             .on_toggle(Message::BoldChanged)
             .into()),
-        ("Icon Theme", input("system icon theme", state.config.icon_theme.as_deref().unwrap_or(""), Message::IconThemeChanged)
-            .width(Length::Fill)
-            .into()),
+        ("Icon Theme", icon_theme_picker(state).into()),
         // Autostart lives in its own tab now (roadmap2 #2).
         ("App Theme", toggler(state.config.app_theme.unwrap_or(false))
             .label("Generate GTK theme bridge")
@@ -3263,6 +3652,7 @@ fn section_view<'a>(
     for (j, sensor) in section.sensors.iter().enumerate() {
         sensor_list = sensor_list.push(sensor_view(
             pal,
+            &state.config,
             index,
             j,
             section.sensors.len(),
@@ -3447,21 +3837,27 @@ fn sensor_summary(sensor: &Sensor) -> String {
 /// and remove controls; the form (name, description, source, graph, style)
 /// is the body, expanded on demand. `section_labels` feeds the cross-
 /// section "Move to" picklist (its number prefix is the 1-based index).
-fn sensor_view(
+fn sensor_view<'a>(
     pal: Palette,
+    cfg: &'a PiumaConfig,
     section_index: usize,
     sensor_index: usize,
     sensor_count: usize,
-    sensor: &Sensor,
+    sensor: &'a Sensor,
     open: bool,
     style_open: bool,
     section_labels: Vec<String>,
-) -> Element<'_, Message> {
+) -> Element<'a, Message> {
     let title = sensor
         .name
         .clone()
         .unwrap_or_else(|| source_label(canonical_type(&sensor.source_type)).to_string());
-    let header = Row::new()
+    let mut header = Row::new();
+    // The sensor's own icon leads the row, exactly as the bar draws it.
+    if let Some(icon) = resolved_icon(cfg, sensor.icon.as_deref()) {
+        header = header.push(icon);
+    }
+    let header = header
         .push(collapsible_header(
             pal,
             title,
@@ -3560,7 +3956,18 @@ fn sensor_view(
         .width(Length::Fill)
         .into());
 
-    let icon = form_cell("Icon", input("icon name (theme)", sensor.icon.as_deref().unwrap_or(""), move |value| Message::SensorIconChanged(section_index, sensor_index, value))
+    // Icon name, live preview at the bar's size and a browse modal: the
+    // preview resolves exactly like the bar, so it cannot lie.
+    let icon = form_cell("Icon", Row::new()
+        .push(input("icon name (theme)", sensor.icon.as_deref().unwrap_or(""), move |value| Message::SensorIconChanged(section_index, sensor_index, value))
+            .width(Length::Fill))
+        .push(button(text("…").size(BODY))
+            .on_press(Message::BrowseIconsPressed(section_index, sensor_index))
+            .padding(5)
+            .style(move |t, s| btn_secondary(pal, t, s)))
+        .push(icon_preview(cfg, sensor.icon.as_deref()))
+        .spacing(8)
+        .align_y(Alignment::Center)
         .width(Length::Fill)
         .into());
 
@@ -4468,11 +4875,11 @@ mod tests {
     #[test]
     fn add_sensor_modal_appends_typed_sensor_and_opens_it() {
         let mut s = test_state();
-        update(&mut s, Message::AddSensorPressed(0));
+        let _ = update(&mut s, Message::AddSensorPressed(0));
         assert!(matches!(s.modal, Some(Modal::AddSensor { .. })));
-        update(&mut s, Message::ModalTypeChanged("perc_disk".to_string()));
-        update(&mut s, Message::ModalTextChanged("Root".to_string()));
-        update(&mut s, Message::ModalConfirm);
+        let _ = update(&mut s, Message::ModalTypeChanged("perc_disk".to_string()));
+        let _ = update(&mut s, Message::ModalTextChanged("Root".to_string()));
+        let _ = update(&mut s, Message::ModalConfirm);
         let sensors = &s.config.sections[0].sensors;
         assert_eq!(sensors.len(), 2);
         assert_eq!(sensors[1].source_type, "perc_disk");
@@ -4486,9 +4893,9 @@ mod tests {
     #[test]
     fn add_sensor_without_name_stays_unnamed() {
         let mut s = test_state();
-        update(&mut s, Message::AddSensorPressed(1));
-        update(&mut s, Message::ModalTextChanged("   ".to_string()));
-        update(&mut s, Message::ModalConfirm);
+        let _ = update(&mut s, Message::AddSensorPressed(1));
+        let _ = update(&mut s, Message::ModalTextChanged("   ".to_string()));
+        let _ = update(&mut s, Message::ModalConfirm);
         let sensors = &s.config.sections[1].sensors;
         assert_eq!(sensors.len(), 2);
         assert!(sensors[1].name.is_none());
@@ -4500,8 +4907,8 @@ mod tests {
         let mut s = test_state();
         s.sensors_open.insert((0, 0));
         s.sensor_style_open.insert((0, 0));
-        update(&mut s, Message::AddSensorPressed(0));
-        update(&mut s, Message::ModalConfirm);
+        let _ = update(&mut s, Message::AddSensorPressed(0));
+        let _ = update(&mut s, Message::ModalConfirm);
         assert!(s.sensors_open.contains(&(0, 0)) && s.sensors_open.contains(&(0, 1)));
         assert!(s.sensor_style_open.contains(&(0, 0)), "earlier keys survive the insert");
     }
@@ -4512,7 +4919,7 @@ mod tests {
     fn duplicate_sensor_marks_the_copy() {
         let mut s = test_state();
         s.config.sections[0].sensors[0].name = Some("Disk".to_string());
-        update(&mut s, Message::SensorDuplicated(0, 0));
+        let _ = update(&mut s, Message::SensorDuplicated(0, 0));
         let sensors = &s.config.sections[0].sensors;
         assert_eq!(sensors.len(), 2);
         assert_eq!(sensors[1].name.as_deref(), Some("Disk (copy)"));
@@ -4527,9 +4934,9 @@ mod tests {
         s.config.sections[0].sensors.push(Sensor::default());
         s.sensors_open.insert((0, 1));
         s.sensor_style_open.insert((0, 1));
-        update(&mut s, Message::RemoveSensorPressed(0, 0));
+        let _ = update(&mut s, Message::RemoveSensorPressed(0, 0));
         assert!(matches!(s.modal, Some(Modal::ConfirmRemoveSensor(0, 0))));
-        update(&mut s, Message::ModalConfirm);
+        let _ = update(&mut s, Message::ModalConfirm);
         assert_eq!(s.config.sections[0].sensors.len(), 1);
         assert!(s.sensors_open.contains(&(0, 0)));
         assert!(s.sensor_style_open.contains(&(0, 0)));
@@ -4541,7 +4948,7 @@ mod tests {
     fn last_section_is_never_removed() {
         let mut s = test_state();
         s.config.sections.truncate(1);
-        update(&mut s, Message::RemoveSectionPressed(0));
+        let _ = update(&mut s, Message::RemoveSectionPressed(0));
         assert!(s.modal.is_none(), "no confirmation for the last section");
     }
 
@@ -4551,9 +4958,9 @@ mod tests {
     fn remove_section_shifts_later_keys() {
         let mut s = test_state();
         s.sensor_style_open.insert((1, 0));
-        update(&mut s, Message::RemoveSectionPressed(0));
+        let _ = update(&mut s, Message::RemoveSectionPressed(0));
         assert!(matches!(s.modal, Some(Modal::ConfirmRemoveSection(0))));
-        update(&mut s, Message::ModalConfirm);
+        let _ = update(&mut s, Message::ModalConfirm);
         assert_eq!(s.config.sections.len(), 1);
         assert_eq!(s.config.sections[0].name.as_deref(), Some("Right"));
         assert!(
@@ -4569,7 +4976,7 @@ mod tests {
         let mut s = test_state();
         s.config.sections[0].sensors[0].source_type = "perc_disk".to_string();
         s.sensors_open.insert((0, 0));
-        update(&mut s, Message::SensorMoveTo(0, 0, 1));
+        let _ = update(&mut s, Message::SensorMoveTo(0, 0, 1));
         assert!(s.config.sections[0].sensors.is_empty());
         assert_eq!(s.config.sections[1].sensors.len(), 2);
         assert_eq!(s.config.sections[1].sensors[1].source_type, "perc_disk");
@@ -4580,13 +4987,119 @@ mod tests {
     #[test]
     fn toggle_accordion_flips_once() {
         let mut s = test_state();
-        update(&mut s, Message::ToggleSection(0));
+        let _ = update(&mut s, Message::ToggleSection(0));
         assert!(s.sections_collapsed.contains(&0));
-        update(&mut s, Message::ToggleSection(0));
+        let _ = update(&mut s, Message::ToggleSection(0));
         assert!(!s.sections_collapsed.contains(&0));
-        update(&mut s, Message::ToggleSensor(0, 0));
+        let _ = update(&mut s, Message::ToggleSensor(0, 0));
         assert!(s.sensors_open.contains(&(0, 0)));
-        update(&mut s, Message::ToggleSensor(0, 0));
+        let _ = update(&mut s, Message::ToggleSensor(0, 0));
         assert!(!s.sensors_open.contains(&(0, 0)));
+    }
+
+    /// The browser filter: case-insensitive substring, sorted, capped.
+    #[test]
+    fn icon_filter_is_case_insensitive_sorted_and_capped() {
+        let names: Vec<String> =
+            (0..ICON_GRID_CAP + 50).map(|i| format!("icon-{i:03}")).collect();
+        let hits = filter_icon_names(&names, "ICON-0");
+        assert!(hits.len() <= ICON_GRID_CAP);
+        assert_eq!(hits.first().copied(), Some("icon-000"));
+        assert!(filter_icon_names(&names, "no-such-name").is_empty());
+        // An empty query shows everything, still capped and sorted.
+        let all = filter_icon_names(&names, "");
+        assert_eq!(all.len(), ICON_GRID_CAP);
+        let mut sorted = all.to_vec();
+        sorted.sort_unstable();
+        assert_eq!(all, sorted);
+        assert_eq!(
+            count_icon_matches(&names, "icon"),
+            ICON_GRID_CAP + 50,
+            "the caption counts past the cap"
+        );
+    }
+
+    /// The theme walk collects image stems, dedupes them across size
+    /// directories and skips non-image files.
+    #[test]
+    fn scan_theme_dir_collects_image_stems() {
+        let root =
+            std::env::temp_dir().join(format!("piuma-icons-test-{}-scan", std::process::id()));
+        let deep = root.join("scalable").join("apps");
+        let sized = root.join("48x48").join("apps");
+        fs::create_dir_all(&deep).expect("fixture dirs");
+        fs::create_dir_all(&sized).expect("fixture dirs");
+        fs::write(deep.join("firefox.svg"), b"<svg/>").expect("svg");
+        fs::write(sized.join("firefox.png"), [0u8]).expect("png");
+        fs::write(sized.join("index.theme"), b"[Icon Theme]").expect("not an icon");
+        let mut names = HashSet::new();
+        collect_icon_names(&root, &mut names);
+        assert_eq!(names, HashSet::from(["firefox".to_string()]));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The index.theme parser reads the unlocalized `Inherits` key and
+    /// ignores the localized variants, splitting and trimming the list.
+    #[test]
+    fn index_theme_inherits_skips_localized_keys() {
+        let dir =
+            std::env::temp_dir().join(format!("piuma-icons-test-{}-index", std::process::id()));
+        fs::create_dir_all(&dir).expect("fixture dir");
+        fs::write(
+            dir.join("index.theme"),
+            "[Icon Theme]\nName=Breeze\nName[fr]=Brisa\nInherits=hicolor, Adwaita\n",
+        )
+        .expect("index");
+        assert_eq!(
+            index_theme_inherits(&dir),
+            vec!["hicolor".to_string(), "Adwaita".to_string()]
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The theme options lead with the system-default entry and keep a
+    /// hand-typed theme the installed list does not know.
+    #[test]
+    fn icon_theme_options_keep_the_current_value() {
+        let opts = icon_theme_options(Some("piuma-not-installed"));
+        assert_eq!(opts[0], SYSTEM_ICON_THEME);
+        assert!(opts.contains(&"piuma-not-installed".to_string()));
+        assert_eq!(icon_theme_options(None)[0], SYSTEM_ICON_THEME);
+    }
+
+    /// The preview resolves with the bar's own rule: configured theme
+    /// or system one, font size clamped to u16.
+    #[test]
+    fn icon_preview_uses_the_bar_theme_and_size() {
+        let mut cfg = PiumaConfig::default();
+        cfg.font_size = 70_000; // above u16::MAX
+        let (theme, size) = icon_theme_and_size(&cfg);
+        assert_eq!(size, u16::MAX);
+        assert_eq!(theme, icons::icon_theme());
+        cfg.icon_theme = Some("Papirus".to_string());
+        let (theme, size) = icon_theme_and_size(&cfg);
+        assert_eq!(theme, "Papirus");
+        assert_eq!(size, u16::MAX);
+        assert!(resolved_icon(&cfg, None).is_none(), "no name, no icon");
+    }
+
+    /// The browser flow: the modal opens for the sensor, the query
+    /// narrows it, picking writes the name and closes the modal.
+    #[test]
+    fn browse_icons_flow_sets_the_sensor_icon() {
+        let mut s = test_state();
+        let _ = update(&mut s, Message::BrowseIconsPressed(0, 0));
+        assert!(matches!(
+            s.modal,
+            Some(Modal::BrowseIcons { section_index: 0, sensor_index: 0, .. })
+        ));
+        let _ = update(&mut s, Message::ModalTextChanged("firefox".to_string()));
+        assert!(
+            matches!(&s.modal, Some(Modal::BrowseIcons { query, .. }) if query == "firefox"),
+            "the query follows the typed text"
+        );
+        let _ = update(&mut s, Message::IconPicked(0, 0, "firefox".to_string()));
+        assert_eq!(s.config.sections[0].sensors[0].icon.as_deref(), Some("firefox"));
+        assert!(s.modal.is_none());
     }
 }
