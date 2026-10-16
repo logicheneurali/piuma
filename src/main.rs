@@ -99,10 +99,10 @@ const GRAPH_LINK_PAD: i32 = 4;
 /// (the label sits on the guide line the draw pass computes).
 const GRAPH_HEADER_H: u32 = 20;
 const GRAPH_SPACING: u32 = 6;
-/// Grace ticks an open graph popup gets after its sensor leaves
-/// without the pointer ever reaching its surface (≈2 s at the 1 Hz
-/// tick): long enough to cross the gap under the bar, short enough to
-/// not linger.
+/// Grace ticks an open graph popup gets once its sensor and its
+/// surface both lost the cursor (≈2 s at the 1 Hz tick): the sensor's
+/// leave can act on stale coordinates and the widget's exit can be
+/// missed, so the reap is the backstop that cannot hang.
 const GRAPH_ABANDON_GRACE: u8 = 2;
 /// Alpha of the tinted plate behind the average label: opaque enough
 /// to hold the text where it crosses the trend line, translucent
@@ -260,9 +260,8 @@ struct TrayMenu {
 
 /// The open sensor-graph popup: which sensor's trend it draws and the
 /// output-space rect `(x0, y0, x1, y1)` it occupies (placement of the
-/// moment, for the hover guards). `pointer_seen`/`missed` track
-/// whether the cursor ever reached its surface — the only stale-proof
-/// signal for the tick's abandonment reap (see `popup_missed_tick`).
+/// moment, for the hover guards). `pointer_on_popup`/`missed` feed the
+/// tick's abandonment reap (see `popup_missed_tick`).
 #[derive(Clone)]
 struct GraphPopup {
     id: iced::window::Id,
@@ -276,9 +275,13 @@ struct GraphPopup {
     /// The sensor box's on-screen rect in output space, as answered by
     /// `FindSensorRect`: the connector window is pinned to it.
     sensor_rect: Option<(i32, i32, i32, i32)>,
-    /// Set when a cursor event arrives tagged with this window's id:
-    /// the leave-guard's coordinates can be stale, this cannot.
-    pointer_seen: bool,
+    /// The cursor is on the popup's surface — set and cleared by the
+    /// surface's own cursor events (position-checked both ways, plus
+    /// the window's `CursorLeft`) and by the widget's exit. Never
+    /// one-way: a single "seen" setter with only the widget's exit as
+    /// a reset pins the popup open forever when that exit never fires
+    /// (the very bug `31771e1` fixed on the calendar popup).
+    pointer_on_popup: bool,
     /// Grace ticks spent without sensor and without pointer.
     missed: u8,
 }
@@ -947,9 +950,9 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             // view and the icon resolution read tray::icon_target.
             update_tray_icon_target(panel);
             let mut cmds: Vec<Command<Message>> = Vec::new();
-            // A popup the pointer never reached gets reaped once its
-            // grace runs out: the sensor's leave can act on stale
-            // coordinates and, after the cursor rests on another
+            // A popup that lost both its sensor and its pointer gets
+            // reaped once its grace runs out: the sensor's leave can act
+            // on stale coordinates and, after the cursor rests on another
             // application's window, no event ever arrives again.
             if let Some(gp) = reap_abandoned_popup(panel) {
                 cmds.push(iced::window::close(gp.id));
@@ -1021,9 +1024,15 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                 Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
                     if let Some(gp) = panel.graph_popup.as_mut() {
                         if gp.id == id {
-                            // The pointer reached the popup's surface: its own
-                            // relative position is discarded, the visit counts.
-                            gp.pointer_seen = true;
+                            // Position-checked both ways, like the
+                            // calendar's: inside keeps the popup alive,
+                            // a point outside clears the flag — the
+                            // widget's exit alone can be missed and a
+                            // one-way flag pinned the popup open for good.
+                            let w = (gp.rect.2 - gp.rect.0) as f32;
+                            let h = (gp.rect.3 - gp.rect.1) as f32;
+                            gp.pointer_on_popup =
+                                (0.0..w).contains(&position.x) && (0.0..h).contains(&position.y);
                         }
                     }
                     if let Some(cp) = panel.calendar.as_mut() {
@@ -1049,10 +1058,15 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                         }
                     }
                 }
-                // The pointer left this window: for the calendar surface the
-                // compositor's own leave is authoritative — clear the flag
-                // even where the widget's `on_exit` never fired.
+                // The pointer left this window: for both popup surfaces
+                // the compositor's own leave is authoritative — clear
+                // the flag even where the widget's `on_exit` never fired.
                 Event::Mouse(iced::mouse::Event::CursorLeft) => {
+                    if let Some(gp) = panel.graph_popup.as_mut() {
+                        if gp.id == id {
+                            gp.pointer_on_popup = false;
+                        }
+                    }
                     if let Some(cp) = panel.calendar.as_mut() {
                         if cp.id == id {
                             cp.pointer_on_popup = false;
@@ -1353,6 +1367,12 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             hover_sync(panel, section_index, sensor_index, hovered)
         }
         Message::GraphPopupExited => {
+            // The pointer left the surface: this exit is the fast
+            // close, while the flag reset leaves the tick's reap ready
+            // to backstop the times it never fires.
+            if let Some(gp) = panel.graph_popup.as_mut() {
+                gp.pointer_on_popup = false;
+            }
             // The cursor is back on the popup's sensor: it stays (the
             // popup re-anchors when the sensor is entered again).
             let on_sensor = panel
@@ -2994,7 +3014,7 @@ fn menu_placement(x: i32, y: i32, w: u32, h: u32, sw: i32, sh: i32) -> (Anchor, 
 /// before the cursor's own update), and once the cursor rests on
 /// another application's window no event ever arrives again.
 fn popup_missed_tick(gp: &mut GraphPopup, sensor_under_cursor: bool) -> bool {
-    if sensor_under_cursor || gp.pointer_seen {
+    if sensor_under_cursor || gp.pointer_on_popup {
         gp.missed = 0;
         return false;
     }
@@ -3013,7 +3033,7 @@ fn reap_abandoned_popup(panel: &mut Panel) -> Option<GraphPopup> {
     if !expired {
         return None;
     }
-    eprintln!("[piuma] graph: close (pointer never reached the popup)");
+    eprintln!("[piuma] graph: close (cursor left the sensor and the popup)");
     panel.graph_popup.take()
 }
 
@@ -3183,8 +3203,9 @@ fn calendar_size(config: &config::Config, weekdays: &[String; 7]) -> (u32, u32) 
 /// right after opening the surface maps **under the cursor** and steals
 /// the pointer from the bar, and that leave must not close it (every
 /// other departure either clears the rect test or is caught by the
-/// popup's own `GraphPopupExited`). A popup the pointer never reaches
-/// is reaped by the tick instead (see `reap_abandoned_popup`).
+/// popup's own `GraphPopupExited`). When neither lands — stale
+/// coordinates, a missed widget exit — the tick's reap closes the
+/// popup after `GRAPH_ABANDON_GRACE` (see `reap_abandoned_popup`).
 fn graph_hover_sync(
     panel: &mut Panel,
     section: usize,
@@ -3258,7 +3279,7 @@ fn graph_hover_sync(
         rect,
         anchor,
         sensor_rect: None,
-        pointer_seen: false,
+        pointer_on_popup: false,
         missed: 0,
     });
     eprintln!("[piuma] graph: open rect={rect:?} cursor=({x},{y})");
@@ -4606,11 +4627,13 @@ mod tests {
         assert_eq!(close, vec![1, 2]);
     }
 
-    /// The tick reaps a popup whose sensor left without the pointer
-    /// ever reaching it — but only after the grace, and never while a
-    /// sensor is under the cursor or the cursor sits on the surface.
+    /// The tick reaps a popup whose sensor and surface both lost the
+    /// cursor — but only after the grace, and never while a sensor is
+    /// under the cursor or the pointer sits on the surface. The flag
+    /// is two-way: a pointer that visits and then leaves falls back to
+    /// the grace instead of pinning the popup open forever.
     #[test]
-    fn an_unreached_popup_is_reaped_after_its_grace() {
+    fn an_abandoned_popup_is_reaped_after_its_grace() {
         let fresh = || GraphPopup {
             id: iced::window::Id::unique(),
             section: 0,
@@ -4618,7 +4641,7 @@ mod tests {
             rect: (0, 0, 10, 10),
             anchor: Anchor::Top,
             sensor_rect: None,
-            pointer_seen: false,
+            pointer_on_popup: false,
             missed: 0,
         };
         let mut abandoned = fresh();
@@ -4632,10 +4655,26 @@ mod tests {
         );
 
         let mut on_surface = fresh();
-        on_surface.pointer_seen = true;
+        on_surface.pointer_on_popup = true;
         assert!(
             !popup_missed_tick(&mut on_surface, false),
             "pointer on it: never abandoned"
+        );
+
+        let mut visited = fresh();
+        visited.pointer_on_popup = true;
+        assert!(
+            !popup_missed_tick(&mut visited, false),
+            "pointer on it: never abandoned"
+        );
+        visited.pointer_on_popup = false;
+        assert!(
+            !popup_missed_tick(&mut visited, false),
+            "the pointer left: the first tick only grants grace"
+        );
+        assert!(
+            popup_missed_tick(&mut visited, false),
+            "the pointer left: the second tick reaps it"
         );
 
         let mut on_sensor = fresh();
