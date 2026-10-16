@@ -39,6 +39,7 @@ mod dbusmenu;
 mod graphs;
 mod icons;
 mod notifications;
+mod palette;
 mod sensor_runner;
 mod sensors;
 mod text_width;
@@ -250,6 +251,14 @@ struct Panel {
     /// active output, keyed by the compositor's output name; empty
     /// while the wallpaper is off.
     wallpaper: Vec<(String, iced::window::Id)>,
+    /// Colours derived from the wallpaper (`panel.wallpaper_palette`):
+    /// applied over the configured defaults while present, dropped when
+    /// the option or the wallpaper turns off. Runtime-only — never
+    /// written back to the config file.
+    palette: Option<palette::Palette>,
+    /// The wallpaper file (path + mtime) the current palette was
+    /// extracted from: the extraction re-runs only when this changes.
+    palette_key: Option<(String, SystemTime)>,
 }
 
 /// One open tray menu: which item it belongs to (the item's bus + path
@@ -333,6 +342,9 @@ struct CalendarPopup {
 enum Message {
     /// Marks a second edge: the tick handler reloads, polls and advances.
     Tick,
+    /// The wallpaper palette finished extracting: the tones (or `None`
+    /// on a failed decode) and the file key they came from.
+    PaletteReady(Option<palette::Palette>, (String, SystemTime)),
     /// A cursor/input event with the id of the window it happened on:
     /// coordinates are per-window and only the bar's own belong into
     /// `last_cursor`.
@@ -708,16 +720,28 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             // (it spawns `gsettings`), no file resolution, no cache entries.
             let icon_theme = icons_theme(&panel.config);
 
+            // Wallpaper palette (`panel.wallpaper_palette`): runtime-only
+            // tones applied over the configured defaults below — the
+            // config file never sees them (sync_palette keeps or drops
+            // the palette in memory).
+            let pal = panel.palette.as_ref();
+
             // Samples of this tick for the graph history (one read per
             // sensor, collected here so the closure and the history
             // never borrow the panel at once).
             let mut graph_samples: Vec<((usize, usize), f64)> = Vec::new();
             let mut sections: Vec<SectionData> = Vec::new();
             for (section_idx, section_cfg) in panel.config.panel.sections.iter().enumerate() {
-                let section_default_txt = panel.config.panel.default_text_color
-                    .as_ref()
-                    .map(|s| config::parse_color(s).ok())
-                    .unwrap_or(Some(DEFAULT_TEXT_COLOR))
+                let section_default_txt = pal
+                    .and_then(|p| config::parse_color(&p.text).ok())
+                    .or_else(|| {
+                        panel
+                            .config
+                            .panel
+                            .default_text_color
+                            .as_ref()
+                            .and_then(|s| config::parse_color(s).ok())
+                    })
                     .unwrap_or(DEFAULT_TEXT_COLOR);
 
                 // Text colour chain: section > section_defaults > panel > built-in.
@@ -797,14 +821,24 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                         let own_border = s.border_color.is_some();
                         let own_bg = s.bg_color.is_some();
                         let own_text = s.text_color.is_some();
-                        // Key fields: per-sensor, then defaults, then section/built-in.
-                        let tc_str = s.text_color.as_deref().or(defaults.and_then(|sd| sd.text_color.as_deref()));
-                        let bg_str = s.bg_color.as_deref().or(defaults.and_then(|sd| sd.bg_color.as_deref()));
+                        // Key fields: per-sensor, then the wallpaper
+                        // palette (when active), then defaults, then
+                        // section/built-in. The palette overrides the
+                        // configured defaults only — an explicit
+                        // per-sensor value always wins.
+                        let tc_str = s.text_color.as_deref()
+                            .or(pal.map(|p| p.text.as_str()))
+                            .or(defaults.and_then(|sd| sd.text_color.as_deref()));
+                        let bg_str = s.bg_color.as_deref()
+                            .or(pal.map(|p| p.card.as_str()))
+                            .or(defaults.and_then(|sd| sd.bg_color.as_deref()));
                         let bc_str = s.border_color.as_deref().or(defaults.and_then(|sd| sd.border_color.as_deref()));
                         // Secondary fields only count when the sensor owns the group.
                         let bg_h_str = (if own_bg { s.bg_color_hover.as_deref() } else { None })
+                            .or(pal.map(|p| p.card_hover.as_str()))
                             .or(defaults.and_then(|sd| sd.bg_color_hover.as_deref()));
                         let tc_h_str = (if own_text { s.text_color_hover.as_deref() } else { None })
+                            .or(pal.map(|p| p.text_hover.as_str()))
                             .or(defaults.and_then(|sd| sd.text_color_hover.as_deref()));
                         // Numeric style fields follow the -1 = disabled rule:
                         // only an enabled value (>= 0) overrides the defaults.
@@ -898,10 +932,16 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                     })
                     .collect();
 
-                let default_bg = panel.config.panel.default_bg_color
-                    .as_ref()
-                    .map(|s| config::parse_color(s).ok())
-                    .unwrap_or(Some(DEFAULT_BG_COLOR))
+                let default_bg = pal
+                    .and_then(|p| config::parse_color(&p.bg).ok())
+                    .or_else(|| {
+                        panel
+                            .config
+                            .panel
+                            .default_bg_color
+                            .as_ref()
+                            .and_then(|s| config::parse_color(s).ok())
+                    })
                     .unwrap_or(DEFAULT_BG_COLOR);
 
                 // Section style precedence, per style GROUP (the same rule as
@@ -1028,7 +1068,18 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             // cadence: the first tick materializes it after startup,
             // later ticks track enable/path changes (a cheap compare).
             cmds.push(sync_wallpaper(panel));
+            // The derived palette follows the same cadence: extracted
+            // off-thread only when the wallpaper file changes, dropped
+            // when the option turns off.
+            cmds.push(sync_palette(panel));
             Command::batch(cmds)
+        }
+        Message::PaletteReady(pal, key) => {
+            // The next view applies the tones — or resolves the user's
+            // own colours again when the extraction failed (`None`).
+            panel.palette = pal;
+            panel.palette_key = Some(key);
+            Command::none()
         }
         Message::IcedEvent(id, e) => {
             // Mouse enter/leave/press are handled per-sensor by MouseArea,
@@ -2503,6 +2554,46 @@ fn sync_wallpaper(panel: &mut Panel) -> Command<Message> {
         cmds.push(open);
     }
     Command::batch(cmds)
+}
+
+/// The derived palette rides the tick (see `sync_wallpaper`): the
+/// extraction re-runs only when the wallpaper file's path or mtime
+/// change — or the option just turned on — never every second. With the
+/// option (or the wallpaper) off the in-memory palette is dropped, so
+/// the next rebuild resolves the user's own configured colours again:
+/// nothing is ever written back to the config file.
+fn sync_palette(panel: &mut Panel) -> Command<Message> {
+    let cfg = &panel.config.panel;
+    let wanted = cfg
+        .wallpaper_palette
+        .unwrap_or(false)
+        .then_some(cfg.wallpaper.as_ref())
+        .flatten()
+        .filter(|w| w.enabled)
+        .filter(|w| !w.path.is_empty())
+        .and_then(|w| {
+            let mtime = std::fs::metadata(&w.path).ok().and_then(|m| m.modified().ok())?;
+            PathBuf::from(&w.path).is_file().then_some((w.path.clone(), mtime))
+        });
+    let Some(key) = wanted else {
+        panel.palette = None;
+        panel.palette_key = None;
+        return Command::none();
+    };
+    if panel.palette_key.as_ref() == Some(&key) {
+        return Command::none();
+    }
+    // The decode runs off the UI thread (a 4K image is tens of ms of
+    // CPU); the key travels with the result, so a failed decode retries
+    // only on the next file change, not every tick.
+    let task_key = key.clone();
+    Command::perform(
+        async move {
+            let path = task_key.0.clone();
+            smol::unblock(move || palette::extract(std::path::Path::new(&path))).await
+        },
+        move |pal| Message::PaletteReady(pal, key),
+    )
 }
 
 /// Last monitor list with its timestamp: outputs change rarely (hotplug),
@@ -4125,6 +4216,8 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         graph_link: None,
                         calendar: None,
                         wallpaper: Vec::new(),
+                        palette: None,
+                        palette_key: None,
                     }
                 },
                 namespace,

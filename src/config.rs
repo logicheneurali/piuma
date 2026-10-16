@@ -117,6 +117,12 @@ pub struct PanelConfig {
     /// Desktop background the bar renders itself on the background layer
     /// (roadmap2 #1); absent = disabled (no window is opened).
     pub wallpaper: Option<WallpaperConfig>,
+    /// Derive the bar's base colours (panel bg, sensor default card and
+    /// text) from the wallpaper at runtime (visual option); absent =
+    /// false. The extracted tones are NEVER written back to this file:
+    /// they live in the bar's memory only, so turning the option off
+    /// restores the user's own colours on the next rebuild.
+    pub wallpaper_palette: Option<bool>,
     pub section_layout: Option<String>,
     pub default_section_weight: Option<u32>,
     pub default_bg_color: Option<String>,
@@ -414,6 +420,7 @@ pub fn default_config() -> Config {
             autostart_disabled: None,
             app_theme: None,
             wallpaper: None,
+            wallpaper_palette: None,
             section_layout: Some("horizontal".to_string()),
             default_section_weight: Some(1),
             default_bg_color: None,

@@ -72,6 +72,10 @@ pub struct PiumaConfig {
     /// Desktop background the bar draws itself (roadmap2 #1): `None` =
     /// key absent (the bar opens no background window).
     pub wallpaper: Option<WallpaperCfg>,
+    /// Bar colours derived from the wallpaper at runtime: `None` = key
+    /// absent. Only this switch is persisted — the extracted tones
+    /// never reach the file (they live in the bar's memory).
+    pub wallpaper_palette: Option<bool>,
     pub section_layout: String,
     pub default_section_weight: u32,
     pub default_bg_color: Option<String>,
@@ -234,6 +238,7 @@ impl Default for PiumaConfig {
             autostart_disabled: Vec::new(),
             app_theme: None,
             wallpaper: None,
+            wallpaper_palette: None,
             section_layout: "horizontal".to_string(),
             default_section_weight: 1,
             default_bg_color: Some("#1a1b26".to_string()),
@@ -325,6 +330,8 @@ pub enum Message {
     /// Wallpaper image path, from the scanned list or a hand-typed
     /// custom path (roadmap2 #1); one destination for both sources.
     WallpaperPathChanged(String),
+    /// Wallpaper-palette switch (runtime tones from the wallpaper image).
+    PaletteFromWallpaper(bool),
     /// Sidebar category switch (roadmap N4).
     TabSelected(Tab),
     ThicknessChanged(u32),
@@ -657,6 +664,11 @@ impl PiumaSetup {
         }
         if let Some(t) = self.config.app_theme {
             panel.insert("app_theme".to_string(), JsonValue::Bool(t));
+        }
+        // Only the toggle travels to the file: the palette it selects is
+        // derived at runtime and never serialized.
+        if let Some(p) = self.config.wallpaper_palette {
+            panel.insert("wallpaper_palette".to_string(), JsonValue::Bool(p));
         }
         // The wallpaper block is written whole (present = configured,
         // absent = untouched, so a save never injects the key).
@@ -1049,6 +1061,7 @@ impl PiumaSetup {
             autostart_disabled: Vec::new(),
             app_theme: None,
             wallpaper: None,
+            wallpaper_palette: None,
             section_layout: "horizontal".to_string(),
             default_section_weight: 1,
             default_bg_color: None,
@@ -1409,6 +1422,12 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
             // List pick and typed path share the destination; the bar
             // checks existence itself, so a not-yet-there path is fine.
             wallpaper_set(&mut state.config, |w| w.path = path);
+        }
+        Message::PaletteFromWallpaper(value) => {
+            // On = explicit true; off drops back to absent (≈ false):
+            // a save never injects the key, and the extracted tones
+            // never reach the file.
+            state.config.wallpaper_palette = value.then_some(true);
         }
         Message::TabSelected(tab) => state.active_tab = tab,
         Message::ThicknessChanged(value) => state.config.thickness = value,
@@ -3355,6 +3374,12 @@ fn wallpaper_settings(state: &PiumaSetup) -> Element<'_, Message> {
             toggler(cfg.enabled)
                 .label("Draw the wallpaper behind the desktop")
                 .on_toggle(Message::WallpaperEnabled),
+            // Runtime-only tones (see the save): the file keeps just
+            // this switch, so turning it off restores the user's own
+            // configured colours.
+            toggler(state.config.wallpaper_palette.unwrap_or(false))
+                .label("Bar colours from the wallpaper")
+                .on_toggle(Message::PaletteFromWallpaper),
             Row::new()
                 .push(list)
                 .push(

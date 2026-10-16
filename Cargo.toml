@@ -11,6 +11,11 @@ iced = { version = "0.14", features = ["smol", "advanced", "image", "svg", "canv
 # queries its sensor's on-screen rect through the widget tree.
 iced_runtime = "0.14"
 iced_exwlshell = { git = "https://github.com/waycrate/exwlshelleventloop.git", branch = "master" }
+# Wallpaper palette (`panel.wallpaper_palette`): decode for the
+# extraction. Both crates are already in iced's graph (shared, no extra
+# weight): `smol` runs the decode off the UI thread.
+image = "0.25"
+smol = "2"
 log = "0.4"
 simple_logger = "5"
 serde = { version = "1.0", features = ["derive"] }
