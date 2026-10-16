@@ -2770,10 +2770,16 @@ fn view(state: &PiumaSetup) -> Element<'_, Message> {
         ..container::Style::default()
     });
 
-    match &state.modal {
-        Some(_) => stack![base, modal_overlay(state)].into(),
-        None => base.into(),
+    // One stable root type: swapping Stack↔Container when a modal opens or
+    // closes makes Tree::diff replace the whole widget tree (tag mismatch),
+    // dropping the content scrollable's state — the page jumped back to the
+    // top after every modal, e.g. after picking an icon. Keeping `base` at
+    // stack index 0 in both states preserves the scroll position.
+    let mut root = stack![base];
+    if state.modal.is_some() {
+        root = root.push(modal_overlay(state));
     }
+    root.into()
 }
 
 /// The one card belonging to the active tab (roadmap N4).
