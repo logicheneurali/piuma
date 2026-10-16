@@ -1116,6 +1116,10 @@ impl PiumaSetup {
                 path: o.get("path").and_then(JsonValue::as_str).unwrap_or_default().to_string(),
             })
         });
+        // Absent `wallpaper_palette` stays `None` (reset default): the
+        // bar reads false. Only this toggle lives in the file — the
+        // extracted tones are runtime-only and never serialized.
+        self.config.wallpaper_palette = panel.get("wallpaper_palette").and_then(|v| v.as_bool());
         if let Some(sl) = panel.get("section_layout").and_then(|v| v.as_str()) {
             self.config.section_layout = sl.to_string();
         }
@@ -4526,6 +4530,26 @@ mod tests {
         let first = state.serialize().unwrap();
         state.load_from_json(&first).unwrap();
         assert_eq!(state.serialize().unwrap(), first);
+    }
+
+    /// The wallpaper-palette toggle survives load→save→load: only the
+    /// switch travels through the file (the tones are runtime-only),
+    /// and switching it off drops the key entirely.
+    #[test]
+    fn wallpaper_palette_toggle_roundtrips() {
+        let mut state = fixture();
+        state
+            .load_from_json(r##"{"panel":{"wallpaper_palette":true}}"##)
+            .unwrap();
+        assert_eq!(state.config.wallpaper_palette, Some(true));
+        let saved: JsonValue =
+            serde_json::from_str(&state.serialize().unwrap()).unwrap();
+        assert_eq!(saved["panel"]["wallpaper_palette"].as_bool(), Some(true));
+        state.load_from_json(&serde_json::to_string(&saved).unwrap()).unwrap();
+        assert_eq!(state.config.wallpaper_palette, Some(true));
+        state.config.wallpaper_palette = None;
+        let off: JsonValue = serde_json::from_str(&state.serialize().unwrap()).unwrap();
+        assert!(off["panel"].get("wallpaper_palette").is_none(), "{off}");
     }
 
     /// Save must fail with the serde reason — before touching any file —

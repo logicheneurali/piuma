@@ -10,6 +10,8 @@
 
 use std::path::Path;
 
+use crate::config;
+
 /// The derived tones as the `#rrggbb` strings the config colour chains
 /// already parse: panel background, sensor default card (its hover
 /// variant is tinted with the most vibrant hue) and text.
@@ -20,6 +22,34 @@ pub struct Palette {
     pub card_hover: String,
     pub text: String,
     pub text_hover: String,
+}
+
+/// The tone with the CONFIGURED colour's alpha when it isn't opaque: a
+/// transparent config stays transparent in the wallpaper's hue (a
+/// `#15306000` section card becomes the tone with `a = 0`). An absent,
+/// unparsable or opaque configured colour leaves the tone as-is.
+pub fn keep_config_alpha(tone: &str, configured: Option<&str>) -> String {
+    let Some(alpha) = configured
+        .and_then(|c| config::parse_color(c).ok())
+        .map(|c| c.a)
+        .filter(|a| *a < 1.0)
+    else {
+        return tone.to_string();
+    };
+    match config::parse_color(tone) {
+        Ok(mut c) => {
+            c.a = alpha;
+            let byte = |v: f32| (v * 255.0).round() as u8;
+            format!(
+                "#{:02x}{:02x}{:02x}{:02x}",
+                byte(c.r),
+                byte(c.g),
+                byte(c.b),
+                byte(c.a)
+            )
+        }
+        Err(()) => tone.to_string(),
+    }
 }
 
 /// Longest edge of the extraction thumbnail: a 4K wallpaper decodes in
@@ -256,5 +286,17 @@ mod tests {
     #[test]
     fn missing_file_extracts_nothing() {
         assert!(extract(Path::new("/nonexistent/piuma-wallpaper.png")).is_none());
+    }
+
+    /// The palette's tone keeps the configured colour's alpha when it
+    /// isn't opaque (`#15306000` → the tone with `a = 0`); an opaque,
+    /// absent or unparsable configured colour leaves the tone as-is.
+    #[test]
+    fn keep_config_alpha_preserves_the_config_transparency() {
+        assert_eq!(keep_config_alpha("#000061", Some("#15306000")), "#00006100");
+        assert_eq!(keep_config_alpha("#000061", Some("#15306080")), "#00006180");
+        assert_eq!(keep_config_alpha("#000061", Some("#153060")), "#000061");
+        assert_eq!(keep_config_alpha("#000061", None), "#000061");
+        assert_eq!(keep_config_alpha("#000061", Some("junk")), "#000061");
     }
 }

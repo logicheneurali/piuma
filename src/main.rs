@@ -475,6 +475,29 @@ fn resolve_color<'a>(cfg: Option<Color>, default: Color) -> Color {
     cfg.unwrap_or(default)
 }
 
+/// The panel's background: the wallpaper palette's base tone when it's
+/// active — keeping the configured colour's TRANSPARENCY (a `#000000ff`
+/// bar renders opaque in the palette's hue, a `#00000000` one stays
+/// see-through) — else the configured `default_bg_color`, else the
+/// built-in default. Used by both the surface's container and the
+/// sections' fallback, so they can't disagree.
+fn panel_background(config: &config::Config, pal: Option<&palette::Palette>) -> Color {
+    let configured = config
+        .panel
+        .default_bg_color
+        .as_ref()
+        .and_then(|s| config::parse_color(s).ok());
+    pal.and_then(|p| config::parse_color(&p.bg).ok())
+        .map(|mut c| {
+            if let Some(b) = configured {
+                c.a = b.a;
+            }
+            c
+        })
+        .or(configured)
+        .unwrap_or(DEFAULT_BG_COLOR)
+}
+
 /// A solid bar widget used to compose partial sensor borders.
 fn border_bar(color: Color, width: Length, height: Length) -> Element<'static, Message> {
     container(Space::new().width(width).height(height))
@@ -744,9 +767,27 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                     })
                     .unwrap_or(DEFAULT_TEXT_COLOR);
 
-                // Text colour chain: section > section_defaults > panel > built-in.
+                // Text colour chain: section > wallpaper palette (when
+                // active) > section_defaults > panel > built-in. The
+                // palette keeps the configured transparency, like bg.
                 let section_text_color = section_cfg.text_color.as_ref()
                     .and_then(|s| config::parse_color(s).ok())
+                    .or_else(|| {
+                        let configured = panel
+                            .config
+                            .panel
+                            .section_defaults
+                            .as_ref()
+                            .and_then(|sd| sd.text_color.as_ref())
+                            .and_then(|s| config::parse_color(s).ok());
+                        pal.and_then(|p| config::parse_color(&p.text).ok())
+                            .map(|mut t| {
+                                if let Some(c) = configured {
+                                    t.a = c.a;
+                                }
+                                t
+                            })
+                    })
                     .or_else(|| {
                         panel.config.panel.section_defaults.as_ref()
                             .and_then(|sd| sd.text_color.as_ref())
@@ -825,20 +866,47 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                         // palette (when active), then defaults, then
                         // section/built-in. The palette overrides the
                         // configured defaults only — an explicit
-                        // per-sensor value always wins.
+                        // per-sensor value always wins — and the
+                        // configured TRANSPARENCY survives it (a
+                        // `#..80` default keeps its alpha in the
+                        // wallpaper's hue).
+                        let tc_pal = pal.map(|p| {
+                            palette::keep_config_alpha(
+                                &p.text,
+                                defaults.and_then(|sd| sd.text_color.as_deref()),
+                            )
+                        });
                         let tc_str = s.text_color.as_deref()
-                            .or(pal.map(|p| p.text.as_str()))
+                            .or(tc_pal.as_deref())
                             .or(defaults.and_then(|sd| sd.text_color.as_deref()));
+                        let bg_pal = pal.map(|p| {
+                            palette::keep_config_alpha(
+                                &p.card,
+                                defaults.and_then(|sd| sd.bg_color.as_deref()),
+                            )
+                        });
                         let bg_str = s.bg_color.as_deref()
-                            .or(pal.map(|p| p.card.as_str()))
+                            .or(bg_pal.as_deref())
                             .or(defaults.and_then(|sd| sd.bg_color.as_deref()));
                         let bc_str = s.border_color.as_deref().or(defaults.and_then(|sd| sd.border_color.as_deref()));
                         // Secondary fields only count when the sensor owns the group.
+                        let bg_h_pal = pal.map(|p| {
+                            palette::keep_config_alpha(
+                                &p.card_hover,
+                                defaults.and_then(|sd| sd.bg_color_hover.as_deref()),
+                            )
+                        });
                         let bg_h_str = (if own_bg { s.bg_color_hover.as_deref() } else { None })
-                            .or(pal.map(|p| p.card_hover.as_str()))
+                            .or(bg_h_pal.as_deref())
                             .or(defaults.and_then(|sd| sd.bg_color_hover.as_deref()));
+                        let tc_h_pal = pal.map(|p| {
+                            palette::keep_config_alpha(
+                                &p.text_hover,
+                                defaults.and_then(|sd| sd.text_color_hover.as_deref()),
+                            )
+                        });
                         let tc_h_str = (if own_text { s.text_color_hover.as_deref() } else { None })
-                            .or(pal.map(|p| p.text_hover.as_str()))
+                            .or(tc_h_pal.as_deref())
                             .or(defaults.and_then(|sd| sd.text_color_hover.as_deref()));
                         // Numeric style fields follow the -1 = disabled rule:
                         // only an enabled value (>= 0) overrides the defaults.
@@ -932,26 +1000,24 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                     })
                     .collect();
 
-                let default_bg = pal
-                    .and_then(|p| config::parse_color(&p.bg).ok())
-                    .or_else(|| {
-                        panel
-                            .config
-                            .panel
-                            .default_bg_color
-                            .as_ref()
-                            .and_then(|s| config::parse_color(s).ok())
-                    })
-                    .unwrap_or(DEFAULT_BG_COLOR);
+                let default_bg = panel_background(&panel.config, pal);
 
                 // Section style precedence, per style GROUP (the same rule as
                 // `panel.sensor_defaults`): the border group belongs to the
                 // section only when it sets `border_color`; otherwise the
                 // whole group comes from `panel.section_defaults`. bg/text
-                // are single keys: section value when set, else the default.
+                // are single keys: section value when set, then the active
+                // wallpaper palette, else the default.
                 let sdefaults = panel.config.panel.section_defaults.as_ref();
                 let own_border = section_cfg.border_color.is_some();
+                let bg_pal = pal.map(|p| {
+                    palette::keep_config_alpha(
+                        &p.card,
+                        sdefaults.and_then(|sd| sd.bg_color.as_deref()),
+                    )
+                });
                 let bg_str = section_cfg.bg_color.as_deref()
+                    .or(bg_pal.as_deref())
                     .or(sdefaults.and_then(|sd| sd.bg_color.as_deref()));
                 let bc_str = section_cfg.border_color.as_deref()
                     .or(sdefaults.and_then(|sd| sd.border_color.as_deref()));
@@ -1964,10 +2030,7 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
             .into()
     };
 
-    let panel_bg = panel.config.panel.default_bg_color
-        .as_ref()
-        .and_then(|s| config::parse_color(s).ok())
-        .unwrap_or(DEFAULT_BG_COLOR);
+    let panel_bg = panel_background(&panel.config, panel.palette.as_ref());
 
     // Position the real panel within the surface according to `align`.
     // The surface is screen-sized on the cross axis and sized to the panel's
@@ -2463,15 +2526,26 @@ impl Default for PopupStyle {
 
 /// The popup style from `panel.notifications`: negative/absent numerics
 /// and unparsable colors fall back to `PopupStyle::default()`, an unknown
-/// `border_type` to `full` (the `styled_box` rule).
-fn popup_style(config: &config::Config) -> PopupStyle {
+/// `border_type` to `full` (the `styled_box` rule). An active wallpaper
+/// palette replaces the card's configured COLOURS (bg/hover from the
+/// tones, borders from the vibrant one, text from the text tone);
+/// sizes and the border type stay configured.
+fn popup_style(config: &config::Config, pal: Option<&palette::Palette>) -> PopupStyle {
     let d = PopupStyle::default();
     let Some(n) = config.panel.notifications.as_ref() else {
         return d;
     };
-    let color = |key: &Option<String>, fallback: Color| {
-        key.as_deref()
-            .and_then(|s| config::parse_color(s).ok())
+    let color = |key: &Option<String>, tone: Option<&str>, fallback: Color| {
+        let configured = key.as_deref().and_then(|s| config::parse_color(s).ok());
+        tone.and_then(|t| config::parse_color(t).ok())
+            .map(|mut t| {
+                // The configured transparency survives the palette's hue.
+                if let Some(c) = configured {
+                    t.a = c.a;
+                }
+                t
+            })
+            .or(configured)
             .unwrap_or(fallback)
     };
     let num = |key: Option<i32>, fallback: u32| {
@@ -2482,12 +2556,24 @@ fn popup_style(config: &config::Config) -> PopupStyle {
             .font_size
             .filter(|v| (8..=64).contains(v))
             .unwrap_or(d.font_size),
-        text: color(&n.text_color, d.text),
-        text_hover: color(&n.text_color_hover, d.text),
-        bg: color(&n.bg_color, d.bg),
-        bg_hover: color(&n.bg_color_hover, d.bg),
-        border: color(&n.border_color, d.border),
-        border_hover: color(&n.border_color_hover, d.border),
+        text: color(&n.text_color, pal.map(|p| p.text.as_str()), d.text),
+        text_hover: color(
+            &n.text_color_hover,
+            pal.map(|p| p.text_hover.as_str()),
+            d.text,
+        ),
+        bg: color(&n.bg_color, pal.map(|p| p.card.as_str()), d.bg),
+        bg_hover: color(&n.bg_color_hover, pal.map(|p| p.card_hover.as_str()), d.bg),
+        border: color(
+            &n.border_color,
+            pal.map(|p| p.card_hover.as_str()),
+            d.border,
+        ),
+        border_hover: color(
+            &n.border_color_hover,
+            pal.map(|p| p.card_hover.as_str()),
+            d.border,
+        ),
         border_width: num(n.border_width, d.border_width),
         border_radius: num(n.border_radius, d.border_radius),
         border_type: n
@@ -2792,7 +2878,7 @@ fn sync_popup(panel: &mut Panel, reposition: bool) -> Option<Command<Message>> {
 /// from the configured popup style (see `popup_card_h`).
 fn popup_size(panel: &Panel, cards: usize) -> LayerSize {
     let n = cards as u32;
-    let h = popup_card_h(&popup_style(&panel.config));
+    let h = popup_card_h(&popup_style(&panel.config, panel.palette.as_ref()));
     LayerSize::px(POPUP_WIDTH, n * h + n.saturating_sub(1) * POPUP_CARD_GAP)
 }
 
@@ -2892,7 +2978,7 @@ fn refresh_notification_sensor(panel: &mut Panel) {
 /// the hover id, and the card's look comes from the configured style
 /// through the shared `styled_box` helper (the sensors' border machinery).
 fn popup_view(panel: &Panel) -> Element<'_, Message> {
-    let st = popup_style(&panel.config);
+    let st = popup_style(&panel.config, panel.palette.as_ref());
     let card_h = popup_card_h(&st);
     // Font audit (roadmap M2): every popup text takes the configured family;
     // the summary renders bold on top of it, body and ✕ as configured.
@@ -3280,7 +3366,8 @@ fn reap_abandoned_calendar(panel: &mut Panel) -> Option<CalendarPopup> {
 fn calendar_size(config: &config::Config, weekdays: &[String; 7]) -> (u32, u32) {
     let font = panel_font(config);
     let fs = config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
-    let st = popup_style(config);
+    // Only the padding matters for the size — no colour to resolve.
+    let st = popup_style(config, None);
     let mut patterns: Vec<String> = vec!["88".into(), "←".into(), "→".into()];
     patterns.extend(weekdays.iter().cloned());
     let cell_w = u32::from(text_width::widest(&font, fs, &patterns)) + 2 * CALENDAR_CELL_PAD;
@@ -3459,7 +3546,7 @@ fn graph_link_geometry(panel: &Panel) -> Option<(graphs::Connector, (i32, i32), 
     let gp = panel.graph_popup.as_ref()?;
     let sensor = gp.sensor_rect?;
     let popup = popup_surface_rect(gp, panel.last_anchor, panel.last_exclusive_zone);
-    let st = popup_style(&panel.config);
+    let st = popup_style(&panel.config, panel.palette.as_ref());
     let (d1, d2, path) = graphs::connector_geometry(sensor, popup);
     // The surface is the connector's bounding box (the end dots are
     // its extremes — the rail lies between them) plus a dot-sized
@@ -3556,7 +3643,7 @@ fn graph_link_view<'a>(panel: &'a Panel) -> Element<'a, Message> {
 /// style, same as the tray menu). The whole surface is one MouseArea
 /// whose exit reports the departure to `GraphPopupExited`.
 fn graph_popup_view<'a>(panel: &'a Panel, gp: &GraphPopup) -> Element<'a, Message> {
-    let st = popup_style(&panel.config);
+    let st = popup_style(&panel.config, panel.palette.as_ref());
     let font = panel_font(&panel.config);
     let sensor = panel
         .sections
@@ -3714,7 +3801,7 @@ fn graph_popup_view<'a>(panel: &'a Panel, gp: &GraphPopup) -> Element<'a, Messag
 /// sized from them when the popup opened (`calendar_size`) — and today's
 /// number stands out on the accent plate of the notifications' border.
 fn calendar_popup_view<'a>(panel: &'a Panel, cp: &CalendarPopup) -> Element<'a, Message> {
-    let st = popup_style(&panel.config);
+    let st = popup_style(&panel.config, panel.palette.as_ref());
     let font = panel_font(&panel.config);
     let fs = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
     let accent = st.border;
@@ -3847,7 +3934,7 @@ fn tray_menu_view(panel: &Panel) -> Element<'_, Message> {
             .height(Length::Fill)
             .into();
     };
-    let st = popup_style(&panel.config);
+    let st = popup_style(&panel.config, panel.palette.as_ref());
     let font = panel_font(&panel.config);
     let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
     let row_h = menu_row_h(font_size) as f32;
@@ -4313,11 +4400,11 @@ fn parse_config_arg() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        calendar_size, cmdline_is_piuma, corner_radius, dbusmenu, fit_menu_labels,
+        calendar_size, cmdline_is_piuma, config, corner_radius, dbusmenu, fit_menu_labels,
         focused_output_in, icons_theme, lock_pid, menu_placement, menu_row_h, menu_size,
-        monitor_names_json, popup_card_h, popup_missed_tick, popup_placement, section_touch,
-        shifted_surface_rect, text_width, wallpaper_plan, GraphPopup,
-        PopupStyle, MENU_INDENT, MENU_MAX_W, MENU_MIN_W, MENU_PAD,
+        monitor_names_json, palette, panel_background, popup_card_h, popup_missed_tick,
+        popup_placement, popup_style, section_touch, shifted_surface_rect, text_width,
+        wallpaper_plan, GraphPopup, PopupStyle, MENU_INDENT, MENU_MAX_W, MENU_MIN_W, MENU_PAD,
     };
     use iced::font::Font;
     use iced_exwlshell::reexport::Anchor;
@@ -4697,6 +4784,88 @@ mod tests {
         let (open, close) = wallpaper_plan(&current, &[]);
         assert!(open.is_empty());
         assert_eq!(close, vec![1, 2]);
+    }
+
+    /// An active wallpaper palette replaces the notification card's
+    /// configured COLOURS (bg/border/text) with its tones, while the
+    /// numerics stay configured.
+    #[test]
+    fn popup_style_follows_the_wallpaper_palette() {
+        let config: config::Config = serde_json::from_str(
+            r##"{"panel":{"sections":[],"notifications":{"font_size":16,"bg_color":"#101010","border_color":"#ff5555","text_color":"#ffe066"}}}"##,
+        )
+        .unwrap();
+        let plain = popup_style(&config, None);
+        assert_eq!(plain.bg, config::parse_color("#101010").unwrap());
+        let pal = palette::Palette {
+            bg: "#000033".to_string(),
+            card: "#000061".to_string(),
+            card_hover: "#002d99".to_string(),
+            text: "#d2d2e0".to_string(),
+            text_hover: "#f4f4f6".to_string(),
+        };
+        let styled = popup_style(&config, Some(&pal));
+        assert_eq!(styled.bg, config::parse_color("#000061").unwrap());
+        assert_eq!(styled.border, config::parse_color("#002d99").unwrap());
+        assert_eq!(styled.text, config::parse_color("#d2d2e0").unwrap());
+        assert_eq!(styled.font_size, 16, "numerics stay configured");
+    }
+
+    /// The popup's tone keeps the configured colour's transparency: a
+    /// `#10101080` card renders the palette's hue at the same alpha.
+    #[test]
+    fn popup_style_keeps_the_configured_alpha() {
+        let config: config::Config = serde_json::from_str(
+            r##"{"panel":{"sections":[],"notifications":{"bg_color":"#10101080","text_color":"#ffe066"}}}"##,
+        )
+        .unwrap();
+        let pal = palette::Palette {
+            bg: "#000033".to_string(),
+            card: "#000061".to_string(),
+            card_hover: "#002d99".to_string(),
+            text: "#d2d2e0".to_string(),
+            text_hover: "#f4f4f6".to_string(),
+        };
+        let styled = popup_style(&config, Some(&pal));
+        assert_eq!(styled.bg, config::parse_color("#00006180").unwrap());
+        // An opaque configured colour stays opaque under the new hue.
+        assert_eq!(styled.text, config::parse_color("#d2d2e0").unwrap());
+    }
+
+    /// The panel background follows the active palette's base tone,
+    /// keeping the configured colour's transparency — and the configured
+    /// colour itself when no palette is active.
+    #[test]
+    fn panel_background_follows_the_palette() {
+        let opaque: config::Config = serde_json::from_str(
+            r##"{"panel":{"sections":[],"default_bg_color":"#000000ff"}}"##,
+        )
+        .unwrap();
+        let pal = palette::Palette {
+            bg: "#481919".to_string(),
+            card: "#481919".to_string(),
+            card_hover: "#8a3a3a".to_string(),
+            text: "#e0d2d2".to_string(),
+            text_hover: "#f6f4f4".to_string(),
+        };
+        assert_eq!(
+            panel_background(&opaque, Some(&pal)),
+            config::parse_color("#481919").unwrap(),
+            "an opaque configured bar renders the palette's hue opaque"
+        );
+        assert_eq!(
+            panel_background(&opaque, None),
+            config::parse_color("#000000ff").unwrap()
+        );
+        let clear: config::Config = serde_json::from_str(
+            r##"{"panel":{"sections":[],"default_bg_color":"#00000000"}}"##,
+        )
+        .unwrap();
+        assert_eq!(
+            panel_background(&clear, Some(&pal)),
+            config::parse_color("#48191900").unwrap(),
+            "a transparent configured bar stays see-through in the hue"
+        );
     }
 
     /// The tick reaps a popup whose sensor and surface both lost the
