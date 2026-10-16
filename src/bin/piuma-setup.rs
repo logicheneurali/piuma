@@ -2331,20 +2331,47 @@ fn move_btn<'a>(
 
 // --- Sensor icons: WYSIWYG preview + theme-name browser ----------------
 
-/// The icon theme and size exactly as the bar computes them (config
-/// theme or the system one, font size clamped to u16): the preview must
-/// agree with the bar, size variance included.
-fn icon_theme_and_size(cfg: &PiumaConfig) -> (&str, u16) {
-    let theme = cfg.icon_theme.as_deref().unwrap_or_else(|| icons::icon_theme());
-    let size = cfg.font_size.min(u32::from(u16::MAX)) as u16;
-    (theme, size)
+/// The icon theme exactly as the bar computes it: the configured theme
+/// or the system one (the resolve key, not a display name).
+fn icon_theme_of(cfg: &PiumaConfig) -> &str {
+    cfg.icon_theme
+        .as_deref()
+        .unwrap_or_else(|| icons::icon_theme())
 }
 
-/// The themed icon widget at the bar's size, or `None` when the name is
-/// empty or the theme has no such icon — the one resolve path shared by
-/// the preview box, the browser cells and the compact sensor rows.
-fn resolved_icon<'a>(cfg: &PiumaConfig, name: Option<&str>) -> Option<Element<'a, Message>> {
-    let (theme, size) = icon_theme_and_size(cfg);
+/// The sensor's effective padding on the bar's own chain: the sensor's
+/// value when enabled (-1 = unset), else `panel.sensor_defaults`, else 0.
+fn sensor_padding(cfg: &PiumaConfig, sensor: &Sensor) -> u32 {
+    config::style_num(sensor.padding)
+        .or_else(|| config::style_num(cfg.sensor_defaults.padding))
+        .unwrap_or(0)
+}
+
+/// The icon edge for one sensor, exactly as the bar sizes it
+/// (`icons::row_icon_target`: the sensor row's real height, clamped):
+/// the preview and the browser cells must draw at that size or they
+/// would not show what the bar draws.
+fn sensor_icon_size(cfg: &PiumaConfig, section: &Section, sensor: &Sensor) -> u16 {
+    let layout = section.layout.as_deref().unwrap_or("horizontal");
+    let title_extra =
+        icons::stacked_title_extra(layout, section.name.as_deref().unwrap_or(""), cfg.font_size);
+    let thickness = if cfg.thickness == 0 {
+        config::DEFAULT_HEIGHT
+    } else {
+        cfg.thickness
+    };
+    icons::row_icon_target(thickness, title_extra, sensor_padding(cfg, sensor))
+}
+
+/// The themed icon widget at the sensor row's size, or `None` when the
+/// name is empty or the theme has no such icon — the one resolve path
+/// shared by the preview box, the browser cells and the compact rows.
+fn resolved_icon<'a>(
+    cfg: &PiumaConfig,
+    size: u16,
+    name: Option<&str>,
+) -> Option<Element<'a, Message>> {
+    let theme = icon_theme_of(cfg);
     name.filter(|n| !n.is_empty())
         .and_then(|n| icons::resolve(theme, n, size))
         .map(|path| icons::widget(&path, size as f32))
@@ -2352,12 +2379,12 @@ fn resolved_icon<'a>(cfg: &PiumaConfig, name: Option<&str>) -> Option<Element<'a
 
 /// Live preview beside the icon input: the resolved icon in a small
 /// inset box, a red ✕ for an unknown name, the empty box while nothing
-/// is typed — the name's fate is visible while typing it.
-fn icon_preview<'a>(cfg: &PiumaConfig, name: Option<&str>) -> Element<'a, Message> {
+/// is typed — the name's fate is visible while typing it. Sized to the
+/// sensor row, so the box shows the bar's real icon edge.
+fn icon_preview<'a>(cfg: &PiumaConfig, size: u16, name: Option<&str>) -> Element<'a, Message> {
     let pal = palette(cfg);
-    let (_, size) = icon_theme_and_size(cfg);
     let inner: Element<'a, Message> = match name.filter(|n| !n.is_empty()) {
-        Some(n) => match resolved_icon(cfg, Some(n)) {
+        Some(n) => match resolved_icon(cfg, size, Some(n)) {
             Some(icon) => icon,
             None => text("✕")
                 .size(BODY)
@@ -2609,11 +2636,13 @@ fn count_icon_matches(names: &[String], query: &str) -> usize {
         .count()
 }
 
-/// One browser cell: the icon at the bar's size over its name; pressing
-/// writes the name into the sensor's field and closes the modal.
+/// One browser cell: the icon at the target sensor's row size over its
+/// name; pressing writes the name into the sensor's field and closes
+/// the modal.
 fn icon_grid_cell(
     pal: Palette,
     cfg: &PiumaConfig,
+    size: u16,
     name: &str,
     section_index: usize,
     sensor_index: usize,
@@ -2621,7 +2650,7 @@ fn icon_grid_cell(
     // The name is copied into the widgets, so the cell keeps no borrow:
     // it can outlive the filtered list that produced it.
     let preview: Element<'static, Message> =
-        resolved_icon(cfg, Some(name)).unwrap_or_else(|| text("✕").size(BODY).into());
+        resolved_icon(cfg, size, Some(name)).unwrap_or_else(|| text("✕").size(BODY).into());
     button(
         column![preview, text(name.to_string()).size(9)]
             .spacing(4)
@@ -3039,12 +3068,27 @@ fn modal_card(state: &PiumaSetup) -> Element<'_, Message> {
                 .unwrap_or_else(|| icons::icon_theme().to_string());
             let names = theme_icon_names(&theme);
             let hits = filter_icon_names(&names, query);
+            // Cells preview the sensor being edited: its row's icon size,
+            // so the browser shows exactly what the bar will draw (the
+            // indices were checked when the modal opened; 16 only keeps
+            // the cells sane if that ever stops holding).
+            let icon_size = state
+                .config
+                .sections
+                .get(*section_index)
+                .and_then(|sec| {
+                    sec.sensors
+                        .get(*sensor_index)
+                        .map(|s| sensor_icon_size(&state.config, sec, s))
+                })
+                .unwrap_or(16);
             let mut grid = column![].spacing(8).width(Length::Fill);
             let mut cells = Row::new().spacing(8);
             for (i, name) in hits.iter().enumerate() {
                 cells = cells.push(icon_grid_cell(
                     pal,
                     &state.config,
+                    icon_size,
                     name,
                     *section_index,
                     *sensor_index,
@@ -3684,6 +3728,7 @@ fn section_view<'a>(
         sensor_list = sensor_list.push(sensor_view(
             pal,
             &state.config,
+            sensor_icon_size(&state.config, section, sensor),
             index,
             j,
             section.sensors.len(),
@@ -3871,6 +3916,7 @@ fn sensor_summary(sensor: &Sensor) -> String {
 fn sensor_view<'a>(
     pal: Palette,
     cfg: &'a PiumaConfig,
+    icon_size: u16,
     section_index: usize,
     sensor_index: usize,
     sensor_count: usize,
@@ -3884,8 +3930,8 @@ fn sensor_view<'a>(
         .clone()
         .unwrap_or_else(|| source_label(canonical_type(&sensor.source_type)).to_string());
     let mut header = Row::new();
-    // The sensor's own icon leads the row, exactly as the bar draws it.
-    if let Some(icon) = resolved_icon(cfg, sensor.icon.as_deref()) {
+    // The sensor's own icon leads the row, at the bar's row-height size.
+    if let Some(icon) = resolved_icon(cfg, icon_size, sensor.icon.as_deref()) {
         header = header.push(icon);
     }
     let header = header
@@ -3987,8 +4033,8 @@ fn sensor_view<'a>(
         .width(Length::Fill)
         .into());
 
-    // Icon name, live preview at the bar's size and a browse modal: the
-    // preview resolves exactly like the bar, so it cannot lie.
+    // Icon name, live preview at the row's real size and a browse
+    // modal: the preview resolves exactly like the bar, so it cannot lie.
     let icon = form_cell("Icon", Row::new()
         .push(input("icon name (theme)", sensor.icon.as_deref().unwrap_or(""), move |value| Message::SensorIconChanged(section_index, sensor_index, value))
             .width(Length::Fill))
@@ -3996,7 +4042,7 @@ fn sensor_view<'a>(
             .on_press(Message::BrowseIconsPressed(section_index, sensor_index))
             .padding(5)
             .style(move |t, s| btn_secondary(pal, t, s)))
-        .push(icon_preview(cfg, sensor.icon.as_deref()))
+        .push(icon_preview(cfg, icon_size, sensor.icon.as_deref()))
         .spacing(8)
         .align_y(Alignment::Center)
         .width(Length::Fill)
@@ -5112,20 +5158,34 @@ mod tests {
         assert_eq!(icon_theme_options(None)[0], SYSTEM_ICON_THEME);
     }
 
-    /// The preview resolves with the bar's own rule: configured theme
-    /// or system one, font size clamped to u16.
+    /// The preview sizes icons to the sensor row's real height, on the
+    /// bar's own formula (thickness minus the section chrome, clamped),
+    /// and keeps the theme rule: configured theme or the system one.
     #[test]
-    fn icon_preview_uses_the_bar_theme_and_size() {
-        let mut cfg = PiumaConfig::default();
-        cfg.font_size = 70_000; // above u16::MAX
-        let (theme, size) = icon_theme_and_size(&cfg);
-        assert_eq!(size, u16::MAX);
-        assert_eq!(theme, icons::icon_theme());
-        cfg.icon_theme = Some("Papirus".to_string());
-        let (theme, size) = icon_theme_and_size(&cfg);
-        assert_eq!(theme, "Papirus");
-        assert_eq!(size, u16::MAX);
-        assert!(resolved_icon(&cfg, None).is_none(), "no name, no icon");
+    fn icon_preview_uses_the_row_height() {
+        let mut s = test_state();
+        s.config.thickness = 30;
+        s.config.font_size = 12;
+        let section = &s.config.sections[0];
+        let sensor = &section.sensors[0];
+        // Horizontal section, no padding: 30 − 2×4 of content padding.
+        assert_eq!(sensor_icon_size(&s.config, section, sensor), 22);
+        // A named vertical title eats its own box: font + 2 + 2×4.
+        let mut stacked = section.clone();
+        stacked.layout = Some("vertical".to_string());
+        s.config.thickness = 44;
+        assert_eq!(sensor_icon_size(&s.config, &stacked, sensor), 14);
+        // A hairline bar still keeps a visible icon (clamped at 4).
+        s.config.thickness = 4;
+        assert_eq!(sensor_icon_size(&s.config, section, sensor), 4);
+        // Theme: the system one until configured.
+        assert_eq!(icon_theme_of(&s.config), icons::icon_theme());
+        s.config.icon_theme = Some("Papirus".to_string());
+        assert_eq!(icon_theme_of(&s.config), "Papirus");
+        assert!(
+            resolved_icon(&s.config, 22, None).is_none(),
+            "no name, no icon"
+        );
     }
 
     /// The browser flow: the modal opens for the sensor, the query

@@ -114,6 +114,41 @@ pub(crate) fn cache_len() -> usize {
         .sum()
 }
 
+// ── icon sizing: one formula for tray, sensor rows and the setup preview ──
+
+/// Padding the section content Row/Column adds on every side: the layout
+/// draws it around a section's title and sensors, so it is chrome an icon
+/// has to fit inside (single source — the formula must match what the
+/// view really draws).
+pub const SECTION_CONTENT_PAD: u16 = 4;
+
+/// Thickness (px) a section title eats when it shares the thickness axis:
+/// a vertically laid out section draws the title above its sensors, as
+/// text (font + 2) in a box padded `SECTION_CONTENT_PAD` on both sides.
+/// A horizontal layout or an empty title draws nothing on that axis.
+pub fn stacked_title_extra(layout: &str, name: &str, font: u32) -> u32 {
+    if layout == "vertical" && !name.is_empty() {
+        font + 2 + 2 * u32::from(SECTION_CONTENT_PAD)
+    } else {
+        0
+    }
+}
+
+/// Icon edge (px) that fits inside a sensor row: panel thickness minus
+/// everything the layout actually spends on the thickness axis inside it —
+/// the section content padding on both sides, the sensor's own padding, and
+/// the section title when sensors are stacked vertically (`title_extra`) —
+/// clamped to a usable range so a hairline bar and a very thick bar both
+/// stay sane. Borders are not subtracted: iced draws them inside the box (a
+/// pill measures the same with or without one), so they never eat thickness —
+/// the sensor row really is this tall, and this is the height the row's text
+/// already fills. Tray icons, sensor icons and the setup's live preview all
+/// size to this one number.
+pub fn row_icon_target(thickness: u32, title_extra: u32, padding: u32) -> u16 {
+    let chrome = 2 * (u32::from(SECTION_CONTENT_PAD) + padding) + title_extra;
+    thickness.saturating_sub(chrome).clamp(4, 48) as u16
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +170,39 @@ mod tests {
         // is that the cache gives the same answer every time.
         let first = resolve("hicolor", "folder", 48);
         assert_eq!(first, resolve("hicolor", "folder", 48));
+    }
+
+    /// A bare 26px bar: only the section content padding (4px a side).
+    #[test]
+    fn row_icon_target_subtracts_section_padding() {
+        assert_eq!(row_icon_target(26, 0, 0), 18);
+    }
+
+    /// The sensor's own padding (6px a side) subtracts on top of it.
+    #[test]
+    fn row_icon_target_subtracts_sensor_padding() {
+        assert_eq!(row_icon_target(44, 0, 6), 24);
+    }
+
+    /// A stacked section title eats thickness as well (font 14 → 14+2+8).
+    #[test]
+    fn row_icon_target_subtracts_stacked_title() {
+        assert_eq!(row_icon_target(44, 24, 0), 12);
+    }
+
+    /// Clamped: never smaller than 4px, never larger than 48px.
+    #[test]
+    fn row_icon_target_clamps() {
+        assert_eq!(row_icon_target(10, 0, 0), 4);
+        assert_eq!(row_icon_target(400, 0, 0), 48);
+    }
+
+    /// The title term applies only to a vertical layout with a name to
+    /// draw (font 14 → 14 + 2 + 2×4 of box).
+    #[test]
+    fn stacked_title_extra_only_for_named_vertical_sections() {
+        assert_eq!(stacked_title_extra("horizontal", "Side", 14), 0);
+        assert_eq!(stacked_title_extra("vertical", "", 14), 0);
+        assert_eq!(stacked_title_extra("vertical", "Side", 14), 24);
     }
 }

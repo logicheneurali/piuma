@@ -70,6 +70,12 @@ pub fn style_num(value: Option<i32>) -> Option<u32> {
     value.and_then(|v| u32::try_from(v).ok())
 }
 
+/// Default panel thickness on the cross axis, in pixels: what
+/// `panel.thickness` falls back to when the config does not set it
+/// (shared by the bar's surface size and the setup's icon preview, so
+/// both follow one number).
+pub const DEFAULT_HEIGHT: u32 = 32;
+
 // ── config structs ──────────────────────────────────────────────────
 
 use serde::Deserialize;

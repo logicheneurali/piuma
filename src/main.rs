@@ -44,6 +44,9 @@ mod sensors;
 mod text_width;
 mod tray;
 mod workspace;
+// Layout padding lives with the icon sizing helpers (icons.rs): the view
+// and the row-height size formula must read the same number.
+use icons::SECTION_CONTENT_PAD;
 
 // ── globals ────────────────────────────────────────────────────────
 
@@ -62,11 +65,6 @@ static mut SCREEN_HEIGHT: u32 = 1080;
 
 const DEFAULT_FONT: &str = "Noto Sans";
 const DEFAULT_FONT_SIZE: u32 = 14;
-const DEFAULT_HEIGHT: u32 = 32;
-/// Padding the section content Row/Column adds on every side: used by the
-/// layout below and by the tray icon size formula (single source, the
-/// formula must match what the view really draws).
-const SECTION_CONTENT_PAD: u16 = 4;
 const DEFAULT_BG_COLOR: Color = Color::from_rgba(0.06, 0.06, 0.08, 0.85);
 const DEFAULT_TEXT_COLOR: Color = Color::from_rgb(0.88, 0.88, 0.94);
 
@@ -168,6 +166,11 @@ struct SensorValue {
     /// Resolved theme file for the sensor's `icon` name (roadmap N1);
     /// `None` = no icon configured or the theme has no such icon.
     icon: Option<PathBuf>,
+    /// Edge (px) of `icon`: the sensor row's real height
+    /// (`icons::row_icon_target`), so the icon fills its box like the
+    /// tray's do. The resolve caches by this size and the widget draws
+    /// at it — both must stay the same number.
+    icon_size: u16,
 }
 
 /// Rendered section data.
@@ -750,23 +753,6 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                         let workspace_buttons =
                             matches!(s.source, config::SensorSource::Workspace {})
                                 .then(workspace::buttons);
-                        // Roadmap N1: theme file for the sensor's icon, at the
-                        // panel's font size. The lookup is memoized, so the
-                        // per-second rebuild only clones the cached path; with
-                        // `icon_theme == None` (gate) this arm never runs.
-                        let icon = match (icon_theme, s.icon.as_deref()) {
-                            (Some(theme), Some(icon_name)) => icons::resolve(
-                                theme,
-                                icon_name,
-                                panel
-                                    .config
-                                    .panel
-                                    .font_size
-                                    .unwrap_or(DEFAULT_FONT_SIZE)
-                                    .min(u32::from(u16::MAX)) as u16,
-                            ),
-                            _ => None,
-                        };
                         // Style precedence, per style GROUP: a sensor takes a
                         // group over only when it defines the group's key
                         // colour (`border_color`, `bg_color`, `text_color`).
@@ -776,8 +762,36 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                         // key is set, the sensor's own fields win and the
                         // remaining ones fall back to the defaults.
                         // `padding` is a single value: sensor when set,
-                        // otherwise the default.
+                        // otherwise the default. It also feeds the icon fit
+                        // below, so it is resolved before the icon.
                         let defaults = panel.config.panel.sensor_defaults.as_ref();
+                        let padding = config::style_num(s.padding)
+                            .or(defaults.and_then(|sd| config::style_num(sd.padding)))
+                            .unwrap_or(0) as u16;
+                        // Roadmap N1: theme file for the sensor's icon, sized
+                        // to this sensor row's real height — the fit the tray
+                        // already uses (thickness minus the layout chrome,
+                        // clamped), so the icon fills its box instead of
+                        // trailing the font size. The size travels with the
+                        // path (resolve and widget must agree on it); the
+                        // lookup is memoized, so the per-second rebuild only
+                        // clones the cached path. With `icon_theme == None`
+                        // (gate) this arm never runs.
+                        let icon_size = icons::row_icon_target(
+                            panel_thickness(&panel.config),
+                            icons::stacked_title_extra(
+                                section_cfg.layout.as_deref().unwrap_or("horizontal"),
+                                &section_cfg.name,
+                                panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE),
+                            ),
+                            u32::from(padding),
+                        );
+                        let icon = match (icon_theme, s.icon.as_deref()) {
+                            (Some(theme), Some(icon_name)) => {
+                                icons::resolve(theme, icon_name, icon_size)
+                            }
+                            _ => None,
+                        };
                         let own_border = s.border_color.is_some();
                         let own_bg = s.bg_color.is_some();
                         let own_text = s.text_color.is_some();
@@ -850,13 +864,12 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                             border_width: bw_val as u16,
                             border_radius: br_val as u16,
                             border_type: bt_str.to_string(),
-                            padding: config::style_num(s.padding)
-                                .or(defaults.and_then(|sd| config::style_num(sd.padding)))
-                                .unwrap_or(0) as u16,
+                            padding,
                             action: s.action.clone(),
                             tray: tray_icons,
                             workspaces: workspace_buttons,
                             icon,
+                            icon_size,
                             // Only the net rate sensors pin their width
                             // (roadmap M5); the measurement is cached per
                             // font/size, so the per-tick rebuild pays nothing
@@ -1708,7 +1721,7 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
                 );
                 let mut row = Row::new().spacing(6).align_y(Alignment::Center);
                 if let Some(path) = &s.icon {
-                    row = row.push(icons::widget(path, font_size as f32));
+                    row = row.push(icons::widget(path, s.icon_size as f32));
                 }
                 row.push(ws_row).into()
             } else {
@@ -1721,7 +1734,7 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
                 // above the text baseline (roadmap2: icon alignment).
                 let mut row = Row::new().spacing(6).align_y(Alignment::Center);
                 if let Some(path) = &s.icon {
-                    row = row.push(icons::widget(path, font_size as f32));
+                    row = row.push(icons::widget(path, s.icon_size as f32));
                 }
                 if !s.name.is_empty() {
                     row = row.push(text(&s.name).color(text_color).size(font_size).font(font_obj));
@@ -2195,21 +2208,11 @@ impl<'a> From<FillSections<'a>> for Element<'a, Message> {
 /// config (default 32px, minimum 1px). Single source of truth for the surface
 /// size and for the exclusive zone hyprland reserves.
 fn panel_thickness(config: &config::Config) -> u32 {
-    config.panel.thickness.unwrap_or(DEFAULT_HEIGHT).max(1)
-}
-
-/// Icon edge (px) that fits inside a tray sensor box: panel thickness minus
-/// everything the layout actually spends on the thickness axis inside it —
-/// the section content padding on both sides, the sensor's own padding, and
-/// the section title when sensors are stacked vertically (`title_extra`) —
-/// clamped to a usable range so a hairline bar and a very thick bar both
-/// stay sane. Borders are not subtracted: iced draws them inside the box (a
-/// pill measures the same with or without one), so they never eat thickness —
-/// the sensor row really is this tall, and this is the height the row's text
-/// already fills.
-fn tray_icon_target(thickness: u32, title_extra: u32, padding: u32) -> u16 {
-    let chrome = 2 * (u32::from(SECTION_CONTENT_PAD) + padding) + title_extra;
-    thickness.saturating_sub(chrome).clamp(4, 48) as u16
+    config
+        .panel
+        .thickness
+        .unwrap_or(config::DEFAULT_HEIGHT)
+        .max(1)
 }
 
 /// Recompute `tray::icon_target` from the built sections (every tick and on
@@ -2222,16 +2225,13 @@ fn update_tray_icon_target(panel: &Panel) {
     let font = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
     let mut smallest: Option<u16> = None;
     for section in &panel.sections {
-        // Title height as the view draws it: text (font + 2) in a box
-        // padded SECTION_CONTENT_PAD on both sides.
-        let title_extra = if section.layout == "vertical" && !section.name.is_empty() {
-            font + 2 + 2 * u32::from(SECTION_CONTENT_PAD)
-        } else {
-            0
-        };
+        // Title height as the view draws it, shared with the sensor icon
+        // fit: text in a box padded SECTION_CONTENT_PAD on both sides.
+        let title_extra = icons::stacked_title_extra(&section.layout, &section.name, font);
         for sensor in &section.sensors {
             if sensor.tray.is_some() {
-                let target = tray_icon_target(thickness, title_extra, u32::from(sensor.padding));
+                let target =
+                    icons::row_icon_target(thickness, title_extra, u32::from(sensor.padding));
                 smallest = Some(smallest.map_or(target, |m| m.min(target)));
             }
         }
@@ -4219,7 +4219,7 @@ mod tests {
         calendar_size, cmdline_is_piuma, corner_radius, dbusmenu, fit_menu_labels,
         focused_output_in, icons_theme, lock_pid, menu_placement, menu_row_h, menu_size,
         monitor_names_json, popup_card_h, popup_missed_tick, popup_placement, section_touch,
-        shifted_surface_rect, text_width, tray_icon_target, wallpaper_plan, GraphPopup,
+        shifted_surface_rect, text_width, wallpaper_plan, GraphPopup,
         PopupStyle, MENU_INDENT, MENU_MAX_W, MENU_MIN_W, MENU_PAD,
     };
     use iced::font::Font;
@@ -4398,31 +4398,6 @@ mod tests {
         assert!(icons_theme(&cfg).is_none()); // still dormant
         cfg.panel.sections[0].sensors[0].icon = Some("cpu".to_string());
         assert_eq!(icons_theme(&cfg), Some("Papirus"));
-    }
-
-    /// A bare 26px bar: only the section content padding (4px a side).
-    #[test]
-    fn tray_icon_target_subtracts_section_padding() {
-        assert_eq!(tray_icon_target(26, 0, 0), 18);
-    }
-
-    /// The sensor's own padding (6px a side) subtracts on top of it.
-    #[test]
-    fn tray_icon_target_subtracts_sensor_padding() {
-        assert_eq!(tray_icon_target(44, 0, 6), 24);
-    }
-
-    /// A stacked section title eats thickness as well (font 14 → 14+2+8).
-    #[test]
-    fn tray_icon_target_subtracts_stacked_title() {
-        assert_eq!(tray_icon_target(44, 24, 0), 12);
-    }
-
-    /// Clamped: never smaller than 4px, never larger than 48px.
-    #[test]
-    fn tray_icon_target_clamps() {
-        assert_eq!(tray_icon_target(10, 0, 0), 4);
-        assert_eq!(tray_icon_target(400, 0, 0), 48);
     }
 
     /// The height is exact (rows × row height + padding — the surface
