@@ -24,7 +24,22 @@ pub fn icon_theme() -> &'static str {
     static THEME: OnceLock<String> = OnceLock::new();
     THEME
         .get_or_init(|| {
-            freedesktop_icons::default_theme_gtk().unwrap_or_else(|| "hicolor".to_string())
+            // The raw setting value IS the lookup key: freedesktop-icons
+            // keys themes by directory name, while its own
+            // `default_theme_gtk()` returns the index's display `Name=`
+            // ("breeze" → "Breeze"), which then misses every lookup and
+            // silently degrades to hicolor + pixmaps. Read the setting
+            // exactly as the lookup expects it.
+            std::process::Command::new("gsettings")
+                .args(["get", "org.gnome.desktop.interface", "icon-theme"])
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .and_then(|out| String::from_utf8(out.stdout).ok())
+                .map(|raw| raw.trim().trim_matches('\'').to_string())
+                .filter(|name| !name.is_empty())
+                // Absent setting: hicolor ships on every freedesktop system.
+                .unwrap_or_else(|| "hicolor".to_string())
         })
         .as_str()
 }

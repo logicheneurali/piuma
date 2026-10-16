@@ -2384,12 +2384,12 @@ fn icon_preview<'a>(cfg: &PiumaConfig, name: Option<&str>) -> Element<'a, Messag
 const SYSTEM_ICON_THEME: &str = "system default";
 
 /// Icon-theme picklist options: sentinel first, then the installed
-/// themes sorted; a hand-typed name missing from the list joins it, so
-/// the current value never falls out of the options.
+/// themes sorted — by directory name, the lookup's own keys, so every
+/// option resolves (the index's display Name= would not); a hand-typed
+/// name missing from the list joins it, so the current value never
+/// falls out of the options.
 fn icon_theme_options(current: Option<&str>) -> Vec<String> {
-    let mut themes: Vec<String> = freedesktop_icons::list_themes();
-    themes.sort();
-    themes.dedup();
+    let mut themes = installed_theme_names();
     if let Some(c) = current.filter(|c| !c.is_empty() && !themes.iter().any(|t| t == c)) {
         themes.insert(0, c.to_string());
     }
@@ -2484,6 +2484,31 @@ fn theme_dirs_by_key(theme: &str) -> Vec<PathBuf> {
         }
     }
     found
+}
+
+/// Sorted theme names of one icons root: a directory is a theme when it
+/// carries an index.theme, and the name the lookup keys by is the
+/// directory name itself (never the index's display `Name=`).
+fn theme_names_in_root(root: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(root) else { return Vec::new() };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && p.join("index.theme").exists())
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Every installed theme name across the roots (sorted, deduped): the
+/// picklist offers lookup keys, so a picked option always resolves.
+fn installed_theme_names() -> Vec<String> {
+    let mut names: Vec<String> =
+        icon_theme_roots().iter().flat_map(|root| theme_names_in_root(root)).collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// Recursively collects the icon stems (image files) of a theme dir:
@@ -5055,6 +5080,20 @@ mod tests {
             vec!["hicolor".to_string(), "Adwaita".to_string()]
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A root's theme names: only dirs carrying an index.theme count,
+    /// and the offered name is the directory one — the lookup's key.
+    #[test]
+    fn theme_names_in_root_need_an_index() {
+        let root =
+            std::env::temp_dir().join(format!("piuma-icons-test-{}-root", std::process::id()));
+        fs::create_dir_all(root.join("breeze")).expect("theme dir");
+        fs::write(root.join("breeze").join("index.theme"), b"[Icon Theme]\n").expect("index");
+        fs::create_dir_all(root.join("not-a-theme")).expect("plain dir");
+        fs::write(root.join("loose.png"), [0u8]).expect("file");
+        assert_eq!(theme_names_in_root(&root), vec!["breeze".to_string()]);
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// The theme options lead with the system-default entry and keep a
