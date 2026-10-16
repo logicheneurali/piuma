@@ -264,7 +264,7 @@ fn parse_percent(value: &str) -> Option<f32> {
 }
 
 /// The number at the start of a displayed value (`"62°C"` → 62,
-/// `"1.4 KB/s"` → 1.4, `"N/A"` → None): threshold colour rules read
+/// `"1.4 K"` → 1.4, `"N/A"` → None): threshold colour rules read
 /// the value the bar already shows, whatever unit suffix follows it.
 pub fn leading_number(value: &str) -> Option<f32> {
     let t = value.trim_start();
@@ -763,8 +763,10 @@ const FIGURE_SPACE: char = '\u{2007}';
 /// any tier can show (`1023.9`).
 const RATE_INT_SLOTS: usize = 4;
 
-/// Rate labels, one per order of magnitude.
-const RATE_UNITS: [&str; 5] = ["B/s", "KB/s", "MB/s", "GB/s", "TB/s"];
+/// Rate labels, one per order of magnitude: the bare tier letter (the
+/// row is a rate at a glance — `1.9 K` — and every tier keeps the same
+/// one-glyph width, so the pinned box barely moves with the unit).
+const RATE_UNITS: [&str; 5] = ["B", "K", "M", "G", "T"];
 
 /// Format a byte rate with a FIXED composition (roadmap M5): a
 /// [`RATE_INT_SLOTS`]-slot integer part padded with figure spaces, one
@@ -801,8 +803,8 @@ pub fn net_rate_samples(value: &str) -> Vec<String> {
     samples
 }
 
-/// The tier index of a displayed value's unit suffix (`"134.6 B/s"` → 0,
-/// `"1.9 MB/s"` → 2); an unrecognised string (`"N/A"`) falls back to the
+/// The tier index of a displayed value's unit suffix (`"134.6 B"` → 0,
+/// `"1.9 M"` → 2); an unrecognised string (`"N/A"`) falls back to the
 /// base tier, whose samples still fit it with room to spare.
 fn tier_of(value: &str) -> usize {
     value
@@ -812,14 +814,14 @@ fn tier_of(value: &str) -> usize {
 }
 
 /// Get network download rate as (text, bytes/s) (fixed-width format,
-/// e.g. `   1.4 MB/s`); None on the first tick — the graph plots the
+/// e.g. `   1.4 M`); None on the first tick — the graph plots the
 /// raw B/s of the same sample.
 pub fn net_down(interface: &str) -> Option<(String, f64)> {
     net_rate(interface, false).map(|rate| (fmt_rate(rate), rate))
 }
 
 /// Get network upload rate as (text, bytes/s) (fixed-width format,
-/// e.g. ` 812.0 B/s`); None on the first tick.
+/// e.g. ` 812.0 B`); None on the first tick.
 pub fn net_up(interface: &str) -> Option<(String, f64)> {
     net_rate(interface, true).map(|rate| (fmt_rate(rate), rate))
 }
@@ -853,6 +855,7 @@ mod tests {
     #[test]
     fn leading_number_takes_the_value_head() {
         assert_eq!(leading_number("62°C"), Some(62.0));
+        assert_eq!(leading_number("1.4 K"), Some(1.4));
         assert_eq!(leading_number("1.4 KB/s"), Some(1.4));
         assert_eq!(leading_number("50"), Some(50.0));
         assert_eq!(leading_number("100%"), Some(100.0));
@@ -893,10 +896,10 @@ mod tests {
             assert!(rest.starts_with(|c: char| c.is_ascii_digit()), "{sample}");
         }
         let f = FIGURE_SPACE;
-        assert_eq!(fmt_rate(0.0), format!("{f}{f}{f}0.0 B/s"));
-        assert_eq!(fmt_rate(1023.9), "1023.9 B/s");
-        assert_eq!(fmt_rate(1024.0), format!("{f}{f}{f}1.0 KB/s"));
-        assert_eq!(fmt_rate(2_000_000.0), format!("{f}{f}{f}1.9 MB/s"));
+        assert_eq!(fmt_rate(0.0), format!("{f}{f}{f}0.0 B"));
+        assert_eq!(fmt_rate(1023.9), "1023.9 B");
+        assert_eq!(fmt_rate(1024.0), format!("{f}{f}{f}1.0 K"));
+        assert_eq!(fmt_rate(2_000_000.0), format!("{f}{f}{f}1.9 M"));
     }
 
     /// The pin is exactly the displayed value's width: same tier ⇒ equal

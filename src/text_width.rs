@@ -278,8 +278,10 @@ mod tests {
     #[test]
     fn widest_orders_patterns_by_length() {
         let font = Font::with_name("Noto Sans");
-        let samples: Vec<String> =
-            ["1023.9 MB/s", "1.0 MB/s"].iter().map(|s| s.to_string()).collect();
+        let samples: Vec<String> = ["1023.9 M", "1.0 M"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let wide = widest(&font, 12, &samples);
         let one = widest(&font, 12, &samples[1..]);
         assert!(wide > one, "wide {wide} should exceed {one}");
