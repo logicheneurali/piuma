@@ -2,10 +2,11 @@
 //! A visual tool to configure Piuma panel settings using iced 0.14
 
 use iced::theme::Palette as IcedPalette;
+use iced::widget::operation;
 use iced::widget::text::Style as TextStyle;
 use iced::widget::{
-    button, column, container, scrollable, stack, text, toggler, Button, Column, Container,
-    PickList, Row, Slider, TextInput,
+    button, column, container, scrollable, stack, text, toggler, Button, Column,
+    Container, PickList, Row, Slider, TextInput,
 };
 use iced::{Alignment, Background, Border, Color, Element, Font, Length, Padding, Task, Theme};
 use serde_json::{Map, Value as JsonValue};
@@ -354,8 +355,10 @@ pub enum Message {
     /// Popup screen position picklist (roadmap M4): one of the 6 corners/
     /// edges or `auto`.
     NotifPositionChanged(String),
-    SectionAdded,
-    SectionRemoved(usize),
+    /// Opens the modal creating a section (name optional).
+    AddSectionPressed,
+    /// Opens the removal confirmation for one section.
+    RemoveSectionPressed(usize),
     /// Moves a section one position up/down in the panel order.
     SectionMoveUp(usize),
     SectionMoveDown(usize),
@@ -364,8 +367,14 @@ pub enum Message {
     SectionWeightChanged(usize, u32),
     SectionBgColorChanged(usize, String),
     SectionTextColorChanged(usize, String),
-    SensorAdded(usize),
-    SensorRemoved(usize, usize),
+    /// Opens the modal creating a sensor (type + name) in the section.
+    AddSensorPressed(usize),
+    /// Opens the removal confirmation for one sensor.
+    RemoveSensorPressed(usize, usize),
+    /// Clones a sensor right after itself (same section).
+    SensorDuplicated(usize, usize),
+    /// Moves a sensor to the end of another section (or of its own).
+    SensorMoveTo(usize, usize, usize),
     /// Moves a sensor one position up/down inside its section.
     SensorMoveUp(usize, usize),
     SensorMoveDown(usize, usize),
@@ -395,6 +404,10 @@ pub enum Message {
     ToggleSecDefaults,
     /// Toggles the collapsible style block of one sensor: (section, sensor).
     ToggleSensorStyle(usize, usize),
+    /// Toggles the accordion body of one section.
+    ToggleSection(usize),
+    /// Toggles the accordion body of one sensor: (section, sensor).
+    ToggleSensor(usize, usize),
     /// Save: asks confirmation when the config was modified, then writes.
     SaveConfig,
     /// Opens the "save as" modal (write the config under a new name).
@@ -403,6 +416,8 @@ pub enum Message {
     LoadConfig,
     /// Text typed in the active modal (file name / picked file).
     ModalTextChanged(String),
+    /// Sensor type picked in the "new sensor" modal.
+    ModalTypeChanged(String),
     /// Confirms the primary action of the active modal.
     ModalConfirm,
     /// Closes the active modal discarding its action.
@@ -422,6 +437,14 @@ pub enum Modal {
     ConfirmSaveAs(String),
     /// Load picker: selected file among the *.json of the config directory.
     LoadFile { selected: String, files: Vec<String> },
+    /// New-section form: optional name (an empty one keeps the default).
+    AddSection { name: String },
+    /// New-sensor form: target section, picked type, optional name.
+    AddSensor { section_index: usize, kind: String, name: String },
+    /// Removal confirmation for one section (and its sensors).
+    ConfirmRemoveSection(usize),
+    /// Removal confirmation for one sensor.
+    ConfirmRemoveSensor(usize, usize),
 }
 
 /// Default config file: the one the running piuma reads.
@@ -521,6 +544,10 @@ pub struct PiumaSetup {
     sec_defaults_expanded: bool,
     /// Indices of the sensors whose "Style overrides" block is open.
     sensor_style_open: HashSet<(usize, usize)>,
+    /// Sections collapsed in the Sections accordion (absent = open).
+    sections_collapsed: HashSet<usize>,
+    /// Sensors whose accordion body is expanded (absent = collapsed).
+    sensors_open: HashSet<(usize, usize)>,
     /// Config file currently edited (name inside the piuma config directory).
     current_file: String,
     /// Serialized config at the last load/save: differs = unsaved changes.
@@ -549,6 +576,8 @@ impl PiumaSetup {
             defaults_expanded: true,
             sec_defaults_expanded: true,
             sensor_style_open: HashSet::new(),
+            sections_collapsed: HashSet::new(),
+            sensors_open: HashSet::new(),
             current_file: DEFAULT_FILE.to_string(),
             snapshot: String::new(),
             modal: None,
@@ -954,13 +983,28 @@ impl PiumaSetup {
 
     /// Swaps sensors `i` and `i+1` of a section, carrying their
     /// style-block-open flags so an expanded block follows its sensor.
+    /// Rewrites both per-sensor open sets (style block + accordion body)
+    /// after a structural change: `f` maps every (section, sensor) key to
+    /// its new home, or `None` when it disappeared.
+    fn remap_sensor_keys(&mut self, f: impl Fn(usize, usize) -> Option<(usize, usize)>) {
+        self.sensor_style_open = self.sensor_style_open.drain().filter_map(|(s, i)| f(s, i)).collect();
+        self.sensors_open = self.sensors_open.drain().filter_map(|(s, i)| f(s, i)).collect();
+    }
+
     fn swap_sensors(&mut self, section_index: usize, sensor_index: usize) {
         let (a, b) = (sensor_index, sensor_index + 1);
-        let flags = &mut self.sensor_style_open;
-        let open_a = flags.contains(&(section_index, a));
-        let open_b = flags.contains(&(section_index, b));
-        if open_a { flags.insert((section_index, b)); } else { flags.remove(&(section_index, b)); }
-        if open_b { flags.insert((section_index, a)); } else { flags.remove(&(section_index, a)); }
+        self.remap_sensor_keys(|s, i| {
+            Some((
+                s,
+                if s == section_index && i == a {
+                    b
+                } else if s == section_index && i == b {
+                    a
+                } else {
+                    i
+                },
+            ))
+        });
         self.config.sections[section_index].sensors.swap(a, b);
     }
 
@@ -968,11 +1012,7 @@ impl PiumaSetup {
     /// the expanded blocks stay attached to their sensors.
     fn swap_sections(&mut self, a: usize, b: usize) {
         self.config.sections.swap(a, b);
-        self.sensor_style_open = self
-            .sensor_style_open
-            .iter()
-            .map(|&(s, i)| if s == a { (b, i) } else if s == b { (a, i) } else { (s, i) })
-            .collect();
+        self.remap_sensor_keys(|s, i| Some((if s == a { b } else if s == b { a } else { s }, i)));
     }
 
     fn load_from_json(&mut self, content: &str) -> Result<(), String> {
@@ -1474,12 +1514,14 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                 n.popup_position = value;
             }
         }
-        Message::SectionAdded => {
-            state.config.sections.push(Section::default());
+        Message::AddSectionPressed => {
+            state.modal = Some(Modal::AddSection { name: String::new() });
         }
-        Message::SectionRemoved(index) => {
-            if state.config.sections.len() > 1 {
-                state.config.sections.remove(index);
+        Message::RemoveSectionPressed(index) => {
+            // The last section is never removable (the view also disables
+            // its button); the confirmation names the collateral sensors.
+            if state.config.sections.len() > 1 && index < state.config.sections.len() {
+                state.modal = Some(Modal::ConfirmRemoveSection(index));
             }
         }
         Message::SectionMoveUp(index) => {
@@ -1517,17 +1559,77 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                 state.config.sections[index].text_color = if value.is_empty() { None } else { Some(value) };
             }
         }
-        Message::SensorAdded(section_index) => {
+        Message::AddSensorPressed(section_index) => {
             if section_index < state.config.sections.len() {
-                state.config.sections[section_index].sensors.push(Sensor::default());
+                state.modal = Some(Modal::AddSensor {
+                    section_index,
+                    kind: "perc_cpu".to_string(),
+                    name: String::new(),
+                });
             }
         }
-        Message::SensorRemoved(section_index, sensor_index) => {
-            if section_index < state.config.sections.len() {
-                let section = &mut state.config.sections[section_index];
-                if sensor_index < section.sensors.len() {
-                    section.sensors.remove(sensor_index);
+        Message::RemoveSensorPressed(section_index, sensor_index) => {
+            if section_index < state.config.sections.len()
+                && sensor_index < state.config.sections[section_index].sensors.len()
+            {
+                state.modal = Some(Modal::ConfirmRemoveSensor(section_index, sensor_index));
+            }
+        }
+        Message::SensorDuplicated(section_index, sensor_index) => {
+            if let Some(mut copy) = state
+                .config
+                .sections
+                .get(section_index)
+                .and_then(|sec| sec.sensors.get(sensor_index))
+                .cloned()
+            {
+                // The copy is named after the original so it is recognizable.
+                copy.name = copy.name.map(|n| format!("{n} (copy)"));
+                let new_index = sensor_index + 1;
+                state.remap_sensor_keys(|s, i| {
+                    Some((s, if s == section_index && i >= new_index { i + 1 } else { i }))
+                });
+                state.config.sections[section_index].sensors.insert(new_index, copy);
+                state.sensors_open.insert((section_index, new_index));
+                state.sections_collapsed.remove(&section_index);
+                // Focus the copy's name so renaming it is the next keystroke.
+                return operation::focus(sensor_name_id(section_index, new_index));
+            }
+            return Task::none();
+        }
+        Message::SensorMoveTo(section_index, sensor_index, target) => {
+            let in_bounds = section_index < state.config.sections.len()
+                && sensor_index < state.config.sections[section_index].sensors.len()
+                && target < state.config.sections.len();
+            if in_bounds {
+                let was_open = state.sensors_open.contains(&(section_index, sensor_index));
+                let was_styled = state.sensor_style_open.contains(&(section_index, sensor_index));
+                let sensor = state.config.sections[section_index].sensors.remove(sensor_index);
+                // Removal first, then insertion at the target's end: for the
+                // same section this reads as "move to its own end".
+                state.remap_sensor_keys(|s, i| {
+                    if s == section_index && i == sensor_index {
+                        None
+                    } else if s == section_index && i > sensor_index {
+                        Some((s, i - 1))
+                    } else {
+                        Some((s, i))
+                    }
+                });
+                let target_len = state.config.sections[target].sensors.len();
+                state.config.sections[target].sensors.insert(target_len, sensor);
+                state.remap_sensor_keys(|s, i| {
+                    Some((s, if s == target && i >= target_len { i + 1 } else { i }))
+                });
+                // Open blocks follow the sensor; the target section unfolds
+                // so the move is visible where it landed.
+                if was_open {
+                    state.sensors_open.insert((target, target_len));
                 }
+                if was_styled {
+                    state.sensor_style_open.insert((target, target_len));
+                }
+                state.sections_collapsed.remove(&target);
             }
         }
         Message::SensorMoveUp(section_index, sensor_index) => {
@@ -1731,8 +1833,14 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                 *name = value;
             }
             Some(Modal::LoadFile { selected, .. }) => *selected = value,
+            Some(Modal::AddSection { name }) | Some(Modal::AddSensor { name, .. }) => *name = value,
             _ => {}
         },
+        Message::ModalTypeChanged(kind) => {
+            if let Some(Modal::AddSensor { kind: slot, .. }) = state.modal.as_mut() {
+                *slot = kind;
+            }
+        }
         Message::ModalConfirm => match state.modal.take() {
             Some(Modal::ConfirmSave) => {
                 let name = state.current_file.clone();
@@ -1768,6 +1876,78 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                     state.modal = Some(Modal::LoadFile { selected, files });
                 }
             }
+            Some(Modal::AddSection { name }) => {
+                let mut section = Section::default();
+                let trimmed = name.trim();
+                if !trimmed.is_empty() {
+                    section.name = Some(trimmed.to_string());
+                }
+                // Appending a section shifts no existing sensor key; the
+                // fresh section starts open with its default sensor open.
+                state.config.sections.push(section);
+                let new_index = state.config.sections.len() - 1;
+                state.sections_collapsed.remove(&new_index);
+                state.sensors_open.insert((new_index, 0));
+                return operation::snap_to_end(content_scroll_id());
+            }
+            Some(Modal::AddSensor { section_index, kind, name }) => {
+                if section_index < state.config.sections.len() {
+                    let mut sensor = Sensor::default();
+                    sensor.source_type = kind;
+                    let trimmed = name.trim();
+                    // No name = absent key: the bar renders the value alone.
+                    sensor.name = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
+                    let new_index = state.config.sections[section_index].sensors.len();
+                    state.remap_sensor_keys(|s, i| {
+                        Some((s, if s == section_index && i >= new_index { i + 1 } else { i }))
+                    });
+                    state.config.sections[section_index].sensors.push(sensor);
+                    state.sensors_open.insert((section_index, new_index));
+                    state.sections_collapsed.remove(&section_index);
+                    let focus = operation::focus(sensor_name_id(section_index, new_index));
+                    return if section_index + 1 == state.config.sections.len() {
+                        // Appended to the last section: the row sits at the
+                        // scrollable's bottom, so a plain snap lands on it.
+                        Task::batch([focus, operation::snap_to_end(content_scroll_id())])
+                    } else {
+                        focus
+                    };
+                }
+            }
+            Some(Modal::ConfirmRemoveSection(index)) => {
+                if state.config.sections.len() > 1 && index < state.config.sections.len() {
+                    state.config.sections.remove(index);
+                    state.sections_collapsed = state
+                        .sections_collapsed
+                        .drain()
+                        .filter(|&s| s != index)
+                        .map(|s| if s > index { s - 1 } else { s })
+                        .collect();
+                    state.remap_sensor_keys(|s, i| {
+                        if s == index {
+                            None
+                        } else {
+                            Some((if s > index { s - 1 } else { s }, i))
+                        }
+                    });
+                }
+            }
+            Some(Modal::ConfirmRemoveSensor(section_index, sensor_index)) => {
+                let in_bounds = section_index < state.config.sections.len()
+                    && sensor_index < state.config.sections[section_index].sensors.len();
+                if in_bounds {
+                    state.config.sections[section_index].sensors.remove(sensor_index);
+                    state.remap_sensor_keys(|s, i| {
+                        if s == section_index && i == sensor_index {
+                            None
+                        } else if s == section_index && i > sensor_index {
+                            Some((s, i - 1))
+                        } else {
+                            Some((s, i))
+                        }
+                    });
+                }
+            }
             None => {}
         },
         Message::ModalCancel => state.modal = None,
@@ -1777,6 +1957,16 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
             // Insert-or-remove keeps the set as the single source of truth.
             if !state.sensor_style_open.remove(&(section, sensor)) {
                 state.sensor_style_open.insert((section, sensor));
+            }
+        }
+        Message::ToggleSection(index) => {
+            if !state.sections_collapsed.remove(&index) {
+                state.sections_collapsed.insert(index);
+            }
+        }
+        Message::ToggleSensor(section, sensor) => {
+            if !state.sensors_open.remove(&(section, sensor)) {
+                state.sensors_open.insert((section, sensor));
             }
         }
         Message::ResetConfig => {
@@ -2093,6 +2283,17 @@ fn move_btn<'a>(
     }
 }
 
+/// Scrollable holding the tab content: the add-section/add-sensor tasks
+/// share its id to snap the freshly created row into view.
+fn content_scroll_id() -> iced::widget::Id {
+    iced::widget::Id::new("content")
+}
+
+/// Text-input id of one sensor's name field, focused after add/duplicate.
+fn sensor_name_id(section: usize, sensor: usize) -> iced::widget::Id {
+    iced::widget::Id::from(format!("sensor-name-{section}-{sensor}"))
+}
+
 /// Two-column form grid: fields alternate left/right, one per cell, so long
 /// forms stay compact and their labels line up in fixed columns.
 fn form_grid<'a>(fields: Vec<(&'a str, Element<'a, Message>)>) -> Element<'a, Message> {
@@ -2142,9 +2343,10 @@ fn slider_control<'a>(range: RangeInclusive<i32>, value: i32, on_input: impl Fn(
 }
 
 /// Collapsible header: chevron + title + summary; pressing toggles the block.
+/// The title is owned so section/sensor rows can pass their dynamic names.
 fn collapsible_header<'a>(
     pal: Palette,
-    title: &'a str,
+    title: String,
     summary: String,
     expanded: bool,
     on_toggle: Message,
@@ -2198,7 +2400,7 @@ fn view(state: &PiumaSetup) -> Element<'_, Message> {
             Row::new()
                 .push(sidebar(state))
                 .push(
-                    container(scrollable(content).width(Length::Fill).height(Length::Fill))
+                    container(scrollable(content).id(content_scroll_id()).width(Length::Fill).height(Length::Fill))
                         .width(Length::Fill)
                         .height(Length::Fill),
                 )
@@ -2401,6 +2603,71 @@ fn modal_card(state: &PiumaSetup) -> Element<'_, Message> {
                 body,
                 error,
                 dialog_actions(pal, Message::ModalConfirm, "Load"),
+            )
+        }
+        Some(Modal::AddSection { name }) => dialog_frame(
+            pal,
+            "New section",
+            input("Name (optional)", name, Message::ModalTextChanged)
+                .width(Length::Fill)
+                .into(),
+            error,
+            dialog_actions(pal, Message::ModalConfirm, "Add"),
+        ),
+        Some(Modal::AddSensor { kind, name, .. }) => {
+            // Type combo of the canonical list, plus an optional name; the
+            // muted line under the fields explains what the type does.
+            let body = column![
+                form_cell("Type", picklist(
+                    available_source_types(kind),
+                    Some(kind.clone()),
+                    Message::ModalTypeChanged,
+                ).width(Length::Fill).into()),
+                form_cell("Name", input("optional", name, Message::ModalTextChanged)
+                    .width(Length::Fill)
+                    .into()),
+                text(source_label(canonical_type(kind))).size(10).style(muted_text(pal)),
+            ]
+            .spacing(8)
+            .width(Length::Fill);
+            dialog_frame(
+                pal,
+                "New sensor",
+                body.into(),
+                error,
+                dialog_actions(pal, Message::ModalConfirm, "Add"),
+            )
+        }
+        Some(Modal::ConfirmRemoveSection(index)) => {
+            let section = &state.config.sections[*index];
+            let name = section.name.as_deref().unwrap_or("(unnamed)");
+            let count = section.sensors.len();
+            dialog_frame(
+                pal,
+                "Remove section",
+                text(format!(
+                    "Remove \"{name}\" and its {count} sensor(s)? Changes apply on Save."
+                ))
+                .size(BODY)
+                .into(),
+                error,
+                dialog_actions(pal, Message::ModalConfirm, "Remove"),
+            )
+        }
+        Some(Modal::ConfirmRemoveSensor(section_index, sensor_index)) => {
+            let sensor = &state.config.sections[*section_index].sensors[*sensor_index];
+            let name = sensor
+                .name
+                .clone()
+                .unwrap_or_else(|| source_label(canonical_type(&sensor.source_type)).to_string());
+            dialog_frame(
+                pal,
+                "Remove sensor",
+                text(format!("Remove \"{name}\"? Changes apply on Save."))
+                    .size(BODY)
+                    .into(),
+                error,
+                dialog_actions(pal, Message::ModalConfirm, "Remove"),
             )
         }
         None => text("").into(),
@@ -2889,7 +3156,7 @@ fn sections_list(state: &PiumaSetup) -> Element<'_, Message> {
     }
 
     let add_section = button(text("+ Add Section").size(BODY))
-        .on_press(Message::SectionAdded)
+        .on_press(Message::AddSectionPressed)
         .padding(10);
 
     column![
@@ -2901,24 +3168,28 @@ fn sections_list(state: &PiumaSetup) -> Element<'_, Message> {
     .into()
 }
 
-/// Section card: header with name + remove, settings grid, then the sensor
-/// cards nested on an inset background to mark the hierarchy.
+/// Section card (accordion): a compact header — toggle with the section
+/// name and a layout/sensor summary, then order and remove — over a body
+/// (name, settings, sensors) that collapses to keep the list scannable.
 fn section_view<'a>(
     state: &'a PiumaSetup,
     index: usize,
     section: &'a Section,
 ) -> Element<'a, Message> {
     let pal = palette(&state.config);
+    let collapsed = state.sections_collapsed.contains(&index);
+    let title = section.name.clone().unwrap_or_else(|| format!("Section {}", index + 1));
+    let layout = section.layout.as_deref().unwrap_or(&state.config.section_layout);
+    let count = section.sensors.len();
+    let summary = format!("{} · {} sensor{}", layout, count, if count == 1 { "" } else { "s" });
     let header = Row::new()
-        .push(text("SECTION").size(9).style(muted_text(pal)))
-        .push(
-            input(
-                "Section name",
-                section.name.as_deref().unwrap_or(""),
-                move |value| Message::SectionNameChanged(index, value),
-            )
-            .width(Length::Fill),
-        )
+        .push(collapsible_header(
+            pal,
+            title,
+            summary,
+            !collapsed,
+            Message::ToggleSection(index),
+        ))
         .push(move_btn(pal, "▲", index > 0, Message::SectionMoveUp(index)))
         .push(move_btn(
             pal,
@@ -2926,15 +3197,43 @@ fn section_view<'a>(
             index + 1 < state.config.sections.len(),
             Message::SectionMoveDown(index),
         ))
-        .push(
-            button(text("Remove").size(BODY))
-                .on_press(Message::SectionRemoved(index))
-                .padding(5),
-        )
+        .push({
+            // The last section keeps its button visible but inert.
+            let b = button(text("Remove").size(BODY)).padding(5);
+            if state.config.sections.len() > 1 {
+                b.on_press(Message::RemoveSectionPressed(index))
+            } else {
+                b
+            }
+        })
         .spacing(8)
         .align_y(Alignment::Center)
         .width(Length::Fill);
 
+    if collapsed {
+        return card(pal, column![header].width(Length::Fill)).into();
+    }
+
+    // Section labels for the sensors' "Move to" picklists: the number
+    // prefix keeps duplicates and empty names distinguishable.
+    let section_labels: Vec<String> = state
+        .config
+        .sections
+        .iter()
+        .enumerate()
+        .map(|(n, sec)| format!("{} · {}", n + 1, sec.name.as_deref().unwrap_or("(unnamed)")))
+        .collect();
+
+    let name_row = form_cell(
+        "Name",
+        input(
+            "Section name",
+            section.name.as_deref().unwrap_or(""),
+            move |value| Message::SectionNameChanged(index, value),
+        )
+        .width(Length::Fill)
+        .into(),
+    );
     let settings = form_grid(vec![
         ("Layout", picklist(
             vec!["horizontal".to_string(), "vertical".to_string()],
@@ -2962,18 +3261,21 @@ fn section_view<'a>(
 
     let mut sensor_list = Column::new().spacing(8).width(Length::Fill);
     for (j, sensor) in section.sensors.iter().enumerate() {
-        let style_open = state.sensor_style_open.contains(&(index, j));
         sensor_list = sensor_list.push(sensor_view(
             pal,
             index,
             j,
             section.sensors.len(),
             sensor,
-            style_open,
+            state.sensors_open.contains(&(index, j)),
+            state.sensor_style_open.contains(&(index, j)),
+            section_labels.clone(),
         ));
     }
     sensor_list = sensor_list.push(
-        button(text("+ Add Sensor").size(BODY)).on_press(Message::SensorAdded(index)).padding(6),
+        button(text("+ Add Sensor").size(BODY))
+            .on_press(Message::AddSensorPressed(index))
+            .padding(6),
     );
     let sensors = container(sensor_list)
         .padding(10)
@@ -2982,7 +3284,7 @@ fn section_view<'a>(
 
     card(
         pal,
-        column![header, settings, sensors]
+        column![header, name_row, settings, sensors]
             .spacing(10)
             .width(Length::Fill),
     )
@@ -3112,36 +3414,61 @@ fn source_label(canonical: &str) -> &'static str {
         "workspace" => "Workspace",
         "tray" => "System tray",
         "notifications" => "Desktop notifications",
+        "command" => "Shell command",
+        "env_var" => "Environment variable",
+        "static_text" => "Static text",
         _ => "Sensor",
     }
 }
 
-/// Sensor card: identity header, source, action, then the collapsible
-/// "Style overrides" block (closed by default: overrides are optional).
-/// `sensor_count` bounds the ▼ arrow (disabled on the last sensor).
+/// Compact "type · 'param' · graph" summary of a sensor's collapsed row.
+fn sensor_summary(sensor: &Sensor) -> String {
+    let cfg = &sensor.source_config;
+    let param = cfg
+        .device
+        .as_deref()
+        .or(cfg.interface.as_deref())
+        .or(cfg.format.as_deref())
+        .or(cfg.command.as_deref())
+        .or(cfg.env_var.as_deref())
+        .or(cfg.static_text.as_deref())
+        .filter(|p| !p.is_empty());
+    let mut parts = vec![canonical_type(&sensor.source_type).to_string()];
+    if let Some(p) = param {
+        parts.push(format!("'{p}'"));
+    }
+    if sensor.draw_graph {
+        parts.push("graph".to_string());
+    }
+    parts.join(" · ")
+}
+
+/// Sensor row (accordion): the compact header carries the order, duplicate
+/// and remove controls; the form (name, description, source, graph, style)
+/// is the body, expanded on demand. `section_labels` feeds the cross-
+/// section "Move to" picklist (its number prefix is the 1-based index).
 fn sensor_view(
     pal: Palette,
     section_index: usize,
     sensor_index: usize,
     sensor_count: usize,
     sensor: &Sensor,
+    open: bool,
     style_open: bool,
+    section_labels: Vec<String>,
 ) -> Element<'_, Message> {
+    let title = sensor
+        .name
+        .clone()
+        .unwrap_or_else(|| source_label(canonical_type(&sensor.source_type)).to_string());
     let header = Row::new()
-        .push(
-            input("Name", sensor.name.as_deref().unwrap_or(""), move |value| {
-                Message::SensorNameChanged(section_index, sensor_index, value)
-            })
-            .width(Length::Fill),
-        )
-        .push(
-            input(
-                "Description",
-                sensor.description.as_deref().unwrap_or(""),
-                move |value| Message::SensorDescriptionChanged(section_index, sensor_index, value),
-            )
-            .width(Length::Fill),
-        )
+        .push(collapsible_header(
+            pal,
+            title,
+            sensor_summary(sensor),
+            open,
+            Message::ToggleSensor(section_index, sensor_index),
+        ))
         .push(move_btn(
             pal,
             "▲",
@@ -3155,13 +3482,41 @@ fn sensor_view(
             Message::SensorMoveDown(section_index, sensor_index),
         ))
         .push(
+            button(text("⧉").size(BODY))
+                .on_press(Message::SensorDuplicated(section_index, sensor_index))
+                .padding(5)
+                .style(move |t, s| btn_secondary(pal, t, s)),
+        )
+        .push(
             button(text("Remove").size(BODY))
-                .on_press(Message::SensorRemoved(section_index, sensor_index))
+                .on_press(Message::RemoveSensorPressed(section_index, sensor_index))
                 .padding(5),
         )
         .spacing(8)
         .align_y(Alignment::Center)
         .width(Length::Fill);
+
+    if !open {
+        return card(pal, column![header].width(Length::Fill)).into();
+    }
+
+    // Identity fields: the name input carries the id that add/duplicate
+    // focus, so renaming the fresh row is the next keystroke.
+    let fields = form_grid(vec![
+        ("Name", input("Name", sensor.name.as_deref().unwrap_or(""), move |value| {
+            Message::SensorNameChanged(section_index, sensor_index, value)
+        })
+        .id(sensor_name_id(section_index, sensor_index))
+        .width(Length::Fill)
+        .into()),
+        ("Description", input(
+            "Description",
+            sensor.description.as_deref().unwrap_or(""),
+            move |value| Message::SensorDescriptionChanged(section_index, sensor_index, value),
+        )
+        .width(Length::Fill)
+        .into()),
+    ]);
 
     // Options = the canonical types, alphabetical (roadmap2 #6); an
     // unknown/typo'd type from the file joins the list — still sorted —
@@ -3218,6 +3573,27 @@ fn sensor_view(
         .on_toggle(move |value| Message::SensorDrawGraphChanged(section_index, sensor_index, value))
         .into());
 
+    // Cross-section ordering: only when there is somewhere else to go.
+    let move_to = if section_labels.len() > 1 {
+        Some(form_cell(
+            "Move to",
+            picklist(section_labels, None::<String>, move |label: String| {
+                // The label prefix is the 1-based number of the target.
+                let target = label
+                    .split(' ')
+                    .next()
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .map(|n| n - 1)
+                    .unwrap_or(section_index);
+                Message::SensorMoveTo(section_index, sensor_index, target)
+            })
+            .width(Length::Fill)
+            .into(),
+        ))
+    } else {
+        None
+    };
+
     // Collapsed header shows which overrides are actually set.
     let summary = style_summary(
         &[
@@ -3232,15 +3608,21 @@ fn sensor_view(
     );
     let style_header = collapsible_header(
         pal,
-        "Style overrides",
+        "Style overrides".to_string(),
         summary,
         style_open,
         Message::ToggleSensorStyle(section_index, sensor_index),
     );
 
-    let mut root = column![header, source, icon, action, draw_graph, style_header]
+    // The header (title + controls) stays visible in both states, so an
+    // expanded sensor can still be collapsed, reordered, copied, removed.
+    let mut root = column![header, fields, source, icon, action, draw_graph]
         .spacing(6)
         .width(Length::Fill);
+    if let Some(move_to) = move_to {
+        root = root.push(move_to);
+    }
+    root = root.push(style_header);
 
     // Style numbers: -1 = disabled (the defaults apply), 0..=N = enabled.
     if style_open {
@@ -3297,7 +3679,7 @@ fn sensor_defaults_view(state: &PiumaSetup) -> Element<'_, Message> {
     );
     let header = collapsible_header(
         pal,
-        "Sensor Defaults",
+        "Sensor Defaults".to_string(),
         summary,
         state.defaults_expanded,
         Message::ToggleDefaults,
@@ -3356,7 +3738,7 @@ fn section_defaults_view(state: &PiumaSetup) -> Element<'_, Message> {
     );
     let header = collapsible_header(
         pal,
-        "Section Defaults",
+        "Section Defaults".to_string(),
         summary,
         state.sec_defaults_expanded,
         Message::ToggleSecDefaults,
@@ -3583,6 +3965,8 @@ mod tests {
             defaults_expanded: true,
             sec_defaults_expanded: true,
             sensor_style_open: HashSet::new(),
+            sections_collapsed: HashSet::new(),
+            sensors_open: HashSet::new(),
             current_file: "piuma.json".to_string(),
             snapshot: String::new(),
             modal: None,
@@ -4052,5 +4436,157 @@ mod tests {
         sorted.sort();
         assert_eq!(types, sorted, "the unknown type must sort in too");
         assert!(types.contains(&"z_custom_type".to_string()));
+    }
+
+    /// State seeded with two sections of one sensor each: enough to drive
+    /// the Sections update handlers without touching the user's file.
+    fn test_state() -> PiumaSetup {
+        PiumaSetup {
+            config: PiumaConfig {
+                sections: vec![
+                    Section {
+                        name: Some("Left".to_string()),
+                        sensors: vec![Sensor::default()],
+                        ..Section::default()
+                    },
+                    Section {
+                        name: Some("Right".to_string()),
+                        sensors: vec![Sensor::default()],
+                        ..Section::default()
+                    },
+                ],
+                ..PiumaConfig::default()
+            },
+            active_tab: Tab::Sections,
+            ..fixture()
+        }
+    }
+
+    /// The add-sensor flow: the modal carries the picked type and name
+    /// into a fresh sensor, which lands at the section's end already
+    /// expanded (and with its section unfolded).
+    #[test]
+    fn add_sensor_modal_appends_typed_sensor_and_opens_it() {
+        let mut s = test_state();
+        update(&mut s, Message::AddSensorPressed(0));
+        assert!(matches!(s.modal, Some(Modal::AddSensor { .. })));
+        update(&mut s, Message::ModalTypeChanged("perc_disk".to_string()));
+        update(&mut s, Message::ModalTextChanged("Root".to_string()));
+        update(&mut s, Message::ModalConfirm);
+        let sensors = &s.config.sections[0].sensors;
+        assert_eq!(sensors.len(), 2);
+        assert_eq!(sensors[1].source_type, "perc_disk");
+        assert_eq!(sensors[1].name.as_deref(), Some("Root"));
+        assert!(s.sensors_open.contains(&(0, 1)));
+        assert!(!s.sections_collapsed.contains(&0));
+        assert!(s.modal.is_none());
+    }
+
+    /// An empty name leaves the key absent (the bar renders value only).
+    #[test]
+    fn add_sensor_without_name_stays_unnamed() {
+        let mut s = test_state();
+        update(&mut s, Message::AddSensorPressed(1));
+        update(&mut s, Message::ModalTextChanged("   ".to_string()));
+        update(&mut s, Message::ModalConfirm);
+        let sensors = &s.config.sections[1].sensors;
+        assert_eq!(sensors.len(), 2);
+        assert!(sensors[1].name.is_none());
+    }
+
+    /// Adding at the end shifts the open keys of that section only.
+    #[test]
+    fn add_sensor_keeps_existing_open_keys_aligned() {
+        let mut s = test_state();
+        s.sensors_open.insert((0, 0));
+        s.sensor_style_open.insert((0, 0));
+        update(&mut s, Message::AddSensorPressed(0));
+        update(&mut s, Message::ModalConfirm);
+        assert!(s.sensors_open.contains(&(0, 0)) && s.sensors_open.contains(&(0, 1)));
+        assert!(s.sensor_style_open.contains(&(0, 0)), "earlier keys survive the insert");
+    }
+
+    /// Duplicating clones the sensor right after itself, marks the copy
+    /// with "(copy)" and opens it.
+    #[test]
+    fn duplicate_sensor_marks_the_copy() {
+        let mut s = test_state();
+        s.config.sections[0].sensors[0].name = Some("Disk".to_string());
+        update(&mut s, Message::SensorDuplicated(0, 0));
+        let sensors = &s.config.sections[0].sensors;
+        assert_eq!(sensors.len(), 2);
+        assert_eq!(sensors[1].name.as_deref(), Some("Disk (copy)"));
+        assert!(s.sensors_open.contains(&(0, 1)));
+    }
+
+    /// Removal goes through a confirmation that shifts the open keys of
+    /// the section down, so style/accordion blocks follow their sensor.
+    #[test]
+    fn remove_sensor_confirmation_remaps_open_sets() {
+        let mut s = test_state();
+        s.config.sections[0].sensors.push(Sensor::default());
+        s.sensors_open.insert((0, 1));
+        s.sensor_style_open.insert((0, 1));
+        update(&mut s, Message::RemoveSensorPressed(0, 0));
+        assert!(matches!(s.modal, Some(Modal::ConfirmRemoveSensor(0, 0))));
+        update(&mut s, Message::ModalConfirm);
+        assert_eq!(s.config.sections[0].sensors.len(), 1);
+        assert!(s.sensors_open.contains(&(0, 0)));
+        assert!(s.sensor_style_open.contains(&(0, 0)));
+    }
+
+    /// The last section is never removable: the button is inert and no
+    /// confirmation ever opens.
+    #[test]
+    fn last_section_is_never_removed() {
+        let mut s = test_state();
+        s.config.sections.truncate(1);
+        update(&mut s, Message::RemoveSectionPressed(0));
+        assert!(s.modal.is_none(), "no confirmation for the last section");
+    }
+
+    /// Removing a section drops its sensors' keys and shifts the later
+    /// sections — both the accordion and the style sets.
+    #[test]
+    fn remove_section_shifts_later_keys() {
+        let mut s = test_state();
+        s.sensor_style_open.insert((1, 0));
+        update(&mut s, Message::RemoveSectionPressed(0));
+        assert!(matches!(s.modal, Some(Modal::ConfirmRemoveSection(0))));
+        update(&mut s, Message::ModalConfirm);
+        assert_eq!(s.config.sections.len(), 1);
+        assert_eq!(s.config.sections[0].name.as_deref(), Some("Right"));
+        assert!(
+            s.sensor_style_open.contains(&(0, 0)),
+            "keys follow their section"
+        );
+    }
+
+    /// Cross-section move: the sensor is carried over to the target's
+    /// end and its open blocks follow it there.
+    #[test]
+    fn move_sensor_to_another_section_preserves_it() {
+        let mut s = test_state();
+        s.config.sections[0].sensors[0].source_type = "perc_disk".to_string();
+        s.sensors_open.insert((0, 0));
+        update(&mut s, Message::SensorMoveTo(0, 0, 1));
+        assert!(s.config.sections[0].sensors.is_empty());
+        assert_eq!(s.config.sections[1].sensors.len(), 2);
+        assert_eq!(s.config.sections[1].sensors[1].source_type, "perc_disk");
+        assert!(s.sensors_open.contains(&(1, 1)), "the open body follows");
+    }
+
+    /// The accordion toggles flip once per press.
+    #[test]
+    fn toggle_accordion_flips_once() {
+        let mut s = test_state();
+        update(&mut s, Message::ToggleSection(0));
+        assert!(s.sections_collapsed.contains(&0));
+        update(&mut s, Message::ToggleSection(0));
+        assert!(!s.sections_collapsed.contains(&0));
+        update(&mut s, Message::ToggleSensor(0, 0));
+        assert!(s.sensors_open.contains(&(0, 0)));
+        update(&mut s, Message::ToggleSensor(0, 0));
+        assert!(!s.sensors_open.contains(&(0, 0)));
     }
 }
