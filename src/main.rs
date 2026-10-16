@@ -161,7 +161,9 @@ struct SensorValue {
     /// otherwise), built by `workspace::buttons()` (roadmap2 #4).
     workspaces: Option<Vec<workspace::WorkspaceButton>>,
     /// Pinned pixel width of the value text (roadmap M5): net rate sensors
-    /// keep a stable box so the row never resizes with the content.
+    /// keep a stable box while the value moves inside its unit, and the pin
+    /// follows the value across ×1024 unit crossings (same tick), so it is
+    /// never narrower than the content.
     fixed_width: Option<u16>,
     /// Resolved theme file for the sensor's `icon` name (roadmap N1);
     /// `None` = no icon configured or the theme has no such icon.
@@ -838,6 +840,27 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                             })
                             .collect();
                         color_rules.sort_by(|a, b| a.0.total_cmp(&b.0));
+                        // Only the net rate sensors pin their value box
+                        // (roadmap M5), and the pin is the displayed value's
+                        // OWN tier: exact width (no headroom for units this
+                        // state never shows), constant while the value moves
+                        // inside the tier (figure spaces), moving with it on
+                        // a ×1024 crossing — same tick, same string, so the
+                        // box can never undershoot its content. Computed
+                        // before the literal because `value` is moved into
+                        // it; the measurement is cached per
+                        // font/size/patterns, so the per-tick rebuild only
+                        // re-measures when the tier label changes.
+                        let fixed_width = matches!(
+                            &s.source,
+                            config::SensorSource::UsedNetup { .. }
+                                | config::SensorSource::UsedNetdown { .. }
+                        )
+                        .then(|| {
+                            let font = value_font(&panel.config);
+                            let size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
+                            text_width::widest(&font, size, &sensors::net_rate_samples(&value))
+                        });
                         SensorValue {
                             // static_text and tray sensors render only their
                             // content: the name stays in the config (setup
@@ -870,26 +893,7 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                             workspaces: workspace_buttons,
                             icon,
                             icon_size,
-                            // Only the net rate sensors pin their width
-                            // (roadmap M5); the measurement is cached per
-                            // font/size, so the per-tick rebuild pays nothing
-                            // after the first run.
-                            fixed_width: if matches!(
-                                &s.source,
-                                config::SensorSource::UsedNetup { .. }
-                                    | config::SensorSource::UsedNetdown { .. }
-                            ) {
-                                let font = value_font(&panel.config);
-                                let size =
-                                    panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
-                                Some(text_width::widest(
-                                    &font,
-                                    size,
-                                    &sensors::net_rate_samples(),
-                                ))
-                            } else {
-                                None
-                            },
+                            fixed_width,
                         }
                     })
                     .collect();

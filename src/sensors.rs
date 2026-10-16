@@ -785,18 +785,30 @@ fn fmt_rate(bytes_per_sec: f64) -> String {
     format!("{pad}{int}.{dec} {}", RATE_UNITS[unit])
 }
 
-/// Formatting samples covering every tier's narrow and wide shapes (roadmap
-/// M5): the view pins the net sensor's width to the widest of them, so the
-/// box stays stable even when the tier label changes.
-pub fn net_rate_samples() -> Vec<String> {
-    let mut samples = vec![fmt_rate(0.0), "N/A".to_string()];
-    for tier in 0..RATE_UNITS.len() {
-        let scale = 1024f64.powi(tier as i32);
-        for value in [1.0, 777.7, 1023.9] {
-            samples.push(fmt_rate(value * scale));
-        }
+/// Formatting samples covering the narrow and wide shapes of the ONE tier
+/// a displayed value belongs to (roadmap M5): the view pins the net
+/// sensor's width to the widest of them, so inside a tier the box is exact
+/// and constant (figure spaces keep every shape the same width). The pin
+/// is derived from the same tick's string as the value, so when a rate
+/// crosses a ×1024 boundary both move together — the box can never
+/// undershoot what it holds, and it only ever resizes on that crossing.
+pub fn net_rate_samples(value: &str) -> Vec<String> {
+    let mut samples = vec!["N/A".to_string()];
+    let scale = 1024f64.powi(tier_of(value) as i32);
+    for v in [1.0, 777.7, 1023.9] {
+        samples.push(fmt_rate(v * scale));
     }
     samples
+}
+
+/// The tier index of a displayed value's unit suffix (`"134.6 B/s"` → 0,
+/// `"1.9 MB/s"` → 2); an unrecognised string (`"N/A"`) falls back to the
+/// base tier, whose samples still fit it with room to spare.
+fn tier_of(value: &str) -> usize {
+    value
+        .rsplit_once(' ')
+        .and_then(|(_, unit)| RATE_UNITS.iter().position(|u| *u == unit))
+        .unwrap_or(0)
 }
 
 /// Get network download rate as (text, bytes/s) (fixed-width format,
@@ -861,7 +873,12 @@ mod tests {
     /// makes the pixel width independent of the value. Spot checks included.
     #[test]
     fn net_rate_format_is_fixed_composition() {
-        for sample in net_rate_samples() {
+        let mut samples: Vec<String> = Vec::new();
+        for tier in 0..RATE_UNITS.len() {
+            let shown = fmt_rate(1023.9 * 1024f64.powi(tier as i32));
+            samples.extend(net_rate_samples(&shown));
+        }
+        for sample in samples {
             if sample == "N/A" {
                 continue;
             }
@@ -870,8 +887,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing decimal dot in {sample}"));
             assert_eq!(int.chars().count(), RATE_INT_SLOTS, "{sample}");
             assert!(
-                int.chars()
-                    .all(|c| c.is_ascii_digit() || c == FIGURE_SPACE),
+                int.chars().all(|c| c.is_ascii_digit() || c == FIGURE_SPACE),
                 "{sample}"
             );
             assert!(rest.starts_with(|c: char| c.is_ascii_digit()), "{sample}");
@@ -881,6 +897,32 @@ mod tests {
         assert_eq!(fmt_rate(1023.9), "1023.9 B/s");
         assert_eq!(fmt_rate(1024.0), format!("{f}{f}{f}1.0 KB/s"));
         assert_eq!(fmt_rate(2_000_000.0), format!("{f}{f}{f}1.9 MB/s"));
+    }
+
+    /// The pin is exactly the displayed value's width: same tier ⇒ equal
+    /// measured pixels (no headroom) and never below it (no wrap), for
+    /// every shape of every tier — the extremes (three figure spaces and
+    /// the bare `1023.9`) cover any digit/figure-space width ratio.
+    /// `"N/A"` pins to the base tier and still fits.
+    #[test]
+    fn net_rate_pin_is_exact_for_its_tier() {
+        let font = iced::font::Font {
+            weight: iced::font::Weight::Bold,
+            ..iced::font::Font::with_name("Noto Sans")
+        };
+        for tier in 0..RATE_UNITS.len() {
+            let scale = 1024f64.powi(tier as i32);
+            for v in [0.0, 1.0, 12.3, 134.6, 777.7, 1023.9] {
+                let shown = fmt_rate(v * scale);
+                let pin = crate::text_width::widest(&font, 12, &net_rate_samples(&shown));
+                let width = crate::text_width::widest(&font, 12, std::slice::from_ref(&shown));
+                assert_eq!(pin, width, "{shown}");
+            }
+        }
+        let shown = "N/A".to_string();
+        let pin = crate::text_width::widest(&font, 12, &net_rate_samples(&shown));
+        let width = crate::text_width::widest(&font, 12, std::slice::from_ref(&shown));
+        assert!(pin >= width, "N/A ({width}px) must fit its pin ({pin}px)");
     }
 
     /// Titles of `WINDOW_TITLE_MAX` chars stay intact; longer ones are cut
