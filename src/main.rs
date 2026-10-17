@@ -44,6 +44,7 @@ mod sensor_runner;
 mod sensors;
 mod text_width;
 mod tray;
+mod windows;
 mod workspace;
 // Layout padding lives with the icon sizing helpers (icons.rs): the view
 // and the row-height size formula must read the same number.
@@ -168,6 +169,10 @@ struct SensorValue {
     /// Workspace buttons when the source is a `workspace` sensor (`None`
     /// otherwise), built by `workspace::buttons()` (roadmap2 #4).
     workspaces: Option<Vec<workspace::WorkspaceButton>>,
+    /// Taskbar slots when the source is a `taskbar` sensor (`None`
+    /// otherwise), one per open window, built per tick by
+    /// `windows::task_icons()`.
+    taskbar: Option<Vec<windows::TaskIcon>>,
     /// Pinned pixel width of the value text (roadmap M5): net rate sensors
     /// keep a stable box while the value moves inside its unit, and the pin
     /// follows the value across ×1024 unit crossings (same tick), so it is
@@ -241,6 +246,12 @@ struct Panel {
     /// The notification history list popup (the notifications sensor's
     /// click): window id + the wheel scroll state.
     notif_list: Option<(iced::window::Id, NotifList)>,
+    /// The taskbar's right-click menu: window id + the window it acts
+    /// on.
+    taskbar_menu: Option<(iced::window::Id, TaskbarMenu)>,
+    /// Workspace row under the cursor in the taskbar menu
+    /// (`TaskbarMenuHover`), `None` outside every row.
+    taskbar_menu_hover: Option<u32>,
     /// Trend history for the `draw_graph` sensors' hover popup: one
     /// dense ring of samples per config, rebuilt on reload (see
     /// `graphs`).
@@ -287,6 +298,14 @@ struct TrayMenu {
 #[derive(Clone, Debug)]
 struct NotifList {
     offset: u32,
+}
+
+/// The taskbar's right-click menu: which window the workspace rows
+/// move (the address, never an index — a tick may rebuild the icons
+/// while the menu is open).
+#[derive(Clone, Debug)]
+struct TaskbarMenu {
+    address: String,
 }
 
 /// The open sensor-graph popup: which sensor's trend it draws and the
@@ -381,6 +400,23 @@ enum Message {
     /// Row clicked in the notification list popup: run that entry's
     /// spec `default` action and close the popup.
     NotifListClicked(u32),
+    /// Taskbar icon pressed (left): focus that window (with its
+    /// workspace).
+    TaskbarLeft(String),
+    /// Taskbar icon pressed (middle): request that window's graceful
+    /// close.
+    TaskbarMiddle(String),
+    /// Taskbar icon pressed (right): open the move-to-workspace menu
+    /// for that window, under the cursor.
+    TaskbarRight(String),
+    /// Workspace chosen in the taskbar menu: move the window there
+    /// silently and close the menu.
+    TaskbarMenuWs(u32),
+    /// Workspace row under the cursor in the taskbar menu (`None`
+    /// outside every row).
+    TaskbarMenuHover(Option<u32>),
+    /// Left the taskbar menu's surface: close it.
+    TaskbarMenuClosed,
     /// Tray state changed (item added/removed/updated): rebuild now.
     TrayItemsChanged,
     /// A notification arrived, was replaced, expired or closed: rebuild.
@@ -843,6 +879,13 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                         let workspace_buttons =
                             matches!(s.source, config::SensorSource::Workspace {})
                                 .then(workspace::buttons);
+                        // Taskbar sensors rebuild their icon slots from
+                        // hyprctl per tick (one fork, like every polling
+                        // sensor); the icons resolve through the memoized
+                        // theme lookups.
+                        let taskbar_icons =
+                            matches!(s.source, config::SensorSource::Taskbar {})
+                                .then(windows::task_icons);
                         // Style precedence, per style GROUP: a sensor takes a
                         // group over only when it defines the group's key
                         // colour (`border_color`, `bg_color`, `text_color`).
@@ -1016,6 +1059,7 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                             action: s.action.clone(),
                             tray: tray_icons,
                             workspaces: workspace_buttons,
+                            taskbar: taskbar_icons,
                             icon,
                             icon_size,
                             fixed_width,
@@ -1536,6 +1580,73 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             }
             Command::none()
         }
+        Message::TaskbarLeft(address) => {
+            // Focus is the pick: it brings the window with its
+            // workspace (the click's own address, focus-follows-mouse
+            // irrelevant).
+            windows::focus(&address);
+            Command::none()
+        }
+        Message::TaskbarMiddle(address) => {
+            windows::close_window(&address);
+            Command::none()
+        }
+        Message::TaskbarRight(address) => {
+            // Any open menu closes first (a press elsewhere = move it);
+            // the new one opens under the cursor.
+            let mut cmds: Vec<Command<Message>> = Vec::new();
+            if let Some((id, _)) = panel.taskbar_menu.take() {
+                panel.taskbar_menu_hover = None;
+                cmds.push(iced::window::close(id));
+            }
+            let Some(at) = tray::cursor_output_point(panel) else {
+                return if cmds.is_empty() {
+                    Command::none()
+                } else {
+                    Command::batch(cmds)
+                };
+            };
+            let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
+            let font = panel_font(&panel.config);
+            let (w, h) = taskbar_menu_size(&font, font_size);
+            let (sw, sh) = unsafe { (SCREEN_WIDTH as i32, SCREEN_HEIGHT as i32) };
+            let (anchor, margin) = menu_placement(at.0, at.1, w, h, sw, sh);
+            let (id, open) = Message::layershell_open(NewLayerShellSettings {
+                size: LayerSize::px(w, h),
+                layer: Layer::Overlay,
+                anchor,
+                exclusive_zone: None,
+                margin: Some(margin),
+                keyboard_interactivity: KeyboardInteractivity::None,
+                output_option: popup_output_option(),
+                namespace: Some("piuma-taskbar-menu".to_string()),
+                ..Default::default()
+            });
+            panel.taskbar_menu = Some((id, TaskbarMenu { address }));
+            cmds.push(open);
+            Command::batch(cmds)
+        }
+        Message::TaskbarMenuWs(workspace) => {
+            // The menu carries the target: move it silently (the bar's
+            // workspace stays) and the menu goes with the action.
+            if let Some((id, menu)) = panel.taskbar_menu.take() {
+                panel.taskbar_menu_hover = None;
+                windows::move_to_workspace(&menu.address, workspace);
+                return iced::window::close(id);
+            }
+            Command::none()
+        }
+        Message::TaskbarMenuHover(row) => {
+            panel.taskbar_menu_hover = row;
+            Command::none()
+        }
+        Message::TaskbarMenuClosed => {
+            if let Some((id, _)) = panel.taskbar_menu.take() {
+                panel.taskbar_menu_hover = None;
+                return iced::window::close(id);
+            }
+            Command::none()
+        }
         Message::SensorHovered(section_index, sensor_index, hovered) => {
             if hovered {
                 panel.hovered = Some((section_index, sensor_index));
@@ -1735,6 +1846,11 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
             return notif_list_view(panel);
         }
     }
+    if let Some((id, _)) = panel.taskbar_menu.as_ref() {
+        if *id == window {
+            return taskbar_menu_view(panel);
+        }
+    }
     if let Some(gp) = panel.graph_popup.as_ref() {
         if gp.id == window {
             return graph_popup_view(panel, gp);
@@ -1809,6 +1925,11 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
             // A workspace sensor with no buttons (hyprctl unreachable)
             // hides like the tray does (roadmap2 #4).
             if s.workspaces.as_ref().is_some_and(|b| b.is_empty()) {
+                return None;
+            }
+            // Same rule for a taskbar whose client list came back empty
+            // (hyprctl unreachable): no empty icon strip.
+            if s.taskbar.as_ref().is_some_and(|slots| slots.is_empty()) {
                 return None;
             }
             let sensor_text_color = s.text_color.as_ref().map(|c| *c).unwrap_or(section_text);
@@ -1894,6 +2015,11 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
                     row = row.push(icons::widget(path, s.icon_size as f32));
                 }
                 row.push(ws_row).into()
+            } else if let Some(slots) = &s.taskbar {
+                // One icon per open window: the slots own their mouse
+                // handling like tray icons (left focuses, middle closes,
+                // right opens the move menu).
+                windows::row(slots).into()
             } else {
                 // Icon first when the sensor declares one (roadmap N1), then
                 // the optional name, then the value: an empty name still
@@ -1961,8 +2087,9 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
             // Tray icons carry their own MouseAreas (press/wheel/tooltip);
             // wrapping them in the sensor MouseArea as well would handle the
             // same events twice, so a tray sensor stays bare — and so does a
-            // workspace sensor: its buttons press themselves.
-            if s.tray.is_some() || s.workspaces.is_some() {
+            // workspace sensor (its buttons press themselves) and the
+            // taskbar (its icon slots press themselves).
+            if s.tray.is_some() || s.workspaces.is_some() || s.taskbar.is_some() {
                 return Some(styled_container.into());
             }
 
@@ -4263,6 +4390,82 @@ fn notif_list_view(panel: &Panel) -> Element<'_, Message> {
         .into()
 }
 
+// ── taskbar menu window ─────────────────────────────────────────────
+
+/// Surface size for the taskbar menu: one `menu_row_h` row per
+/// workspace (1..9), width from the widest label — exact, so every
+/// row stays hit-exact.
+fn taskbar_menu_size(font: &Font, font_size: u32) -> (u32, u32) {
+    let labels: Vec<String> = (1..=9).map(|n| n.to_string()).collect();
+    let text_w = u32::from(text_width::widest(font, font_size, &labels));
+    let w = text_w.saturating_add(2 * MENU_PAD).max(48);
+    let h = 9u32
+        .saturating_mul(menu_row_h(font_size))
+        .saturating_add(2 * MENU_PAD);
+    (w, h)
+}
+
+/// The taskbar's move menu: workspace rows 1..9, the hovered one
+/// highlighted; a press moves the menu's window there silently and
+/// closes the menu, and leaving the surface closes without acting
+/// (same exit rule as the tray menu).
+fn taskbar_menu_view(panel: &Panel) -> Element<'_, Message> {
+    if panel.taskbar_menu.is_none() {
+        // The window id exists only together with its state.
+        return container(text(""))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+    }
+    let st = popup_style(&panel.config, panel.palette.as_ref());
+    let font = panel_font(&panel.config);
+    let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
+    let row_h = menu_row_h(font_size);
+    let mut list: Column<'_, Message> = Column::new();
+    for workspace in 1..=9u32 {
+        let hovered = panel.taskbar_menu_hover == Some(workspace);
+        let cell = container(
+            text(workspace.to_string())
+                .size(font_size)
+                .color(st.text)
+                .font(font)
+                .width(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fixed(row_h as f32))
+        .center_x(Length::Fill)
+        .style(move |_theme| ContainerStyle {
+            background: hovered.then(|| Background::Color(st.bg_hover)),
+            ..ContainerStyle::default()
+        });
+        list = list.push(
+            MouseArea::new(cell)
+                .on_press(Message::TaskbarMenuWs(workspace))
+                .on_enter(Message::TaskbarMenuHover(Some(workspace)))
+                .on_exit(Message::TaskbarMenuHover(None))
+                .interaction(iced::mouse::Interaction::Pointer),
+        );
+    }
+    let surface = styled_box(
+        container(list)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(iced::Padding::from(MENU_PAD as f32))
+            .into(),
+        Some(st.bg),
+        Some(st.border),
+        st.border_width.min(u16::MAX as u32) as u16,
+        st.border_radius.min(u16::MAX as u32) as u16,
+        &st.border_type,
+        [false, false, false, false],
+        // The list carries the padding; the box only draws its border.
+        0,
+        Length::Fill,
+        Length::Fill,
+    );
+    MouseArea::new(surface).on_exit(Message::TaskbarMenuClosed).into()
+}
+
 // ── style ───────────────────────────────────────────────────────────
 
 fn style(_panel: &Panel, _theme: &iced::Theme) -> iced::theme::Style {
@@ -4500,6 +4703,8 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         tray_menu_hover: None,
                         tray_menu_gen: 0,
                         notif_list: None,
+                        taskbar_menu: None,
+                        taskbar_menu_hover: None,
                         graphs,
                         graph_popup: None,
                         graph_link: None,
@@ -4606,8 +4811,9 @@ mod tests {
         focused_output_in, icons_theme, lock_pid, menu_placement, menu_row_h, menu_size,
         monitor_names_json, notif_list_row_h, notif_list_size, notifications, palette,
         panel_background, popup_card_h, popup_missed_tick, popup_placement, popup_style,
-        scroll_rows, section_touch, shifted_surface_rect, text_width, wallpaper_plan, GraphPopup,
-        PopupStyle, MENU_INDENT, MENU_MAX_W, MENU_MIN_W, MENU_PAD, NOTIF_LIST_W_MAX,
+        scroll_rows, section_touch, shifted_surface_rect, taskbar_menu_size, text_width,
+        wallpaper_plan, GraphPopup, PopupStyle, MENU_INDENT, MENU_MAX_W, MENU_MIN_W, MENU_PAD,
+        NOTIF_LIST_W_MAX,
     };
     use iced::font::Font;
     use iced_exwlshell::reexport::Anchor;
@@ -4907,6 +5113,19 @@ mod tests {
         let (w_short, h_short) = notif_list_size(&[row(0)], &font, 14);
         assert_eq!(h_short, notif_list_row_h(14) + 2 * MENU_PAD);
         assert!(w_short < w, "fewer rows measure narrower");
+    }
+
+    /// The taskbar menu is exactly nine workspace rows (1..9) plus the
+    /// pad layers, and never narrower than a hit-friendly minimum.
+    #[test]
+    fn taskbar_menu_size_prices_nine_workspace_rows() {
+        let font = Font::with_name("Noto Sans");
+        let (w, h) = taskbar_menu_size(&font, 14);
+        assert_eq!(h, 9 * menu_row_h(14) + 2 * MENU_PAD);
+        assert!(w >= 48, "the menu keeps a hit-friendly minimum, got {w}");
+        let (w_big, h_big) = taskbar_menu_size(&font, 24);
+        assert!(w_big >= w, "a bigger font never measures narrower");
+        assert!(h_big > h, "a bigger font never measures shorter");
     }
 
     /// Down-right from the cursor; flips to the opposite edge when the

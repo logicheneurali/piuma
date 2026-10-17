@@ -385,6 +385,11 @@ pub enum SensorSource {
     /// `panel.notifications` block).
     #[serde(rename = "notifications")]
     Notifications {},
+    /// Taskbar: one icon per open window — left focuses it, middle
+    /// requests its close, right opens the move-to-workspace menu
+    /// (windows.rs reads `hyprctl clients -j` per sensor tick).
+    #[serde(rename = "taskbar")]
+    Taskbar {},
 }
 
 // ── defaults ────────────────────────────────────────────────────────
@@ -735,6 +740,22 @@ mod tests {
         ));
         let out = serde_json::to_string(&cfg).expect("config must serialize");
         assert!(out.contains(r#""notifications""#), "got: {out}");
+    }
+
+    /// The taskbar sensor type parses (parameterless, like `window`) and
+    /// survives a save roundtrip.
+    #[test]
+    fn taskbar_sensor_parses_and_roundtrips() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[{"sensors":[{"name":"T","source":{"type":"taskbar"}}]}]}}"#,
+        )
+        .expect("sensor must parse");
+        assert!(matches!(
+            cfg.panel.sections[0].sensors[0].source,
+            SensorSource::Taskbar {}
+        ));
+        let out = serde_json::to_string(&cfg).expect("config must serialize");
+        assert!(out.contains(r#""taskbar""#), "got: {out}");
     }
 }
 

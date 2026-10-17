@@ -3861,6 +3861,7 @@ const SOURCE_TYPES: &[&str] = &[
     // no numeric category
     "net_state", "uptime", "clock", "calendar", "window", "workspace",
     "command", "env_var", "static_text", "tray", "notifications",
+    "taskbar",
 ];
 
 /// The sensor-type combo's options (roadmap2 #6): every canonical type
@@ -3909,6 +3910,7 @@ fn source_label(canonical: &str) -> &'static str {
         "workspace" => "Workspace",
         "tray" => "System tray",
         "notifications" => "Desktop notifications",
+        "taskbar" => "Window taskbar",
         "command" => "Shell command",
         "env_var" => "Environment variable",
         "static_text" => "Static text",
