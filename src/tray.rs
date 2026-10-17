@@ -30,7 +30,7 @@ use iced::futures::channel::mpsc::Sender;
 use iced::futures::channel::oneshot;
 use iced::futures::stream::StreamExt;
 use iced::widget::container::Style as ContainerStyle;
-use iced::widget::{container, image, text, MouseArea, Row};
+use iced::widget::{container, image, MouseArea, Row};
 use iced::{Element, Length, Subscription};
 use iced_exwlshell::reexport::Anchor;
 use zbus::fdo::RequestNameFlags;
@@ -1073,37 +1073,16 @@ pub fn scroll_units(delta: iced::mouse::ScrollDelta) -> Option<(i32, bool)> {
 
 // ── view ────────────────────────────────────────────────────────────
 
-/// The tray sensor's resolved visual style, supplied by the view. It drives
-/// the tooltip only: the popup renders a copy of the sensor box, so it
-/// matches the styling of the icons it belongs to (the bg already carries
-/// the section fallback when the sensor itself is transparent).
-#[derive(Clone)]
-pub struct Style {
-    pub bg_color: Option<iced::Color>,
-    pub text_color: Option<iced::Color>,
-    pub border_color: Option<iced::Color>,
-    pub border_width: u16,
-    pub border_radius: u16,
-    /// `full`, `corners`, `underline`, `upperline`, `left` or `right`.
-    pub border_type: String,
-    pub padding: u16,
-}
-
 /// The tray sensor's content: one widget per item at the current icon
-/// target (`icon_target()`, sized by main to the sensor's usable height), with the
-/// item's tooltip and its own mouse handling (left/middle/right press →
-/// `Activate`/`SecondaryActivate`/`ContextMenu`, wheel → `Scroll`).
+/// target (`icon_target()`, sized by main to the sensor's usable
+/// height), with its own mouse handling (left/middle/right press →
+/// `Activate`/`SecondaryActivate`/`ContextMenu`, wheel → `Scroll`,
+/// hover → the tooltip window, see `TooltipShow`).
 /// Built from a snapshot, so messages carry the item's bus name + path —
 /// never an index that could go stale before the click lands.
 /// `style` is the sensor's own look; the tooltip reuses it via
 /// `crate::styled_box` (the 5px tooltip wrapper gap stays outside it).
-pub fn row<'a>(
-    icons: &'a [TrayIcon],
-    font_size: u32,
-    font: iced::font::Font,
-    style: &Style,
-    tip: iced::widget::tooltip::Position,
-) -> Element<'a, Message> {
+pub fn row<'a>(icons: &'a [TrayIcon]) -> Element<'a, Message> {
     let mut row = Row::new().spacing(4);
     for icon in icons {
         let size = Length::Fixed(f32::from(icon_target()));
@@ -1137,6 +1116,12 @@ pub fn row<'a>(
         };
 
         let (bus, path) = (icon.bus.clone(), icon.path.clone());
+        // Hover opens the tooltip as its own window (like the
+        // taskbar's): the bar surface is one `thickness` tall, an
+        // in-widget overlay would only land on the bar itself. The id
+        // rides both messages, so a stale leave cannot close the next
+        // item's tooltip; an empty text is ignored on the open side.
+        let tip_id = format!("{bus}:{path}");
         let interactive = MouseArea::new(framed)
             .on_press(Message::TrayIconPressed(
                 bus.clone(),
@@ -1156,42 +1141,14 @@ pub fn row<'a>(
             .on_scroll(move |delta| {
                 Message::TrayIconScrolled(bus.clone(), path.clone(), scroll_units(delta))
             })
+            .on_enter(Message::TooltipShow {
+                id: tip_id.clone(),
+                text: icon.tooltip.clone(),
+            })
+            .on_exit(Message::TooltipHide { id: tip_id })
             .interaction(iced::mouse::Interaction::Pointer);
 
-        row = if icon.tooltip.is_empty() {
-            row.push(interactive)
-        } else {
-            // The spec allows filtering the tooltip markup (done when the
-            // state was refreshed), the title/text shows as-is here. The
-            // content box is the sensor's own styling (same bg/border/
-            // radius/padding, text in the sensor's colour), so the popup
-            // reads as a copy of the sensor instead of bare floating text.
-            row.push(
-                iced::widget::tooltip(
-                    interactive,
-                    crate::styled_box(
-                        text(&icon.tooltip)
-                            .size(font_size)
-                            .color_maybe(style.text_color)
-                            .font(font)
-                            .into(),
-                        style.bg_color,
-                        style.border_color,
-                        style.border_width,
-                        style.border_radius,
-                        &style.border_type,
-                        [false, false, false, false],
-                        style.padding,
-                        Length::Shrink,
-                        Length::Shrink,
-                    ),
-                    // Away from the bar's edge (the side passed by the
-                    // view) with a gap: the popup never sits on the bar.
-                    tip,
-                )
-                .gap(crate::TOOLTIP_GAP),
-            )
-        };
+        row = row.push(interactive);
     }
     row.into()
 }
@@ -1238,7 +1195,7 @@ pub fn hint_point(panel: &crate::Panel) -> Option<(i32, i32)> {
 /// is output-relative and SNI hints are global. (Was "the last monitor
 /// of `hyprctl monitors -j`", which aimed the hint at the other output
 /// once a second monitor joined the session.)
-fn output_origin() -> (i32, i32) {
+pub fn output_origin() -> (i32, i32) {
     crate::focused_output()
         .map(|(_, x, y)| (x, y))
         .unwrap_or((0, 0))

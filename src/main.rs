@@ -258,6 +258,9 @@ struct Panel {
     /// Address of the taskbar icon under the cursor (`None` = none):
     /// the row's hover fill.
     taskbar_hover: Option<String>,
+    /// The tooltip window (taskbar or tray hover): window id + source
+    /// and fitted text.
+    bar_tooltip: Option<(iced::window::Id, BarTooltip)>,
     /// Trend history for the `draw_graph` sensors' hover popup: one
     /// dense ring of samples per config, rebuilt on reload (see
     /// `graphs`).
@@ -312,6 +315,14 @@ struct NotifList {
 #[derive(Clone, Debug)]
 struct TaskbarMenu {
     address: String,
+}
+
+/// The open bar tooltip window: its source (so a stale leave knows
+/// whether it still owns the surface) and the fitted text shown.
+#[derive(Clone, Debug)]
+struct BarTooltip {
+    id: String,
+    text: String,
 }
 
 /// The open sensor-graph popup: which sensor's trend it draws and the
@@ -426,11 +437,29 @@ enum Message {
     /// enter (iced visits the tree in order), and a stale exit must not
     /// drop the new hover.
     TaskbarMenuLeft(u32),
-    /// Taskbar icon under the cursor (`None` = none).
-    TaskbarIconHover(Option<String>),
-    /// Taskbar icon the cursor left: same stale-exit rule as the menu
-    /// rows (`TaskbarMenuLeft`).
-    TaskbarIconLeft(String),
+    /// Taskbar icon under the cursor: the hover fill plus its title
+    /// tooltip (empty title → no tooltip window).
+    TaskbarIconEnter {
+        address: String,
+        title: String,
+    },
+    /// Taskbar icon the cursor left: clears that icon's hover (stale
+    /// exit guard, tree order) and closes its tooltip (same rule).
+    TaskbarIconLeave {
+        address: String,
+    },
+    /// Show a tooltip window for a bar source (`id`: tray `bus:path`)
+    /// just off the bar's edge — never inside the bar surface, which is
+    /// only `thickness` tall.
+    TooltipShow {
+        id: String,
+        text: String,
+    },
+    /// The source left: close only if it still owns the tooltip (a
+    /// stale exit must not drop the next one).
+    TooltipHide {
+        id: String,
+    },
     /// Left the taskbar menu's surface: close it.
     TaskbarMenuClosed,
     /// Tray state changed (item added/removed/updated): rebuild now.
@@ -1665,17 +1694,20 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             }
             Command::none()
         }
-        Message::TaskbarIconHover(target) => {
-            panel.taskbar_hover = target;
-            Command::none()
+        Message::TaskbarIconEnter { address, title } => {
+            panel.taskbar_hover = Some(address.clone());
+            tooltip_open(panel, address, title)
         }
-        Message::TaskbarIconLeft(address) => {
-            // Same stale-exit rule as `TaskbarMenuLeft`.
+        Message::TaskbarIconLeave { address } => {
+            // Same stale-exit rule as `TaskbarMenuLeft`: only the icon
+            // still under the cursor keeps (or clears) the hover.
             if panel.taskbar_hover.as_deref() == Some(address.as_str()) {
                 panel.taskbar_hover = None;
             }
-            Command::none()
+            tooltip_close(panel, address)
         }
+        Message::TooltipShow { id, text } => tooltip_open(panel, id, text),
+        Message::TooltipHide { id } => tooltip_close(panel, id),
         Message::TaskbarMenuClosed => {
             if let Some((id, _)) = panel.taskbar_menu.take() {
                 panel.taskbar_menu_hover = None;
@@ -1887,6 +1919,11 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
             return taskbar_menu_view(panel);
         }
     }
+    if let Some((id, _)) = panel.bar_tooltip.as_ref() {
+        if *id == window {
+            return tooltip_window_view(panel);
+        }
+    }
     if let Some(gp) = panel.graph_popup.as_ref() {
         if gp.id == window {
             return graph_popup_view(panel, gp);
@@ -2011,21 +2048,7 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
             // a transparent sensor shows the section behind it on the bar,
             // so the tooltip borrows that colour to stay legible anywhere.
             let main: Element<'a, Message> = if let Some(icons) = &s.tray {
-                tray::row(
-                    icons,
-                    font_size,
-                    font_obj,
-                    &tray::Style {
-                        bg_color: s.bg_color.or(Some(section_bg)),
-                        text_color: s.text_color,
-                        border_color: s.border_color,
-                        border_width: s.border_width,
-                        border_radius: s.border_radius,
-                        border_type: s.border_type.clone(),
-                        padding: s.padding,
-                    },
-                    tooltip_side(panel_anchor(&panel.config)),
-                )
+                tray::row(icons)
             } else if let Some(buttons) = &s.workspaces {
                 // One button per available workspace (roadmap2 #4): the
                 // names shown, the active one inverted, click focuses —
@@ -2061,20 +2084,9 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
                 // slot wins over it.
                 let active_bg = s.bg_color.or(Some(section_bg));
                 let row_style = windows::RowStyle {
-                    sensor: &tray::Style {
-                        bg_color: active_bg,
-                        text_color: s.text_color,
-                        border_color: s.border_color,
-                        border_width: s.border_width,
-                        border_radius: s.border_radius,
-                        border_type: s.border_type.clone(),
-                        padding: s.padding,
-                    },
-                    font: font_obj,
-                    font_size,
+                    radius: s.border_radius,
                     hover_bg: s.bg_color_hover.or(active_bg),
                     active_bg,
-                    tip: tooltip_side(panel_anchor(&panel.config)),
                 };
                 windows::row(slots, panel.taskbar_hover.as_deref(), &row_style).into()
             } else {
@@ -2660,20 +2672,155 @@ fn panel_anchor(config: &config::Config) -> Anchor {
     }
 }
 
-/// The side a tooltip opens on: away from the panel's anchored edge —
-/// a top bar's tooltips drop below the icon (never over the bar
-/// itself), a bottom bar's rise above it, side bars push inward.
-fn tooltip_side(anchor: Anchor) -> iced::widget::tooltip::Position {
-    use iced::widget::tooltip::Position;
+/// Anchor + edge margins for a tooltip window at the cursor point:
+/// just off the bar's anchored edge on the screen's inner side (a top
+/// bar's tooltip drops below the surface, never onto it — the bar
+/// surface is one `thickness` tall, there is no room inside it),
+/// centred on the cursor along the bar and clamped inside the output.
+fn tooltip_placement(
+    anchor: Anchor,
+    at: (i32, i32),
+    w: u32,
+    h: u32,
+    thickness: i32,
+    sw: i32,
+    sh: i32,
+) -> (Anchor, Margin) {
+    let (w, h) = (w as i32, h as i32);
+    let gap = TOOLTIP_GAP as i32;
     if anchor.contains(Anchor::Top) {
-        Position::Bottom
+        let left = (at.0 - w / 2).clamp(0, (sw - w).max(0));
+        (
+            Anchor::Left | Anchor::Top,
+            Margin {
+                left,
+                top: thickness + gap,
+                right: 0,
+                bottom: 0,
+            },
+        )
     } else if anchor.contains(Anchor::Bottom) {
-        Position::Top
+        let left = (at.0 - w / 2).clamp(0, (sw - w).max(0));
+        (
+            Anchor::Left | Anchor::Bottom,
+            Margin {
+                left,
+                top: 0,
+                right: 0,
+                bottom: thickness + gap,
+            },
+        )
     } else if anchor.contains(Anchor::Left) {
-        Position::Right
+        let top = (at.1 - h / 2).clamp(0, (sh - h).max(0));
+        (
+            Anchor::Left | Anchor::Top,
+            Margin {
+                left: thickness + gap,
+                top,
+                right: 0,
+                bottom: 0,
+            },
+        )
     } else {
-        Position::Left
+        let top = (at.1 - h / 2).clamp(0, (sh - h).max(0));
+        (
+            Anchor::Right | Anchor::Top,
+            Margin {
+                left: 0,
+                top,
+                right: thickness + gap,
+                bottom: 0,
+            },
+        )
     }
+}
+
+/// The cursor point for tooltip placement, output-relative: the
+/// compositor's own view (`hyprctl cursorpos`) — `last_cursor` is
+/// stale when the pointer enters the bar straight from a window below
+/// (a layer surface only receives motion once the cursor is inside),
+/// and the tooltip would open at the previous hover's spot.
+fn tooltip_cursor_point(panel: &Panel) -> (i32, i32) {
+    if let Some((gx, gy)) = hyprctl_cursor_global() {
+        let (ox, oy) = tray::output_origin();
+        return (gx - ox, gy - oy);
+    }
+    tray::cursor_output_point(panel).unwrap_or((0, 0))
+}
+
+/// The cursor's global position straight from the compositor.
+fn hyprctl_cursor_global() -> Option<(i32, i32)> {
+    let out = std::process::Command::new("hyprctl")
+        .args(["cursorpos", "-j"])
+        .output()
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    Some((v["x"].as_i64()? as i32, v["y"].as_i64()? as i32))
+}
+
+/// Open (or retarget) the tooltip window for a bar source: the text is
+/// fitted to half the output width, so a long title is cut like the
+/// tray menu's labels instead of stretching off-screen.
+fn tooltip_open(panel: &mut Panel, id: String, text: String) -> Command<Message> {
+    if text.is_empty() {
+        return Command::none();
+    }
+    // Already this source's tooltip: nothing to rebuild.
+    if panel
+        .bar_tooltip
+        .as_ref()
+        .is_some_and(|(_, tip)| tip.id == id)
+    {
+        return Command::none();
+    }
+    let mut cmds: Vec<Command<Message>> = Vec::new();
+    if let Some((win, _)) = panel.bar_tooltip.take() {
+        cmds.push(iced::window::close(win));
+    }
+    let font = panel_font(&panel.config);
+    let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
+    let (sw, sh) = unsafe { (SCREEN_WIDTH as i32, SCREEN_HEIGHT as i32) };
+    let budget = (sw as u32 / 2).saturating_sub(2 * MENU_PAD);
+    let fitted = text_width::fit(&font, font_size, &[(text, budget)])
+        .pop()
+        .unwrap_or_default();
+    let text_w = u32::from(text_width::widest(&font, font_size, std::slice::from_ref(&fitted)));
+    let w = text_w.saturating_add(2 * MENU_PAD).max(48);
+    let h = menu_row_h(font_size).saturating_add(2 * MENU_PAD);
+    let at = tooltip_cursor_point(panel);
+    let thickness = panel_thickness(&panel.config) as i32;
+    let (anchor, margin) =
+        tooltip_placement(panel_anchor(&panel.config), at, w, h, thickness, sw, sh);
+    let (win, open) = Message::layershell_open(NewLayerShellSettings {
+        size: LayerSize::px(w, h),
+        layer: Layer::Overlay,
+        anchor,
+        // `-1` = ignore other surfaces' exclusive zones: the default
+        // (`None` → protocol default 0) had the tooltip land *below*
+        // the bar's own 30 px reservation — `thickness + gap` turned
+        // into `thickness + gap + thickness`.
+        exclusive_zone: Some(-1),
+        margin: Some(margin),
+        keyboard_interactivity: KeyboardInteractivity::None,
+        output_option: popup_output_option(),
+        namespace: Some("piuma-tooltip".to_string()),
+        ..Default::default()
+    });
+    panel.bar_tooltip = Some((win, BarTooltip { id, text: fitted }));
+    cmds.push(open);
+    Command::batch(cmds)
+}
+
+/// Close the tooltip — only if `id` still owns it: an exit delivered
+/// after another source's enter (widget order) is stale.
+fn tooltip_close(panel: &mut Panel, id: String) -> Command<Message> {
+    if let Some((win, tip)) = panel.bar_tooltip.take() {
+        if tip.id == id {
+            return iced::window::close(win);
+        }
+        panel.bar_tooltip = Some((win, tip));
+    }
+    Command::none()
 }
 
 /// Which sides `[top, right, bottom, left]` of the section at `idx` sit
@@ -4560,6 +4707,48 @@ fn taskbar_menu_view(panel: &Panel) -> Element<'_, Message> {
     MouseArea::new(surface).on_exit(Message::TaskbarMenuClosed).into()
 }
 
+// ── bar tooltip window ──────────────────────────────────────────────
+
+/// The tooltip window: one fitted line in the popup style — a label
+/// just off the bar (see [`tooltip_placement`]), never a strip inside
+/// the bar surface itself.
+fn tooltip_window_view(panel: &Panel) -> Element<'_, Message> {
+    let Some((_, tip)) = panel.bar_tooltip.as_ref() else {
+        // The window id exists only together with its state.
+        return container(text(""))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+    };
+    let st = popup_style(&panel.config, panel.palette.as_ref());
+    let font = panel_font(&panel.config);
+    let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
+    let body = container(
+        text(&tip.text)
+            .size(font_size)
+            .color(st.text)
+            .font(font)
+            .width(Length::Fill),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .center_x(Length::Fill)
+    .align_y(Alignment::Center)
+    .padding(iced::Padding::from(MENU_PAD as f32));
+    styled_box(
+        body.into(),
+        Some(st.bg),
+        Some(st.border),
+        st.border_width.min(u16::MAX as u32) as u16,
+        st.border_radius.min(u16::MAX as u32) as u16,
+        &st.border_type,
+        [false, false, false, false],
+        0,
+        Length::Fill,
+        Length::Fill,
+    )
+}
+
 // ── style ───────────────────────────────────────────────────────────
 
 fn style(_panel: &Panel, _theme: &iced::Theme) -> iced::theme::Style {
@@ -4800,6 +4989,7 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         taskbar_menu: None,
                         taskbar_menu_hover: None,
                         taskbar_hover: None,
+                        bar_tooltip: None,
                         graphs,
                         graph_popup: None,
                         graph_link: None,
@@ -4907,7 +5097,7 @@ mod tests {
         monitor_names_json, notif_list_row_h, notif_list_size, notifications, palette,
         panel_background, popup_card_h, popup_missed_tick, popup_placement, popup_style,
         scroll_rows, section_touch, shifted_surface_rect, taskbar_menu_size, text_width,
-        tooltip_side, wallpaper_plan, GraphPopup, PopupStyle, MENU_INDENT, MENU_MAX_W,
+        tooltip_placement, wallpaper_plan, GraphPopup, PopupStyle, MENU_INDENT, MENU_MAX_W,
         MENU_MIN_W, MENU_PAD, NOTIF_LIST_W_MAX,
     };
     use iced::font::Font;
@@ -5223,16 +5413,32 @@ mod tests {
         assert!(h_big > h, "a bigger font never measures shorter");
     }
 
-    /// A tooltip opens away from the bar's anchored edge: below for a
-    /// top bar (never landing on the bar), above for a bottom one,
-    /// inward for the side bars.
+    /// A tooltip window sits just off the bar's anchored edge on the
+    /// inner side of the screen — a top bar's drops below the surface —
+    /// centred on the cursor and clamped inside the output.
     #[test]
-    fn tooltip_side_points_away_from_the_anchor_edge() {
-        use iced::widget::tooltip::Position;
-        assert_eq!(tooltip_side(Anchor::Top), Position::Bottom);
-        assert_eq!(tooltip_side(Anchor::Bottom), Position::Top);
-        assert_eq!(tooltip_side(Anchor::Left), Position::Right);
-        assert_eq!(tooltip_side(Anchor::Right), Position::Left);
+    fn tooltip_placement_sits_off_the_bar_and_inside_the_output() {
+        // Top bar: below the surface (bar 30 + gap 8), centred on x.
+        let (a, m) = tooltip_placement(Anchor::Top, (100, 15), 80, 20, 30, 1920, 1080);
+        assert_eq!(a, Anchor::Left | Anchor::Top);
+        assert_eq!((m.left, m.top), (60, 38));
+        // Near the left edge the centring clamps to the output edge…
+        let (_, m) = tooltip_placement(Anchor::Top, (10, 15), 80, 20, 30, 1920, 1080);
+        assert_eq!(m.left, 0);
+        // …and near the right edge to its far edge.
+        let (_, m) = tooltip_placement(Anchor::Top, (1915, 15), 80, 20, 30, 1920, 1080);
+        assert_eq!(m.left, 1920 - 80);
+        // Bottom bar: above the surface.
+        let (a, m) = tooltip_placement(Anchor::Bottom, (100, 1065), 80, 20, 30, 1920, 1080);
+        assert_eq!(a, Anchor::Left | Anchor::Bottom);
+        assert_eq!(m.bottom, 38);
+        // Side bars push inward.
+        let (a, m) = tooltip_placement(Anchor::Left, (15, 500), 80, 20, 30, 1920, 1080);
+        assert_eq!(a, Anchor::Left | Anchor::Top);
+        assert_eq!(m.left, 38);
+        let (a, m) = tooltip_placement(Anchor::Right, (1905, 500), 80, 20, 30, 1920, 1080);
+        assert_eq!(a, Anchor::Right | Anchor::Top);
+        assert_eq!(m.right, 38);
     }
 
     /// Down-right from the cursor; flips to the opposite edge when the

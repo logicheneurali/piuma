@@ -40,20 +40,15 @@ pub struct TaskIcon {
     pub focused: bool,
 }
 
-/// Visual parameters for the row: the sensor's box style (the tooltip
-/// copies it, like the tray's does) plus the two slot fills — the
-/// hovered slot wins over the active window's.
-pub struct RowStyle<'a> {
-    pub sensor: &'a crate::tray::Style,
-    pub font: iced::font::Font,
-    pub font_size: u32,
+/// Visual parameters for the row: the slot corner radius plus the two
+/// fills — the hovered slot wins over the active window's.
+pub struct RowStyle {
+    /// The sensor's corner radius: the fills follow it.
+    pub radius: u16,
     /// Fill behind the slot under the cursor.
     pub hover_bg: Option<iced::Color>,
     /// Fill behind the active window's slot.
     pub active_bg: Option<iced::Color>,
-    /// Tooltip side: away from the bar's anchored edge (see
-    /// `tooltip_side`), so it never lands on the bar.
-    pub tip: iced::widget::tooltip::Position,
 }
 
 /// The open windows in list order (workspace, then title).
@@ -311,10 +306,10 @@ fn parse_desktop(content: &str) -> (Option<String>, Option<String>) {
 pub fn row<'a>(
     items: &'a [TaskIcon],
     hover: Option<&str>,
-    style: &RowStyle<'_>,
+    style: &RowStyle,
 ) -> iced::Element<'a, crate::Message> {
-    use iced::widget::{MouseArea, Row, container, text};
-    let radius = f32::from(style.sensor.border_radius);
+    use iced::widget::{container, MouseArea, Row};
+    let radius = f32::from(style.radius);
     let mut row = Row::new().spacing(4);
     for item in items {
         let Some(path) = &item.icon else { continue };
@@ -342,39 +337,17 @@ pub fn row<'a>(
             .on_press(crate::Message::TaskbarLeft(address.clone()))
             .on_middle_press(crate::Message::TaskbarMiddle(address.clone()))
             .on_right_press(crate::Message::TaskbarRight(address.clone()))
-            // Enter/leave bracket the hover fill; the leave message
-            // clears only the address it names (a stale exit must not
-            // drop the next icon's hover — see `TaskbarIconLeft`).
-            .on_enter(crate::Message::TaskbarIconHover(Some(address.clone())))
-            .on_exit(crate::Message::TaskbarIconLeft(address.clone()))
+            // Enter fills the slot and opens the title tooltip (empty
+            // title → no window); the leave clears only its own
+            // address — a stale exit must not drop the next icon's
+            // hover or tooltip (see `TaskbarIconLeave`).
+            .on_enter(crate::Message::TaskbarIconEnter {
+                address: address.clone(),
+                title: item.title.clone(),
+            })
+            .on_exit(crate::Message::TaskbarIconLeave { address })
             .interaction(iced::mouse::Interaction::Pointer);
-        let cell: iced::Element<'a, crate::Message> = if item.title.is_empty() {
-            interactive.into()
-        } else {
-            iced::widget::tooltip(
-                interactive,
-                crate::styled_box(
-                    text(&item.title)
-                        .size(style.font_size)
-                        .color_maybe(style.sensor.text_color)
-                        .font(style.font)
-                        .into(),
-                    style.sensor.bg_color,
-                    style.sensor.border_color,
-                    style.sensor.border_width,
-                    style.sensor.border_radius,
-                    &style.sensor.border_type,
-                    [false, false, false, false],
-                    style.sensor.padding,
-                    iced::Length::Shrink,
-                    iced::Length::Shrink,
-                ),
-                style.tip,
-            )
-            .gap(crate::TOOLTIP_GAP)
-            .into()
-        };
-        row = row.push(cell);
+        row = row.push(interactive);
     }
     row.into()
 }
