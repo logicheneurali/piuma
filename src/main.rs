@@ -44,7 +44,6 @@ mod sensor_runner;
 mod sensors;
 mod text_width;
 mod tray;
-mod windows;
 mod workspace;
 // Layout padding lives with the icon sizing helpers (icons.rs): the view
 // and the row-height size formula must read the same number.
@@ -139,17 +138,6 @@ const MENU_MAX_W: u32 = 420;
 const NOTIF_LIST_MAX: usize = 30;
 const NOTIF_LIST_ROWS: usize = 8;
 const NOTIF_LIST_W_MAX: u32 = 460;
-
-/// The window list popup (the window sensor's click): rows shown at
-/// once (the wheel scrolls the rest), the title cap for a row, and the
-/// fixed column widths (app icon, action buttons) that keep every row
-/// aligned regardless of content.
-const WIN_LIST_ROWS: usize = 10;
-const WIN_LIST_W_MAX: u32 = 560;
-const WIN_TITLE: usize = 60;
-const WIN_ICON: u16 = 16;
-const WIN_ACTION_ICON: u16 = 14;
-const WIN_ACTIONS_W: f32 = 68.0;
 
 // ── model ───────────────────────────────────────────────────────────
 
@@ -253,9 +241,6 @@ struct Panel {
     /// The notification history list popup (the notifications sensor's
     /// click): window id + the wheel scroll state.
     notif_list: Option<(iced::window::Id, NotifList)>,
-    /// The open window list popup (the window sensor's click): window
-    /// id + the snapshotted rows and hover/scroll state.
-    win_list: Option<(iced::window::Id, WinList)>,
     /// Trend history for the `draw_graph` sensors' hover popup: one
     /// dense ring of samples per config, rebuilt on reload (see
     /// `graphs`).
@@ -302,17 +287,6 @@ struct TrayMenu {
 #[derive(Clone, Debug)]
 struct NotifList {
     offset: u32,
-}
-
-/// The open window list popup (the window sensor's click): the rows
-/// snapshotted at open (each carries its window's dispatch address),
-/// the wheel offset, and the row under the cursor (its extra actions
-/// only render while one is there).
-#[derive(Clone, Debug)]
-struct WinList {
-    rows: Vec<windows::WinRow>,
-    offset: u32,
-    hover: Option<usize>,
 }
 
 /// The open sensor-graph popup: which sensor's trend it draws and the
@@ -407,20 +381,6 @@ enum Message {
     /// Row clicked in the notification list popup: run that entry's
     /// spec `default` action and close the popup.
     NotifListClicked(u32),
-    /// Wheel over the window list popup: signed pixel delta-y.
-    WinListScrolled(f32),
-    /// Row clicked in the window list popup: focus that window (with
-    /// its workspace) and close the popup.
-    WinListRow(usize),
-    /// ✕ on a window row: request the window's close; the row leaves
-    /// the list.
-    WinListCloseRow(usize),
-    /// Toggle floating on a row's window (the snapshot's flag follows).
-    WinListFloatRow(usize),
-    /// Bring a row's window to the current workspace (the badge follows).
-    WinListMoveRow(usize),
-    /// Cursor on/off a window row: its extra actions only render there.
-    WinListHover(Option<usize>),
     /// Tray state changed (item added/removed/updated): rebuild now.
     TrayItemsChanged,
     /// A notification arrived, was replaced, expired or closed: rebuild.
@@ -1490,23 +1450,18 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                     });
                 }
                 None => {
-                    // No configured action: the notifications sensor
-                    // toggles its history list popup and the window
-                    // sensor the open-window list — the row clicks
-                    // inside run the per-window actions.
-                    let sensor = panel
+                    // No configured action: on a notifications sensor the
+                    // click toggles the history list popup — the entry's
+                    // spec `default` action moved to the row click in it.
+                    let is_notifications = panel
                         .config
                         .panel
                         .sections
                         .get(section_index)
-                        .and_then(|sec| sec.sensors.get(sensor_index));
-                    if sensor
-                        .is_some_and(|s| matches!(s.source, config::SensorSource::Notifications {}))
-                    {
+                        .and_then(|sec| sec.sensors.get(sensor_index))
+                        .is_some_and(|s| matches!(s.source, config::SensorSource::Notifications {}));
+                    if is_notifications {
                         return toggle_notif_list(panel);
-                    }
-                    if sensor.is_some_and(|s| matches!(s.source, config::SensorSource::Window {})) {
-                        return toggle_win_list(panel);
                     }
                 }
             }
@@ -1578,74 +1533,6 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             if let Some((win, _)) = panel.notif_list.take() {
                 notifications::invoke_id(id);
                 return iced::window::close(win);
-            }
-            Command::none()
-        }
-        Message::WinListScrolled(delta_y) => {
-            // Wheel over the list: whole rows per notch (the surface
-            // height is exact, so the math matches the layout).
-            if let Some((_, wl)) = panel.win_list.as_mut() {
-                let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
-                let row_h = menu_row_h(font_size) as f32;
-                let rows = (-delta_y / row_h).round() as i32;
-                wl.offset = scroll_rows(wl.offset, rows, wl.rows.len(), WIN_LIST_ROWS);
-            }
-            Command::none()
-        }
-        Message::WinListRow(index) => {
-            // Focus is the pick: it brings the window with its
-            // workspace, and the list closes — it is a picker, not a
-            // browser.
-            let Some((win, wl)) = panel.win_list.take() else {
-                return Command::none();
-            };
-            match wl.rows.get(index) {
-                Some(row) => {
-                    windows::focus(&row.address);
-                    iced::window::close(win)
-                }
-                None => Command::none(),
-            }
-        }
-        Message::WinListCloseRow(index) => {
-            let mut empty = false;
-            if let Some((_, wl)) = panel.win_list.as_mut() {
-                if let Some(row) = wl.rows.get(index) {
-                    windows::close_window(&row.address);
-                    wl.rows.remove(index);
-                    wl.hover = None;
-                    wl.offset = scroll_rows(wl.offset, 0, wl.rows.len(), WIN_LIST_ROWS);
-                }
-                empty = wl.rows.is_empty();
-            }
-            // Nothing left to pick from: the popup goes with its last row.
-            if empty {
-                return close_win_list(panel);
-            }
-            Command::none()
-        }
-        Message::WinListFloatRow(index) => {
-            if let Some((_, wl)) = panel.win_list.as_mut() {
-                if let Some(row) = wl.rows.get_mut(index) {
-                    windows::toggle_float(&row.address);
-                    row.floating = !row.floating; // the snapshot's flag follows
-                }
-            }
-            Command::none()
-        }
-        Message::WinListMoveRow(index) => {
-            if let Some((_, wl)) = panel.win_list.as_mut() {
-                if let Some(row) = wl.rows.get_mut(index) {
-                    if let Some(workspace) = windows::move_to_current(&row.address) {
-                        row.workspace = workspace; // the badge follows
-                    }
-                }
-            }
-            Command::none()
-        }
-        Message::WinListHover(index) => {
-            if let Some((_, wl)) = panel.win_list.as_mut() {
-                wl.hover = index;
             }
             Command::none()
         }
@@ -1846,11 +1733,6 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
     if let Some((id, _)) = panel.notif_list.as_ref() {
         if *id == window {
             return notif_list_view(panel);
-        }
-    }
-    if let Some((id, _)) = panel.win_list.as_ref() {
-        if *id == window {
-            return win_list_view(panel);
         }
     }
     if let Some(gp) = panel.graph_popup.as_ref() {
@@ -4381,245 +4263,6 @@ fn notif_list_view(panel: &Panel) -> Element<'_, Message> {
         .into()
 }
 
-// ── window list popup ───────────────────────────────────────────────
-
-/// Toggle the open-window list (the window sensor's click): closes it
-/// when open; opens it at the notification cards' corner with the
-/// windows of the moment (a fresh `clients -j` per open, no watcher).
-fn toggle_win_list(panel: &mut Panel) -> Command<Message> {
-    if panel.win_list.is_some() {
-        return close_win_list(panel);
-    }
-    let rows = windows::list();
-    if rows.is_empty() {
-        return Command::none();
-    }
-    let font = panel_font(&panel.config);
-    let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
-    let (w, h) = win_list_size(&rows, &font, font_size);
-    // The notification cards' corner: the picker belongs with them.
-    let (anchor, margin) = popup_placement(&panel.config);
-    let (id, open) = Message::layershell_open(NewLayerShellSettings {
-        size: LayerSize::px(w, h),
-        layer: Layer::Overlay,
-        anchor,
-        exclusive_zone: None,
-        margin: Some(margin),
-        keyboard_interactivity: KeyboardInteractivity::None,
-        output_option: popup_output_option(),
-        namespace: Some("piuma-win-list".to_string()),
-        ..Default::default()
-    });
-    panel.win_list = Some((
-        id,
-        WinList {
-            rows,
-            offset: 0,
-            hover: None,
-        },
-    ));
-    open
-}
-
-/// Close the window list popup, if open.
-fn close_win_list(panel: &mut Panel) -> Command<Message> {
-    match panel.win_list.take() {
-        Some((id, _)) => iced::window::close(id),
-        None => Command::none(),
-    }
-}
-
-/// The workspace badge column width: the widest badge of the rows, so
-/// every row's badge and actions sit on the same verticals.
-fn win_badge_w(rows: &[windows::WinRow], font: &Font, font_size: u32) -> u32 {
-    let badges: Vec<String> = rows.iter().map(|r| format!("WS {}", r.workspace)).collect();
-    u32::from(text_width::widest(
-        font,
-        font_size.saturating_sub(3),
-        &badges,
-    )) + 4
-}
-
-/// Surface size for `rows`: exact height (one `menu_row_h` per shown
-/// row — the rows are single-line) and the width from the widest cut
-/// title plus the fixed columns (icon, badge, actions), capped so a
-/// long title does not take half the screen.
-fn win_list_size(rows: &[windows::WinRow], font: &Font, font_size: u32) -> (u32, u32) {
-    let titles: Vec<String> = rows
-        .iter()
-        .map(|r| windows::cut(&r.title, WIN_TITLE))
-        .collect();
-    let text_w = u32::from(text_width::widest(font, font_size, &titles));
-    let w = (WIN_ICON as u32
-        + 6
-        + text_w
-        + 8
-        + win_badge_w(rows, font, font_size)
-        + 8
-        + WIN_ACTIONS_W as u32)
-        .saturating_add(2 * MENU_PAD)
-        .min(WIN_LIST_W_MAX.saturating_add(2 * MENU_PAD));
-    let shown = rows.len().min(WIN_LIST_ROWS) as u32;
-    let h = shown
-        .saturating_mul(menu_row_h(font_size))
-        .saturating_add(2 * MENU_PAD);
-    (w, h)
-}
-
-/// The window list: one aligned row per window — app icon, cut title,
-/// workspace badge, actions. The row click focuses its window and
-/// closes; the ✕ requests the window's close (the row leaves the
-/// list); on hover, floating/bring-here appear beside it. The wheel
-/// scrolls by whole rows; the popup follows the notification style.
-fn win_list_view(panel: &Panel) -> Element<'_, Message> {
-    let Some((_, wl)) = panel.win_list.as_ref() else {
-        // The window id exists only together with its state.
-        return container(text(""))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into();
-    };
-    let st = popup_style(&panel.config, panel.palette.as_ref());
-    let font = panel_font(&panel.config);
-    let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
-    let row_h = menu_row_h(font_size) as f32;
-    let dim = Color::from_rgba(st.text.r, st.text.g, st.text.b, 0.45);
-    let badge_w = win_badge_w(&wl.rows, &font, font_size) as f32;
-    let mut list: Column<'_, Message> = Column::new();
-    for (index, row) in wl
-        .rows
-        .iter()
-        .enumerate()
-        .skip(wl.offset as usize)
-        .take(WIN_LIST_ROWS)
-    {
-        let hovered = wl.hover == Some(index);
-        // The app's .desktop icon; a bare box keeps the column aligned
-        // where there is none.
-        let icon: Element<'_, Message> = windows::app_icon(&row.class)
-            .and_then(|name| {
-                icons::resolve(icons::icon_theme(), &name, WIN_ICON)
-                    .map(|path| icons::widget(&path, WIN_ICON as f32))
-            })
-            .unwrap_or_else(|| {
-                container(Space::new().width(WIN_ICON as f32).height(WIN_ICON as f32)).into()
-            });
-        let title = text(windows::cut(&row.title, WIN_TITLE))
-            .size(font_size)
-            .color(st.text)
-            .font(font);
-        // The main zone carries the pick and the row's highlight.
-        let main: Element<'_, Message> = MouseArea::new(
-            container(
-                Row::new()
-                    .push(icon)
-                    .push(title)
-                    .spacing(6)
-                    .align_y(Alignment::Center),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .padding(iced::Padding::from(MENU_PAD as f32))
-            .style(move |_theme| ContainerStyle {
-                background: hovered.then(|| Background::Color(st.bg_hover)),
-                ..ContainerStyle::default()
-            }),
-        )
-        .on_press(Message::WinListRow(index))
-        .on_enter(Message::WinListHover(Some(index)))
-        .on_exit(Message::WinListHover(None))
-        .into();
-        let badge = text(format!("WS {}", row.workspace))
-            .size(font_size.saturating_sub(3))
-            .color(dim)
-            .font(font)
-            .width(Length::Fixed(badge_w));
-        // Fixed-width actions column: the ✕ is always there, the
-        // hover-only ones appear without shifting anything.
-        let mut actions = Row::new()
-            .spacing(2)
-            .width(Length::Fixed(WIN_ACTIONS_W))
-            .align_y(Alignment::Center);
-        if hovered {
-            actions = actions.push(win_action_btn(
-                "preferences-system-windows",
-                "□",
-                font,
-                st.text,
-                Message::WinListFloatRow(index),
-            ));
-            actions = actions.push(win_action_btn(
-                "go-jump",
-                "↓",
-                font,
-                st.text,
-                Message::WinListMoveRow(index),
-            ));
-        }
-        actions = actions.push(win_action_btn(
-            "window-close",
-            "×",
-            font,
-            st.text,
-            Message::WinListCloseRow(index),
-        ));
-        list = list.push(
-            container(Row::new().push(main).push(badge).push(actions))
-                .width(Length::Fill)
-                .height(Length::Fixed(row_h)),
-        );
-    }
-    let surface = styled_box(
-        container(list)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .padding(iced::Padding::from(MENU_PAD as f32))
-            .into(),
-        Some(st.bg),
-        Some(st.border),
-        st.border_width.min(u16::MAX as u32) as u16,
-        st.border_radius.min(u16::MAX as u32) as u16,
-        &st.border_type,
-        [false, false, false, false],
-        // The list carries the padding; the box only draws its border.
-        0,
-        Length::Fill,
-        Length::Fill,
-    );
-    // Only non-zero pixel deltas act (one per notch — see the sensors).
-    MouseArea::new(surface)
-        .on_scroll(move |delta| match delta {
-            iced::mouse::ScrollDelta::Pixels { y, .. } if y != 0.0 => Message::WinListScrolled(y),
-            _ => Message::WinListScrolled(0.0),
-        })
-        .into()
-}
-
-/// One action button in a window row: the theme's icon, the glyph as
-/// its fallback (the same hit area either way).
-fn win_action_btn(
-    icon_name: &'static str,
-    glyph: &'static str,
-    font: Font,
-    fg: Color,
-    msg: Message,
-) -> Element<'static, Message> {
-    let inner: Element<'static, Message> =
-        icons::resolve(icons::icon_theme(), icon_name, WIN_ACTION_ICON)
-            .map(|path| icons::widget(&path, WIN_ACTION_ICON as f32))
-            .unwrap_or_else(|| {
-                text(glyph)
-                    .size(WIN_ACTION_ICON as u32)
-                    .color(fg)
-                    .font(font)
-                    .into()
-            });
-    MouseArea::new(container(inner).padding(2))
-        .on_press(msg)
-        .interaction(iced::mouse::Interaction::Pointer)
-        .into()
-}
-
 // ── style ───────────────────────────────────────────────────────────
 
 fn style(_panel: &Panel, _theme: &iced::Theme) -> iced::theme::Style {
@@ -4857,7 +4500,6 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         tray_menu_hover: None,
                         tray_menu_gen: 0,
                         notif_list: None,
-                        win_list: None,
                         graphs,
                         graph_popup: None,
                         graph_link: None,
@@ -4964,9 +4606,8 @@ mod tests {
         focused_output_in, icons_theme, lock_pid, menu_placement, menu_row_h, menu_size,
         monitor_names_json, notif_list_row_h, notif_list_size, notifications, palette,
         panel_background, popup_card_h, popup_missed_tick, popup_placement, popup_style,
-        scroll_rows, section_touch, shifted_surface_rect, text_width, wallpaper_plan,
-        win_list_size, windows, GraphPopup, PopupStyle, MENU_INDENT, MENU_MAX_W, MENU_MIN_W,
-        MENU_PAD, NOTIF_LIST_W_MAX, WIN_LIST_W_MAX,
+        scroll_rows, section_touch, shifted_surface_rect, text_width, wallpaper_plan, GraphPopup,
+        PopupStyle, MENU_INDENT, MENU_MAX_W, MENU_MIN_W, MENU_PAD, NOTIF_LIST_W_MAX,
     };
     use iced::font::Font;
     use iced_exwlshell::reexport::Anchor;
@@ -5266,34 +4907,6 @@ mod tests {
         let (w_short, h_short) = notif_list_size(&[row(0)], &font, 14);
         assert_eq!(h_short, notif_list_row_h(14) + 2 * MENU_PAD);
         assert!(w_short < w, "fewer rows measure narrower");
-    }
-
-    /// The window list popup's surface: exact height for the shown rows
-    /// (the cap at `WIN_LIST_ROWS`) and the measured width inside the
-    /// cap, with the fixed columns counted in.
-    #[test]
-    fn win_list_size_is_exact_and_capped() {
-        let font = Font::with_name("Noto Sans");
-        let row = |i: usize| windows::WinRow {
-            address: format!("0x{i:x}"),
-            class: "some.class".into(),
-            title: format!("a window title long enough to matter, number {i}"),
-            workspace: format!("{}", i + 1),
-            floating: false,
-        };
-        let rows: Vec<_> = (0..12).map(row).collect();
-        let (w, h) = win_list_size(&rows, &font, 14);
-        assert_eq!(
-            h,
-            10 * menu_row_h(14) + 2 * MENU_PAD,
-            "only WIN_LIST_ROWS rows are shown"
-        );
-        assert!(
-            w <= WIN_LIST_W_MAX + 2 * MENU_PAD,
-            "the measured width stays capped, got {w}"
-        );
-        let (_, h_few) = win_list_size(&[row(0)], &font, 14);
-        assert_eq!(h_few, menu_row_h(14) + 2 * MENU_PAD);
     }
 
     /// Down-right from the cursor; flips to the opposite edge when the
