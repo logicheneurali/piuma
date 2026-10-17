@@ -132,6 +132,13 @@ const MENU_INDENT: u32 = 14;
 const MENU_MIN_W: u32 = 120;
 const MENU_MAX_W: u32 = 420;
 
+/// The notification list popup (the sensor's click): entries in the
+/// snapshot, rows shown at once (the wheel scrolls the rest) and the
+/// width cap for the measured rows.
+const NOTIF_LIST_MAX: usize = 30;
+const NOTIF_LIST_ROWS: usize = 8;
+const NOTIF_LIST_W_MAX: u32 = 460;
+
 // ── model ───────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -231,6 +238,9 @@ struct Panel {
     /// Bumped by every tray press: a `TrayMenuLoaded` carrying an older
     /// generation belongs to a superseded press and must not open.
     tray_menu_gen: u64,
+    /// The notification history list popup (the notifications sensor's
+    /// click): window id + the wheel scroll state.
+    notif_list: Option<(iced::window::Id, NotifList)>,
     /// Trend history for the `draw_graph` sensors' hover popup: one
     /// dense ring of samples per config, rebuilt on reload (see
     /// `graphs`).
@@ -270,6 +280,13 @@ struct TrayMenu {
     path: String,
     menu_path: String,
     entries: Vec<dbusmenu::MenuEntry>,
+}
+
+/// The open notification list popup (the notifications sensor's click):
+/// its window and the wheel scroll offset (whole rows from the newest).
+#[derive(Clone, Debug)]
+struct NotifList {
+    offset: u32,
 }
 
 /// The open sensor-graph popup: which sensor's trend it draws and the
@@ -358,6 +375,12 @@ enum Message {
     /// Wheel scrolled over a sensor: (section_index, sensor_index, up);
     /// `None` for scroll events that carry no usable delta.
     SensorScrolled(usize, usize, Option<bool>),
+    /// Wheel over the notification list popup: signed pixel delta-y
+    /// (positive = towards the newest rows).
+    NotifListScrolled(f32),
+    /// Row clicked in the notification list popup: run that entry's
+    /// spec `default` action and close the popup.
+    NotifListClicked(u32),
     /// Tray state changed (item added/removed/updated): rebuild now.
     TrayItemsChanged,
     /// A notification arrived, was replaced, expired or closed: rebuild.
@@ -1428,8 +1451,8 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                 }
                 None => {
                     // No configured action: on a notifications sensor the
-                    // click runs the shown entry's spec `default` action
-                    // (emitted as `ActionInvoked`, other sensors ignore it).
+                    // click toggles the history list popup — the entry's
+                    // spec `default` action moved to the row click in it.
                     let is_notifications = panel
                         .config
                         .panel
@@ -1438,7 +1461,7 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                         .and_then(|sec| sec.sensors.get(sensor_index))
                         .is_some_and(|s| matches!(s.source, config::SensorSource::Notifications {}));
                     if is_notifications {
-                        notifications::invoke_default();
+                        return toggle_notif_list(panel);
                     }
                 }
             }
@@ -1489,6 +1512,27 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                     }
                     std::thread::spawn(move || sensors::adjust_volume(&device, up));
                 }
+            }
+            Command::none()
+        }
+        Message::NotifListScrolled(delta_y) => {
+            // Wheel over the list: whole rows per notch (the surface
+            // height is exact, so the math matches the layout).
+            if let Some((_, state)) = panel.notif_list.as_mut() {
+                let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
+                let row_h = notif_list_row_h(font_size) as f32;
+                let rows = (-delta_y / row_h).round() as i32;
+                let len = notifications::history_rows(NOTIF_LIST_MAX).len();
+                state.offset = scroll_rows(state.offset, rows, len, NOTIF_LIST_ROWS);
+            }
+            Command::none()
+        }
+        Message::NotifListClicked(id) => {
+            // A row runs its notification's spec `default` action (the
+            // sensor's old click) and the popup closes with it.
+            if let Some((win, _)) = panel.notif_list.take() {
+                notifications::invoke_id(id);
+                return iced::window::close(win);
             }
             Command::none()
         }
@@ -1684,6 +1728,11 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
     if let Some((id, _)) = panel.tray_menu.as_ref() {
         if *id == window {
             return tray_menu_view(panel);
+        }
+    }
+    if let Some((id, _)) = panel.notif_list.as_ref() {
+        if *id == window {
+            return notif_list_view(panel);
         }
     }
     if let Some(gp) = panel.graph_popup.as_ref() {
@@ -3092,6 +3141,41 @@ fn popup_view(panel: &Panel) -> Element<'_, Message> {
         .into()
 }
 
+// ── notification list window ────────────────────────────────────────
+
+/// Vertical rhythm of one list row: a double-height row (summary +
+/// body, spaced) — `menu_row_h`'s maths for two stacked lines.
+fn notif_list_row_h(font_size: u32) -> u32 {
+    menu_row_h(font_size) * 2 + 4
+}
+
+/// The wheel's effect on the scroll offset: whole rows towards the
+/// oldest, clamped so the last page lands exactly on the bottom rows.
+fn scroll_rows(offset: u32, delta: i32, len: usize, visible: usize) -> u32 {
+    let max = len.saturating_sub(visible);
+    (offset as i32 + delta).clamp(0, max as i32) as u32
+}
+
+/// Surface size for `rows`: exact height (one `notif_list_row_h` per
+/// shown row plus padding — nothing clips, every row stays hit-exact)
+/// and the width from the widest truncated string, capped so a long
+/// body does not take half the screen.
+fn notif_list_size(rows: &[notifications::NotifRow], font: &Font, font_size: u32) -> (u32, u32) {
+    let patterns: Vec<String> = rows
+        .iter()
+        .flat_map(|r| [r.summary.clone(), r.body.clone()])
+        .collect();
+    let text_w = u32::from(text_width::widest(font, font_size, &patterns));
+    let w = text_w
+        .saturating_add(2 * MENU_PAD)
+        .min(NOTIF_LIST_W_MAX.saturating_add(2 * MENU_PAD));
+    let shown = rows.len().min(NOTIF_LIST_ROWS) as u32;
+    let h = shown
+        .saturating_mul(notif_list_row_h(font_size))
+        .saturating_add(2 * MENU_PAD);
+    (w, h)
+}
+
 // ── tray menu window ────────────────────────────────────────────────
 
 /// Vertical rhythm of one menu row: the text line (~1.2× the font)
@@ -4062,6 +4146,123 @@ fn tray_menu_view(panel: &Panel) -> Element<'_, Message> {
     MouseArea::new(surface).on_exit(Message::TrayMenuClosed).into()
 }
 
+// ── notification list popup ─────────────────────────────────────────
+
+/// Toggle the notification history list (the notifications sensor's
+/// click): closes it when open; opens it at the notification cards'
+/// corner with the newest entries — nothing to reread → nothing to
+/// open.
+fn toggle_notif_list(panel: &mut Panel) -> Command<Message> {
+    if let Some((id, _)) = panel.notif_list.take() {
+        return iced::window::close(id);
+    }
+    let rows = notifications::history_rows(NOTIF_LIST_MAX);
+    if rows.is_empty() {
+        return Command::none();
+    }
+    let font = panel_font(&panel.config);
+    let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
+    let (w, h) = notif_list_size(&rows, &font, font_size);
+    // The cards' own corner: the list belongs to the same notifications.
+    let (anchor, margin) = popup_placement(&panel.config);
+    let (id, open) = Message::layershell_open(NewLayerShellSettings {
+        size: LayerSize::px(w, h),
+        layer: Layer::Overlay,
+        anchor,
+        exclusive_zone: None,
+        margin: Some(margin),
+        keyboard_interactivity: KeyboardInteractivity::None,
+        output_option: popup_output_option(),
+        namespace: Some("piuma-notif-list".to_string()),
+        ..Default::default()
+    });
+    panel.notif_list = Some((id, NotifList { offset: 0 }));
+    open
+}
+
+/// The history list: newest on top, the wheel scrolls by whole rows, a
+/// row invokes its notification's spec `default` action and closes the
+/// popup (the sensor's old click). Closed entries render dimmed; the
+/// rows follow the notification popup style (palette included).
+fn notif_list_view(panel: &Panel) -> Element<'_, Message> {
+    let Some((_, state)) = panel.notif_list.as_ref() else {
+        // The window id exists only together with its state.
+        return container(text(""))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+    };
+    let st = popup_style(&panel.config, panel.palette.as_ref());
+    let font = panel_font(&panel.config);
+    let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
+    let row_h = notif_list_row_h(font_size) as f32;
+    let dim = Color::from_rgba(st.text.r, st.text.g, st.text.b, 0.45);
+    let dim_closed = Color::from_rgba(st.text.r, st.text.g, st.text.b, 0.30);
+    let mut list: Column<'_, Message> = Column::new().spacing(2.0);
+    // Bound so the rows outlive the loop (the elements borrow them).
+    let rows = notifications::history_rows(NOTIF_LIST_MAX);
+    for row in rows
+        .iter()
+        .skip(state.offset as usize)
+        .take(NOTIF_LIST_ROWS)
+    {
+        let (summary_fg, body_fg) = if row.closed {
+            (dim_closed, dim_closed)
+        } else {
+            (st.text, dim)
+        };
+        let inner = Column::new()
+            .push(
+                text(row.summary.clone())
+                    .size(font_size)
+                    .color(summary_fg)
+                    .font(font),
+            )
+            .push(
+                text(row.body.clone())
+                    .size(font_size.saturating_sub(2))
+                    .color(body_fg)
+                    .font(font),
+            )
+            .spacing(2);
+        let styled = container(inner)
+            .width(Length::Fill)
+            .height(Length::Fixed(row_h))
+            .align_y(Alignment::Center)
+            .padding(iced::Padding::from(MENU_PAD as f32));
+        list = list.push(
+            MouseArea::new(styled)
+                .on_press(Message::NotifListClicked(row.id))
+                .interaction(iced::mouse::Interaction::Pointer),
+        );
+    }
+    let surface = styled_box(
+        container(list)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(iced::Padding::from(MENU_PAD as f32))
+            .into(),
+        Some(st.bg),
+        Some(st.border),
+        st.border_width.min(u16::MAX as u32) as u16,
+        st.border_radius.min(u16::MAX as u32) as u16,
+        &st.border_type,
+        [false, false, false, false],
+        // The list carries the padding; the box only draws its border.
+        0,
+        Length::Fill,
+        Length::Fill,
+    );
+    // Only non-zero pixel deltas act (one adjustment per notch: the
+    // line form always accompanies the pixel one — see the sensors).
+    MouseArea::new(surface)
+        .on_scroll(move |delta| match delta {
+            iced::mouse::ScrollDelta::Pixels { y, .. } if y != 0.0 => Message::NotifListScrolled(y),
+            _ => Message::NotifListScrolled(0.0),
+        })
+        .into()
+}
+
 // ── style ───────────────────────────────────────────────────────────
 
 fn style(_panel: &Panel, _theme: &iced::Theme) -> iced::theme::Style {
@@ -4298,6 +4499,7 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         tray_menu: None,
                         tray_menu_hover: None,
                         tray_menu_gen: 0,
+                        notif_list: None,
                         graphs,
                         graph_popup: None,
                         graph_link: None,
@@ -4402,9 +4604,10 @@ mod tests {
     use super::{
         calendar_size, cmdline_is_piuma, config, corner_radius, dbusmenu, fit_menu_labels,
         focused_output_in, icons_theme, lock_pid, menu_placement, menu_row_h, menu_size,
-        monitor_names_json, palette, panel_background, popup_card_h, popup_missed_tick,
-        popup_placement, popup_style, section_touch, shifted_surface_rect, text_width,
-        wallpaper_plan, GraphPopup, PopupStyle, MENU_INDENT, MENU_MAX_W, MENU_MIN_W, MENU_PAD,
+        monitor_names_json, notif_list_row_h, notif_list_size, notifications, palette,
+        panel_background, popup_card_h, popup_missed_tick, popup_placement, popup_style,
+        scroll_rows, section_touch, shifted_surface_rect, text_width, wallpaper_plan, GraphPopup,
+        PopupStyle, MENU_INDENT, MENU_MAX_W, MENU_MIN_W, MENU_PAD, NOTIF_LIST_W_MAX,
     };
     use iced::font::Font;
     use iced_exwlshell::reexport::Anchor;
@@ -4655,6 +4858,55 @@ mod tests {
         // be exact (guards against a pathological font measure).
         assert!(flat > MENU_MIN_W && deep < MENU_MAX_W, "{flat} / {deep}");
         assert_eq!(deep - flat, 3 * MENU_INDENT);
+    }
+
+    /// The list popup's wheel: whole rows towards the oldest, clamped
+    /// at both ends (the last page lands on the bottom rows) and a
+    /// history shorter than a page never scrolls.
+    #[test]
+    fn notif_list_scroll_clamps_by_whole_rows() {
+        assert_eq!(scroll_rows(0, 3, 20, 8), 3);
+        assert_eq!(scroll_rows(3, -5, 20, 8), 0, "up clamps at the newest");
+        assert_eq!(
+            scroll_rows(10, 4, 20, 8),
+            12,
+            "down clamps at the last page"
+        );
+        assert_eq!(scroll_rows(0, 2, 5, 8), 0, "a short history never scrolls");
+    }
+
+    /// The list popup's surface: exact height for the shown rows (the
+    /// cap at `NOTIF_LIST_ROWS`) and the measured width inside the cap.
+    #[test]
+    fn notif_list_size_is_exact_and_capped() {
+        let font = Font::with_name("Noto Sans");
+        let row = |i: usize| notifications::NotifRow {
+            id: i as u32,
+            summary: format!("summary {i}"),
+            body: "a body line".to_string(),
+            closed: false,
+        };
+        let rows: Vec<_> = (0..10)
+            .map(|i| notifications::NotifRow {
+                id: i as u32,
+                summary: format!("summary {i} with a tail long enough to widen the box"),
+                body: "a body line".to_string(),
+                closed: false,
+            })
+            .collect();
+        let (w, h) = notif_list_size(&rows, &font, 14);
+        assert_eq!(
+            h,
+            8 * notif_list_row_h(14) + 2 * MENU_PAD,
+            "only NOTIF_LIST_ROWS rows are shown"
+        );
+        assert!(
+            w <= NOTIF_LIST_W_MAX + 2 * MENU_PAD,
+            "the measured width stays capped, got {w}"
+        );
+        let (w_short, h_short) = notif_list_size(&[row(0)], &font, 14);
+        assert_eq!(h_short, notif_list_row_h(14) + 2 * MENU_PAD);
+        assert!(w_short < w, "fewer rows measure narrower");
     }
 
     /// Down-right from the cursor; flips to the opposite edge when the

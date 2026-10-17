@@ -56,6 +56,8 @@ const REASON_DISMISSED: u32 = 2;
 const REASON_CLOSED: u32 = 3;
 /// Longest summary the sensor prints (bars must not stretch).
 const MAX_SUMMARY: usize = 60;
+/// Longest body line in the list popup (the sensor never shows one).
+const MAX_BODY: usize = 120;
 
 // ── settings & state ───────────────────────────────────────────────
 
@@ -210,29 +212,34 @@ pub fn scroll(up: bool) {
     }
 }
 
-/// The entry the sensor currently shows — what a click acts on (live
-/// position: newest active; browse: that entry, even if closed).
-fn displayed() -> Option<Notification> {
-    let hist = HISTORY.read().ok()?;
-    let sel = SELECTED.load(Ordering::Relaxed);
-    if sel > 0 {
-        if let Some(n) = hist.iter().rev().nth(sel as usize - 1) {
-            return Some(n.clone());
-        }
-    }
-    hist.iter()
-        .filter(|n| n.closed.is_none())
-        .next_back()
-        .cloned()
+/// A history entry as the list popup renders it: the summary/body are
+/// already truncated, so the UI measures and renders the strings as-is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NotifRow {
+    pub id: u32,
+    pub summary: String,
+    pub body: String,
+    /// A recorded close: the row renders dimmed.
+    pub closed: bool,
 }
 
-/// Click on the sensor: run the shown entry's spec `default` action by
-/// telling the app (`ActionInvoked`); no-op without a `default` key or
-/// without anything shown.
-pub fn invoke_default() {
-    if let Some(n) = displayed() {
-        invoke(&n);
-    }
+/// Snapshot of the newest `max` entries, newest first, for the list
+/// popup the notifications sensor opens; strings are cloned so the UI
+/// never holds the lock.
+pub fn history_rows(max: usize) -> Vec<NotifRow> {
+    let Ok(hist) = HISTORY.read() else {
+        return Vec::new();
+    };
+    hist.iter()
+        .rev()
+        .take(max)
+        .map(|n| NotifRow {
+            id: n.id,
+            summary: truncate(&n.summary, MAX_SUMMARY),
+            body: truncate(&n.body, MAX_BODY),
+            closed: n.closed.is_some(),
+        })
+        .collect()
 }
 
 /// Click on a popup card: the same for the entry with `id`; a stale id
@@ -826,6 +833,23 @@ mod tests {
         assert_eq!(a_entry.urgency, 2);
     }
 
+    /// The list popup's snapshot: newest first, capped by `max`, a
+    /// closed entry still present and flagged.
+    #[test]
+    fn history_rows_newest_first_capped_and_flagged() {
+        let _g = fresh();
+        let a = record(0, sample("a", 1, None));
+        let _b = record(0, sample("b", 1, None));
+        mark_closed(a, REASON_DISMISSED);
+        let rows = history_rows(10);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].summary, "b", "newest first");
+        assert!(!rows[0].closed);
+        assert_eq!(rows[1].summary, "a");
+        assert!(rows[1].closed, "a closed row stays in the history");
+        assert_eq!(history_rows(1).len(), 1, "the cap bounds the snapshot");
+    }
+
     #[test]
     fn replace_disabled_and_unknown_id_allocate_new_ids() {
         let _g = fresh();
@@ -998,28 +1022,6 @@ mod tests {
         scroll(false);
         record(0, sample("three", 1, None));
         assert_eq!(display_value(), "three (3)", "arrival resets to live");
-    }
-
-    #[test]
-    fn displayed_is_the_click_target_of_the_shown_entry() {
-        let _g = fresh();
-        // Nothing shown: no target.
-        assert!(displayed().is_none());
-        let with_action = Notification {
-            actions: vec!["default".into(), "Apri".into()],
-            ..sample("with default", 1, None)
-        };
-        let id = record(0, with_action);
-        let shown = displayed().expect("live entry");
-        assert_eq!(shown.id, id);
-        assert!(shown.actions.iter().any(|a| a == "default"));
-        // Closed entries are unreachable in live mode but not via browse.
-        mark_closed(id, REASON_CLOSED);
-        assert!(displayed().is_none(), "live follows the newest active");
-        scroll(false);
-        let shown = displayed().expect("browsed entry");
-        assert_eq!(shown.id, id);
-        assert_eq!(shown.closed, Some(REASON_CLOSED));
     }
 
     #[test]
