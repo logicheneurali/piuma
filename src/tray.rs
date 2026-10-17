@@ -1102,6 +1102,7 @@ pub fn row<'a>(
     font_size: u32,
     font: iced::font::Font,
     style: &Style,
+    tip: iced::widget::tooltip::Position,
 ) -> Element<'a, Message> {
     let mut row = Row::new().spacing(4);
     for icon in icons {
@@ -1165,26 +1166,31 @@ pub fn row<'a>(
             // content box is the sensor's own styling (same bg/border/
             // radius/padding, text in the sensor's colour), so the popup
             // reads as a copy of the sensor instead of bare floating text.
-            row.push(iced::widget::tooltip(
-                interactive,
-                crate::styled_box(
-                    text(&icon.tooltip)
-                        .size(font_size)
-                        .color_maybe(style.text_color)
-                        .font(font)
-                        .into(),
-                    style.bg_color,
-                    style.border_color,
-                    style.border_width,
-                    style.border_radius,
-                    &style.border_type,
-                    [false, false, false, false],
-                    style.padding,
-                    Length::Shrink,
-                    Length::Shrink,
-                ),
-                iced::widget::tooltip::Position::Top,
-            ))
+            row.push(
+                iced::widget::tooltip(
+                    interactive,
+                    crate::styled_box(
+                        text(&icon.tooltip)
+                            .size(font_size)
+                            .color_maybe(style.text_color)
+                            .font(font)
+                            .into(),
+                        style.bg_color,
+                        style.border_color,
+                        style.border_width,
+                        style.border_radius,
+                        &style.border_type,
+                        [false, false, false, false],
+                        style.padding,
+                        Length::Shrink,
+                        Length::Shrink,
+                    ),
+                    // Away from the bar's edge (the side passed by the
+                    // view) with a gap: the popup never sits on the bar.
+                    tip,
+                )
+                .gap(crate::TOOLTIP_GAP),
+            )
         };
     }
     row.into()

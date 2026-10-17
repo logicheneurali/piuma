@@ -24,14 +24,36 @@ pub struct WinRow {
     pub title: String,
     /// Workspace name ("1", "special:…").
     pub workspace: String,
+    /// `focusHistoryID == 0`: the window Hyprland reports as focused
+    /// right now — highlighted in the row.
+    pub focused: bool,
 }
 
-/// One taskbar slot: the address the clicks dispatch against and the
-/// resolved theme icon (`None` = fall back to the generic executable).
+/// One taskbar slot: the address the clicks dispatch against, the
+/// resolved theme icon (`None` = fall back to the generic executable),
+/// the title shown on hover and the active flag.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TaskIcon {
     pub address: String,
     pub icon: Option<PathBuf>,
+    pub title: String,
+    pub focused: bool,
+}
+
+/// Visual parameters for the row: the sensor's box style (the tooltip
+/// copies it, like the tray's does) plus the two slot fills — the
+/// hovered slot wins over the active window's.
+pub struct RowStyle<'a> {
+    pub sensor: &'a crate::tray::Style,
+    pub font: iced::font::Font,
+    pub font_size: u32,
+    /// Fill behind the slot under the cursor.
+    pub hover_bg: Option<iced::Color>,
+    /// Fill behind the active window's slot.
+    pub active_bg: Option<iced::Color>,
+    /// Tooltip side: away from the bar's anchored edge (see
+    /// `tooltip_side`), so it never lands on the bar.
+    pub tip: iced::widget::tooltip::Position,
 }
 
 /// The open windows in list order (workspace, then title).
@@ -63,6 +85,8 @@ pub fn task_icons() -> Vec<TaskIcon> {
             TaskIcon {
                 address: row.address,
                 icon,
+                title: row.title,
+                focused: row.focused,
             }
         })
         .collect()
@@ -98,6 +122,9 @@ fn parse_clients(json: &str) -> Vec<WinRow> {
                     .and_then(|v| v.as_str())
                     .unwrap_or("?")
                     .to_string(),
+                // `focusHistoryID` counts back from the focused window:
+                // 0 is the active one (absent → not focused).
+                focused: c.get("focusHistoryID").and_then(|v| v.as_i64()) == Some(0),
             })
         })
         .collect()
@@ -278,20 +305,76 @@ fn parse_desktop(content: &str) -> (Option<String>, Option<String>) {
 /// One icon slot per window: left focuses it, middle requests its
 /// close, right opens the move-to-workspace menu under the cursor.
 /// The address rides the message — never an index a tick could shift
-/// under a queued press.
-pub fn row<'a>(items: &'a [TaskIcon]) -> iced::Element<'a, crate::Message> {
-    use iced::widget::{MouseArea, Row};
+/// under a queued press. The active window's slot keeps the sensor's
+/// fill (hover wins over it) and a non-empty title rides a tooltip,
+/// styled like the tray's.
+pub fn row<'a>(
+    items: &'a [TaskIcon],
+    hover: Option<&str>,
+    style: &RowStyle<'_>,
+) -> iced::Element<'a, crate::Message> {
+    use iced::widget::{MouseArea, Row, container, text};
+    let radius = f32::from(style.sensor.border_radius);
     let mut row = Row::new().spacing(4);
     for item in items {
         let Some(path) = &item.icon else { continue };
         let address = item.address.clone();
-        row = row.push(
-            MouseArea::new(icons::widget(path, ICON_SIZE as f32))
-                .on_press(crate::Message::TaskbarLeft(address.clone()))
-                .on_middle_press(crate::Message::TaskbarMiddle(address.clone()))
-                .on_right_press(crate::Message::TaskbarRight(address))
-                .interaction(iced::mouse::Interaction::Pointer),
-        );
+        // Hover wins over active: the slot under the cursor is the one
+        // being acted on.
+        let fill = if hover == Some(address.as_str()) {
+            style.hover_bg
+        } else if item.focused {
+            style.active_bg
+        } else {
+            None
+        };
+        let slot = container(icons::widget(path, ICON_SIZE as f32))
+            .padding(2)
+            .style(move |_theme| iced::widget::container::Style {
+                background: fill.map(iced::Background::Color),
+                border: iced::Border {
+                    radius: radius.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+        let interactive = MouseArea::new(slot)
+            .on_press(crate::Message::TaskbarLeft(address.clone()))
+            .on_middle_press(crate::Message::TaskbarMiddle(address.clone()))
+            .on_right_press(crate::Message::TaskbarRight(address.clone()))
+            // Enter/leave bracket the hover fill; the leave message
+            // clears only the address it names (a stale exit must not
+            // drop the next icon's hover — see `TaskbarIconLeft`).
+            .on_enter(crate::Message::TaskbarIconHover(Some(address.clone())))
+            .on_exit(crate::Message::TaskbarIconLeft(address.clone()))
+            .interaction(iced::mouse::Interaction::Pointer);
+        let cell: iced::Element<'a, crate::Message> = if item.title.is_empty() {
+            interactive.into()
+        } else {
+            iced::widget::tooltip(
+                interactive,
+                crate::styled_box(
+                    text(&item.title)
+                        .size(style.font_size)
+                        .color_maybe(style.sensor.text_color)
+                        .font(style.font)
+                        .into(),
+                    style.sensor.bg_color,
+                    style.sensor.border_color,
+                    style.sensor.border_width,
+                    style.sensor.border_radius,
+                    &style.sensor.border_type,
+                    [false, false, false, false],
+                    style.sensor.padding,
+                    iced::Length::Shrink,
+                    iced::Length::Shrink,
+                ),
+                style.tip,
+            )
+            .gap(crate::TOOLTIP_GAP)
+            .into()
+        };
+        row = row.push(cell);
     }
     row.into()
 }
@@ -302,9 +385,9 @@ mod tests {
 
     const CLIENTS: &str = r#"[
         {"address": "0xAB12", "class": "kitty", "title": "shell", "mapped": true,
-         "workspace": {"id": 1, "name": "1"}},
+         "focusHistoryID": 0, "workspace": {"id": 1, "name": "1"}},
         {"address": "0xCD34", "class": "vivaldi-stable", "title": "Browser", "mapped": true,
-         "workspace": {"id": 10, "name": "10"}},
+         "focusHistoryID": 1, "workspace": {"id": 10, "name": "10"}},
         {"address": "0xEF56", "class": "ghost", "title": "mid-air", "mapped": false,
          "workspace": {"id": 1, "name": "1"}}
     ]"#;
@@ -324,6 +407,20 @@ mod tests {
         assert!(parse_clients("[]").is_empty());
     }
 
+    /// Only `focusHistoryID == 0` is the active window; a background
+    /// one (1) and a client with no history at all are not.
+    #[test]
+    fn parse_clients_marks_only_the_focused_window() {
+        let rows = parse_clients(CLIENTS);
+        assert!(rows[0].focused, "focusHistoryID 0 is the active window");
+        assert!(!rows[1].focused, "history > 0 is background");
+        let bare = parse_clients(
+            r#"[{"address": "0x1", "class": "c", "title": "t", "mapped": true,
+                 "workspace": {"id": 1, "name": "1"}}]"#,
+        );
+        assert!(!bare[0].focused, "an absent history means not focused");
+    }
+
     #[test]
     fn sort_rows_orders_by_numeric_workspace_then_title() {
         let mut rows = parse_clients(CLIENTS);
@@ -332,6 +429,7 @@ mod tests {
             class: "c".into(),
             title: "apple".into(),
             workspace: "2".into(),
+            focused: false,
         });
         sort_rows(&mut rows);
         let order: Vec<&str> = rows.iter().map(|r| r.title.as_str()).collect();

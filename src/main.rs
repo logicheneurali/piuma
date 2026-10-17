@@ -126,6 +126,9 @@ const CALENDAR_CELL_PAD: u32 = 6;
 // so a stray click below it reaches the window underneath.
 /// Padding around the entry list (all four sides).
 const MENU_PAD: u32 = 6;
+/// Distance between a tooltip and the widget it describes (icons and
+/// tray items): enough to read it as attached, never on the widget.
+const TOOLTIP_GAP: f32 = 8.0;
 /// Indent per submenu level (rows and the width estimate agree on it).
 const MENU_INDENT: u32 = 14;
 /// Width bounds: a one-item menu stays grabbable, a long label does
@@ -252,6 +255,9 @@ struct Panel {
     /// Workspace row under the cursor in the taskbar menu
     /// (`TaskbarMenuHover`), `None` outside every row.
     taskbar_menu_hover: Option<u32>,
+    /// Address of the taskbar icon under the cursor (`None` = none):
+    /// the row's hover fill.
+    taskbar_hover: Option<String>,
     /// Trend history for the `draw_graph` sensors' hover popup: one
     /// dense ring of samples per config, rebuilt on reload (see
     /// `graphs`).
@@ -415,6 +421,16 @@ enum Message {
     /// Workspace row under the cursor in the taskbar menu (`None`
     /// outside every row).
     TaskbarMenuHover(Option<u32>),
+    /// Menu row the cursor left: clears only if it is still the hovered
+    /// one — widget order can deliver this exit after the next row's
+    /// enter (iced visits the tree in order), and a stale exit must not
+    /// drop the new hover.
+    TaskbarMenuLeft(u32),
+    /// Taskbar icon under the cursor (`None` = none).
+    TaskbarIconHover(Option<String>),
+    /// Taskbar icon the cursor left: same stale-exit rule as the menu
+    /// rows (`TaskbarMenuLeft`).
+    TaskbarIconLeft(String),
     /// Left the taskbar menu's surface: close it.
     TaskbarMenuClosed,
     /// Tray state changed (item added/removed/updated): rebuild now.
@@ -1640,6 +1656,26 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             panel.taskbar_menu_hover = row;
             Command::none()
         }
+        Message::TaskbarMenuLeft(workspace) => {
+            // An exit that names another row arrived after the new
+            // row's enter (tree order): only the row still under the
+            // cursor may clear the hover.
+            if panel.taskbar_menu_hover == Some(workspace) {
+                panel.taskbar_menu_hover = None;
+            }
+            Command::none()
+        }
+        Message::TaskbarIconHover(target) => {
+            panel.taskbar_hover = target;
+            Command::none()
+        }
+        Message::TaskbarIconLeft(address) => {
+            // Same stale-exit rule as `TaskbarMenuLeft`.
+            if panel.taskbar_hover.as_deref() == Some(address.as_str()) {
+                panel.taskbar_hover = None;
+            }
+            Command::none()
+        }
         Message::TaskbarMenuClosed => {
             if let Some((id, _)) = panel.taskbar_menu.take() {
                 panel.taskbar_menu_hover = None;
@@ -1988,6 +2024,7 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
                         border_type: s.border_type.clone(),
                         padding: s.padding,
                     },
+                    tooltip_side(panel_anchor(&panel.config)),
                 )
             } else if let Some(buttons) = &s.workspaces {
                 // One button per available workspace (roadmap2 #4): the
@@ -2018,8 +2055,28 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
             } else if let Some(slots) = &s.taskbar {
                 // One icon per open window: the slots own their mouse
                 // handling like tray icons (left focuses, middle closes,
-                // right opens the move menu).
-                windows::row(slots).into()
+                // right opens the move menu); their fills and tooltip
+                // come from the sensor's own colours — the active
+                // window keeps the sensor's background, the hovered
+                // slot wins over it.
+                let active_bg = s.bg_color.or(Some(section_bg));
+                let row_style = windows::RowStyle {
+                    sensor: &tray::Style {
+                        bg_color: active_bg,
+                        text_color: s.text_color,
+                        border_color: s.border_color,
+                        border_width: s.border_width,
+                        border_radius: s.border_radius,
+                        border_type: s.border_type.clone(),
+                        padding: s.padding,
+                    },
+                    font: font_obj,
+                    font_size,
+                    hover_bg: s.bg_color_hover.or(active_bg),
+                    active_bg,
+                    tip: tooltip_side(panel_anchor(&panel.config)),
+                };
+                windows::row(slots, panel.taskbar_hover.as_deref(), &row_style).into()
             } else {
                 // Icon first when the sensor declares one (roadmap N1), then
                 // the optional name, then the value: an empty name still
@@ -2600,6 +2657,22 @@ fn panel_anchor(config: &config::Config) -> Anchor {
             "bottom" => Anchor::Bottom,
             _ => Anchor::Top,
         }
+    }
+}
+
+/// The side a tooltip opens on: away from the panel's anchored edge —
+/// a top bar's tooltips drop below the icon (never over the bar
+/// itself), a bottom bar's rise above it, side bars push inward.
+fn tooltip_side(anchor: Anchor) -> iced::widget::tooltip::Position {
+    use iced::widget::tooltip::Position;
+    if anchor.contains(Anchor::Top) {
+        Position::Bottom
+    } else if anchor.contains(Anchor::Bottom) {
+        Position::Top
+    } else if anchor.contains(Anchor::Left) {
+        Position::Right
+    } else {
+        Position::Left
     }
 }
 
@@ -4421,28 +4494,49 @@ fn taskbar_menu_view(panel: &Panel) -> Element<'_, Message> {
     let font = panel_font(&panel.config);
     let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
     let row_h = menu_row_h(font_size);
+    // A hover row rounds at most to half its own height.
+    let radius = (st.border_radius as f32).min(row_h as f32 / 2.0);
     let mut list: Column<'_, Message> = Column::new();
     for workspace in 1..=9u32 {
         let hovered = panel.taskbar_menu_hover == Some(workspace);
+        // The hover fill follows the menu's own corners: the top row
+        // rounds up, the last rounds down, the middle rows meet their
+        // neighbours square (`corner_radius`: touching sides are flat).
+        let touch = if workspace == 1 {
+            [false, false, true, false]
+        } else if workspace == 9 {
+            [true, false, false, false]
+        } else {
+            [true, true, true, true]
+        };
         let cell = container(
+            // Centred in the cell (width Fill only on the cell): the
+            // label keeps its own width and sits mid-menu instead of
+            // glued to the left edge.
             text(workspace.to_string())
                 .size(font_size)
                 .color(st.text)
-                .font(font)
-                .width(Length::Fill),
+                .font(font),
         )
         .width(Length::Fill)
         .height(Length::Fixed(row_h as f32))
         .center_x(Length::Fill)
+        .align_y(Alignment::Center)
         .style(move |_theme| ContainerStyle {
             background: hovered.then(|| Background::Color(st.bg_hover)),
+            border: iced::Border {
+                radius: corner_radius(touch, radius),
+                ..Default::default()
+            },
             ..ContainerStyle::default()
         });
         list = list.push(
             MouseArea::new(cell)
                 .on_press(Message::TaskbarMenuWs(workspace))
                 .on_enter(Message::TaskbarMenuHover(Some(workspace)))
-                .on_exit(Message::TaskbarMenuHover(None))
+                // The exit names its row: a stale one (arriving after
+                // the next row's enter) must not clear the new hover.
+                .on_exit(Message::TaskbarMenuLeft(workspace))
                 .interaction(iced::mouse::Interaction::Pointer),
         );
     }
@@ -4705,6 +4799,7 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         notif_list: None,
                         taskbar_menu: None,
                         taskbar_menu_hover: None,
+                        taskbar_hover: None,
                         graphs,
                         graph_popup: None,
                         graph_link: None,
@@ -4812,8 +4907,8 @@ mod tests {
         monitor_names_json, notif_list_row_h, notif_list_size, notifications, palette,
         panel_background, popup_card_h, popup_missed_tick, popup_placement, popup_style,
         scroll_rows, section_touch, shifted_surface_rect, taskbar_menu_size, text_width,
-        wallpaper_plan, GraphPopup, PopupStyle, MENU_INDENT, MENU_MAX_W, MENU_MIN_W, MENU_PAD,
-        NOTIF_LIST_W_MAX,
+        tooltip_side, wallpaper_plan, GraphPopup, PopupStyle, MENU_INDENT, MENU_MAX_W,
+        MENU_MIN_W, MENU_PAD, NOTIF_LIST_W_MAX,
     };
     use iced::font::Font;
     use iced_exwlshell::reexport::Anchor;
@@ -5126,6 +5221,18 @@ mod tests {
         let (w_big, h_big) = taskbar_menu_size(&font, 24);
         assert!(w_big >= w, "a bigger font never measures narrower");
         assert!(h_big > h, "a bigger font never measures shorter");
+    }
+
+    /// A tooltip opens away from the bar's anchored edge: below for a
+    /// top bar (never landing on the bar), above for a bottom one,
+    /// inward for the side bars.
+    #[test]
+    fn tooltip_side_points_away_from_the_anchor_edge() {
+        use iced::widget::tooltip::Position;
+        assert_eq!(tooltip_side(Anchor::Top), Position::Bottom);
+        assert_eq!(tooltip_side(Anchor::Bottom), Position::Top);
+        assert_eq!(tooltip_side(Anchor::Left), Position::Right);
+        assert_eq!(tooltip_side(Anchor::Right), Position::Left);
     }
 
     /// Down-right from the cursor; flips to the opposite edge when the
