@@ -10,9 +10,31 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use crate::icons;
+use std::sync::atomic::{AtomicU16, Ordering};
 
-/// Row icon size in px (fixed: the icons are the row, no text).
+/// Icon edge in px before the first tick computes the real one.
 const ICON_SIZE: u16 = 16;
+
+/// The slot's own padding around the icon (the hover fill covers the
+/// whole slot); main subtracts it from the row height as well.
+pub const SLOT_PAD: u16 = 2;
+
+/// The icon edge in px the taskbar renders at right now; main computes
+/// it from the sensor row's usable height (`icons::row_icon_target`,
+/// like the tray's) and the resolution reads it too — the theme
+/// lookup is memoized by size, so both sides must be this number.
+static ICON_TARGET: AtomicU16 = AtomicU16::new(ICON_SIZE);
+
+/// The icon edge in px the taskbar renders at right now.
+pub fn icon_target() -> u16 {
+    ICON_TARGET.load(Ordering::Relaxed)
+}
+
+/// Store the icon edge (main computes it from the sensor's usable
+/// height); already-resolved slots re-resolve on the next tick.
+pub fn set_icon_target(size: u16) {
+    ICON_TARGET.store(size, Ordering::Relaxed);
+}
 
 /// One open window as the sensor lists it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,13 +91,14 @@ pub fn list() -> Vec<WinRow> {
 /// app icon resolved through the memoized theme lookup (the per-tick
 /// cost is a map clone; the first lookup may walk the theme once).
 pub fn task_icons() -> Vec<TaskIcon> {
+    let target = icon_target();
     list()
         .into_iter()
         .map(|row| {
             let icon = app_icon(&row.class)
-                .and_then(|name| icons::resolve(icons::icon_theme(), &name, ICON_SIZE))
+                .and_then(|name| icons::resolve(icons::icon_theme(), &name, target))
                 .or_else(|| {
-                    icons::resolve(icons::icon_theme(), "application-x-executable", ICON_SIZE)
+                    icons::resolve(icons::icon_theme(), "application-x-executable", target)
                 });
             TaskIcon {
                 address: row.address,
@@ -323,8 +346,8 @@ pub fn row<'a>(
         } else {
             None
         };
-        let slot = container(icons::widget(path, ICON_SIZE as f32))
-            .padding(2)
+        let slot = container(icons::widget(path, f32::from(icon_target())))
+            .padding(SLOT_PAD)
             .style(move |_theme| iced::widget::container::Style {
                 background: fill.map(iced::Background::Color),
                 border: iced::Border {

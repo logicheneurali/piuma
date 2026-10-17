@@ -1184,6 +1184,7 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             // Icons size to the space their sensor box really has; both the
             // view and the icon resolution read tray::icon_target.
             update_tray_icon_target(panel);
+            update_taskbar_icon_target(panel);
             let mut cmds: Vec<Command<Message>> = Vec::new();
             // A popup that lost both its sensor and its pointer gets
             // reaped once its grace runs out: the sensor's leave can act
@@ -2601,6 +2602,32 @@ fn update_tray_icon_target(panel: &Panel) {
     }
     if let Some(target) = smallest {
         tray::set_icon_target(target);
+    }
+}
+
+/// The taskbar slots' icon edge: the row height the taskbar sensor
+/// really has (`row_icon_target`), minus the slot padding around each
+/// icon — the same fit the tray icons and the sensor icons use, so the
+/// slots fill the bar instead of sitting at a fixed 16 px.
+fn update_taskbar_icon_target(panel: &Panel) {
+    let thickness = panel_thickness(&panel.config);
+    let font = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
+    let mut smallest: Option<u16> = None;
+    for section in &panel.sections {
+        let title_extra = icons::stacked_title_extra(&section.layout, &section.name, font);
+        for sensor in &section.sensors {
+            if sensor.taskbar.is_some() {
+                let target = icons::row_icon_target(
+                    thickness,
+                    title_extra,
+                    u32::from(sensor.padding) + u32::from(windows::SLOT_PAD),
+                );
+                smallest = Some(smallest.map_or(target, |m| m.min(target)));
+            }
+        }
+    }
+    if let Some(target) = smallest {
+        windows::set_icon_target(target);
     }
 }
 
