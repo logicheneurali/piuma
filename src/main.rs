@@ -2758,6 +2758,23 @@ fn hyprctl_cursor_global() -> Option<(i32, i32)> {
     Some((v["x"].as_i64()? as i32, v["y"].as_i64()? as i32))
 }
 
+/// The tooltip surface metrics for a text: every `\n`-separated line
+/// is fitted to `budget` (like the menu labels), the surface is as
+/// wide as the widest fitted line and one `menu_row_h` per line tall —
+/// so a multi-line SNI tooltip (`title\nbody`) is measured, not cut to
+/// one line's height. Returns (width, height, fitted text).
+fn tooltip_fit(font: &Font, font_size: u32, text: &str, budget: u32) -> (u32, u32, String) {
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    let jobs: Vec<(String, u32)> = lines.into_iter().map(|line| (line, budget)).collect();
+    let fitted = text_width::fit(font, font_size, &jobs);
+    let width = u32::from(text_width::widest(font, font_size, &fitted));
+    let height = menu_row_h(font_size) * fitted.len() as u32;
+    (width, height, fitted.join("\n"))
+}
+
 /// Open (or retarget) the tooltip window for a bar source: the text is
 /// fitted to half the output width, so a long title is cut like the
 /// tray menu's labels instead of stretching off-screen.
@@ -2781,12 +2798,9 @@ fn tooltip_open(panel: &mut Panel, id: String, text: String) -> Command<Message>
     let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
     let (sw, sh) = unsafe { (SCREEN_WIDTH as i32, SCREEN_HEIGHT as i32) };
     let budget = (sw as u32 / 2).saturating_sub(2 * MENU_PAD);
-    let fitted = text_width::fit(&font, font_size, &[(text, budget)])
-        .pop()
-        .unwrap_or_default();
-    let text_w = u32::from(text_width::widest(&font, font_size, std::slice::from_ref(&fitted)));
+    let (text_w, text_h, fitted) = tooltip_fit(&font, font_size, &text, budget);
     let w = text_w.saturating_add(2 * MENU_PAD).max(48);
-    let h = menu_row_h(font_size).saturating_add(2 * MENU_PAD);
+    let h = text_h.saturating_add(2 * MENU_PAD);
     let at = tooltip_cursor_point(panel);
     let thickness = panel_thickness(&panel.config) as i32;
     let (anchor, margin) =
@@ -5097,8 +5111,8 @@ mod tests {
         monitor_names_json, notif_list_row_h, notif_list_size, notifications, palette,
         panel_background, popup_card_h, popup_missed_tick, popup_placement, popup_style,
         scroll_rows, section_touch, shifted_surface_rect, taskbar_menu_size, text_width,
-        tooltip_placement, wallpaper_plan, GraphPopup, PopupStyle, MENU_INDENT, MENU_MAX_W,
-        MENU_MIN_W, MENU_PAD, NOTIF_LIST_W_MAX,
+        tooltip_fit, tooltip_placement, wallpaper_plan, GraphPopup, PopupStyle, MENU_INDENT,
+        MENU_MAX_W, MENU_MIN_W, MENU_PAD, NOTIF_LIST_W_MAX,
     };
     use iced::font::Font;
     use iced_exwlshell::reexport::Anchor;
@@ -5411,6 +5425,27 @@ mod tests {
         let (w_big, h_big) = taskbar_menu_size(&font, 24);
         assert!(w_big >= w, "a bigger font never measures narrower");
         assert!(h_big > h, "a bigger font never measures shorter");
+    }
+
+    /// Every `\n`-separated line is fitted and measured: the surface
+    /// is as wide as the widest line, one row per line tall, and an
+    /// over-budget line is cut on its own.
+    #[test]
+    fn tooltip_fit_measures_every_line() {
+        let font = Font::with_name("Noto Sans");
+        let (w, h, fitted) = tooltip_fit(&font, 14, "Title\nSome longer body line", 500);
+        assert_eq!(fitted, "Title\nSome longer body line");
+        assert_eq!(h, 2 * menu_row_h(14));
+        let widest = text_width::widest(&font, 14, &["Some longer body line".to_string()]);
+        assert_eq!(w, u32::from(widest));
+        // The long line is cut, the short one keeps; two rows still.
+        let long = "x".repeat(400);
+        let (w2, h2, fitted2) = tooltip_fit(&font, 14, &format!("ok\n{long}"), 60);
+        assert_eq!(h2, 2 * menu_row_h(14));
+        assert!(w2 <= 60);
+        let (first, second) = fitted2.split_once('\n').unwrap();
+        assert_eq!(first, "ok");
+        assert!(second.ends_with('…'));
     }
 
     /// A tooltip window sits just off the bar's anchored edge on the
