@@ -10,6 +10,7 @@ use crate::sensors;
 /// Y-scale policy (see `graphs::scale_of`). One read per tick feeds
 /// both consumers: no second pass over /proc, no extra command spawn,
 /// and the stateful CPU delta can only be sampled once.
+#[derive(Clone, Debug)]
 pub struct Read {
     pub text: String,
     pub graph: Option<(f64, graphs::Scale)>,
@@ -20,6 +21,15 @@ fn plain(text: String) -> Read {
     Read {
         text,
         graph: None,
+    }
+}
+
+impl Read {
+    /// A read that never ran (its reply raced a config reload): empty
+    /// text and no sample, so a graph column repeats its last value
+    /// instead of taking a neighbour's reading.
+    pub fn missing() -> Read {
+        plain(String::new())
     }
 }
 
@@ -177,6 +187,34 @@ pub fn run(source: &SensorSource, hypr: Option<&crate::hypr::Snapshot>) -> Read 
         // `windows::task_icons()`, built per tick in `update`.
         SensorSource::Taskbar {} => plain(String::new()),
     }
+}
+
+/// One background data pass for a tick: the shared compositor
+/// snapshot (`None` when no Hyprland-backed sensor asked for it) plus
+/// every sensor's reading, in config order — the exact sequence the
+/// tick used to run inline on the UI thread.
+#[derive(Clone, Debug)]
+pub struct Reads {
+    pub hypr: Option<crate::hypr::Snapshot>,
+    pub values: Vec<Read>,
+}
+
+/// Read every source off the UI thread (the tick spawns this on a
+/// worker, see `spawn_read`): one pass forks the compositor documents
+/// every Hyprland-backed source shares and then each sensor in turn —
+/// duplicate commands still fork once each (see the tick's cadence).
+pub fn read_all(sources: &[SensorSource]) -> Reads {
+    let needs_hypr = sources.iter().any(|s| {
+        matches!(
+            s,
+            SensorSource::Window {}
+                | SensorSource::Workspace {}
+                | SensorSource::Taskbar {}
+        )
+    });
+    let hypr = needs_hypr.then(crate::hypr::snapshot);
+    let values = sources.iter().map(|s| run(s, hypr.as_ref())).collect();
+    Reads { hypr, values }
 }
 
 #[cfg(test)]

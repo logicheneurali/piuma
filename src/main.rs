@@ -276,6 +276,16 @@ struct Panel {
     /// rebuilt on config reload and on wallpaper-palette change — the
     /// tick pairs readings with it instead of re-resolving colours.
     styles: Vec<SectionStyle>,
+    /// True while the tick's data pass runs on a worker thread: one
+    /// read at a time, so replies can never arrive out of order.
+    read_pending: bool,
+    /// Bumped on every config reload: a reply built against an older
+    /// config no longer lines up with the sensor list and is dropped.
+    cfg_gen: u64,
+    /// Set when geometry or config moved in the tick that spawned the
+    /// current read; consumed with the fresh sections, so the popup
+    /// re-anchors on them (`apply_read` → `sync_popup`).
+    popup_resync: bool,
     /// Index into `sections[s]` and `sections[s].sensors[sensor]` under the cursor.
     hovered: Option<(usize, usize)>,
     /// State (mtime, len) of the last config read attempt: unchanged files
@@ -455,6 +465,10 @@ struct CalendarPopup {
 enum Message {
     /// Marks a second edge: the tick handler reloads, polls and advances.
     Tick,
+    /// The tick's data pass finished on a worker thread: the config
+    /// generation it read against (a reply from an older config is
+    /// dropped, see `spawn_read`) and every sensor's reading.
+    SensorsReady(u64, sensor_runner::Reads),
     /// The wallpaper palette finished extracting: the tones (or `None`
     /// on a failed decode) and the file key they came from.
     PaletteReady(Option<palette::Palette>, (String, SystemTime)),
@@ -1150,6 +1164,187 @@ fn maybe_reload(panel: &mut Panel) -> Option<(config::Config, String)> {
 /// Applies a message to the panel. `timed`'s `Instant` parameter was dropped
 /// in the migration to the `daemon` build pattern (multi-surface), and the
 /// `Tick` payload with it: the tick only marks the second edge.
+/// Spawn the tick's data pass: the shared compositor snapshot plus
+/// every sensor's reading runs on a worker thread, and its reply
+/// pairs them with the resolved styles (`SensorsReady` →
+/// `apply_read`). One pass at a time (`read_pending`): replies stay
+/// ordered and a slow sensor delays only the next rebuild, never the
+/// UI thread. The config generation rides along so a reply built
+/// against a reloaded config is dropped instead of misaligned.
+fn spawn_read(panel: &mut Panel) -> Command<Message> {
+    panel.read_pending = true;
+    let cfg_gen = panel.cfg_gen;
+    let sources: Vec<config::SensorSource> = panel
+        .config
+        .panel
+        .sections
+        .iter()
+        .flat_map(|sec| &sec.sensors)
+        .map(|s| s.source.clone())
+        .collect();
+    Command::perform(
+        smol::unblock(move || sensor_runner::read_all(&sources)),
+        move |reads| Message::SensorsReady(cfg_gen, reads),
+    )
+}
+
+/// Pair one data pass with the resolved styles and run the downstream
+/// work the tick used to do inline: graph rings, icon fits, popup
+/// reaping and the popup/link sync against fresh sections. Returns
+/// the window commands the caller batches.
+fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<Command<Message>> {
+    let sensor_runner::Reads { hypr, values } = data;
+    // One reading per configured sensor, consumed in config order.
+    let mut reads = values.into_iter();
+    // Samples of this pass for the graph history (one read per
+    // sensor, collected here so the sections and the history never
+    // borrow the panel at once).
+    let mut graph_samples: Vec<((usize, usize), f64)> = Vec::new();
+    let mut sections: Vec<SectionData> = Vec::new();
+    // The styles are config-driven and already resolved (`restyle`,
+    // on load/reload/palette change): this pass only pairs its
+    // readings with them — no colour parsing, no shape strings per
+    // sensor per second. The zip stops at the shorter side, so a
+    // stale style list can never panic.
+    for (section_idx, (section_cfg, section_style)) in panel
+        .config
+        .panel
+        .sections
+        .iter()
+        .zip(&panel.styles)
+        .enumerate()
+    {
+        let sensors: Vec<SensorValue> = section_cfg
+            .sensors
+            .iter()
+            .zip(&section_style.sensors)
+            .enumerate()
+            .map(|(sensor_idx, (s, st))| {
+                // In config order — the same flatten `spawn_read`
+                // cloned the sources from; `missing` covers a reply
+                // shorter than the sensor list.
+                let read = reads.next().unwrap_or_else(sensor_runner::Read::missing);
+                // Graph engine: record this pass's sample for the
+                // sensors that opted in (`draw_graph` on a
+                // graphable source); the columns ignore the rest.
+                if s.draw_graph {
+                    if let Some((sample, _)) = read.graph {
+                        graph_samples.push(((section_idx, sensor_idx), sample));
+                    }
+                }
+                let value = read.text;
+                // Tray sensors render icons from the shared tray state
+                // (tray.rs) instead of text.
+                let tray_icons =
+                    matches!(s.source, config::SensorSource::Tray {}).then(tray::items);
+                // Workspace sensors build their button list from
+                // the shared snapshot (roadmap2 #4): one entry per
+                // available workspace, the active one flagged.
+                let workspace_buttons = matches!(s.source, config::SensorSource::Workspace {})
+                    .then(|| workspace::buttons(hypr.as_ref()));
+                // Taskbar sensors rebuild their icon slots from the
+                // shared snapshot per pass; the icons resolve
+                // through the memoized theme lookups.
+                let taskbar_icons = matches!(s.source, config::SensorSource::Taskbar {})
+                    .then(|| windows::task_icons(hypr.as_ref()));
+                // Only the net rate sensors pin their value box
+                // (roadmap M5), and the pin is the displayed value's
+                // OWN tier: exact width (no headroom for units this
+                // state never shows), constant while the value moves
+                // inside the tier (figure spaces), moving with it on
+                // a ×1024 crossing — same pass, same string, so the
+                // box can never undershoot its content. Computed
+                // before the literal because `value` is moved into
+                // it; the measurement is cached per
+                // font/size/patterns, so the per-pass rebuild only
+                // re-measures when the tier label changes.
+                let fixed_width = matches!(
+                    &s.source,
+                    config::SensorSource::UsedNetup { .. }
+                        | config::SensorSource::UsedNetdown { .. }
+                )
+                .then(|| {
+                    let font = value_font(&panel.config);
+                    let size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
+                    text_width::widest(&font, size, &sensors::net_rate_samples(&value))
+                });
+                SensorValue {
+                    name: st.name.clone(),
+                    description: st.description.clone(),
+                    value,
+                    text_color: Some(st.text_color),
+                    color_rules: st.color_rules.clone(),
+                    bg_color: st.bg_color,
+                    text_color_hover: st.text_color_hover,
+                    bg_color_hover: st.bg_color_hover,
+                    border_color: st.border_color,
+                    border_width: st.border_width,
+                    border_radius: st.border_radius,
+                    border_type: st.border_type.clone(),
+                    padding: st.padding,
+                    action: st.action.clone(),
+                    tray: tray_icons,
+                    workspaces: workspace_buttons,
+                    taskbar: taskbar_icons,
+                    is_notifications: st.is_notifications,
+                    icon: st.icon.clone(),
+                    icon_size: st.icon_size,
+                    fixed_width,
+                }
+            })
+            .collect();
+
+        sections.push(SectionData {
+            name: section_style.name.clone(),
+            layout: section_style.layout.clone(),
+            bg_color: section_style.bg_color,
+            text_color: section_style.text_color,
+            title_color: section_style.title_color,
+            border_color: section_style.border_color,
+            border_width: section_style.border_width,
+            border_radius: section_style.border_radius,
+            border_type: section_style.border_type.clone(),
+            touch: section_style.touch,
+            sensors,
+        });
+    }
+    panel.sections = sections;
+    // One ring advance per pass: columns repeat their last value
+    // when a reading was missing (time stays uniform).
+    panel.graphs.record(&graph_samples);
+    // Icons size to the space their sensor box really has; both the
+    // view and the icon resolution read tray::icon_target.
+    update_tray_icon_target(panel);
+    update_taskbar_icon_target(panel);
+
+    let mut cmds: Vec<Command<Message>> = Vec::new();
+    // A popup that lost both its sensor and its pointer gets
+    // reaped once its grace runs out: the sensor's leave can act
+    // on stale coordinates and, after the cursor rests on another
+    // application's window, no event ever arrives again.
+    if let Some(gp) = reap_abandoned_popup(panel) {
+        cmds.push(iced::window::close(gp.id));
+    }
+    // The calendar popup's three-second grace runs on the same
+    // pass: neither sensor nor surface under the cursor spends it.
+    if let Some(cp) = reap_abandoned_calendar(panel) {
+        cmds.push(iced::window::close(cp.id));
+    }
+    // The popup follows the active set (and re-anchors with the bar
+    // on a geometry change) — one place drives its window.
+    let resync = std::mem::take(&mut panel.popup_resync);
+    if let Some(cmd) = sync_popup(panel, resync) {
+        cmds.push(cmd);
+    }
+    // The connector surface rides with the popup: it opens once the
+    // sensor rect is known and dies with the popup — one place
+    // drives its window too.
+    if let Some(cmd) = sync_graph_link(panel) {
+        cmds.push(cmd);
+    }
+    cmds
+}
+
 fn update(panel: &mut Panel, message: Message) -> Command<Message> {
     match message {
         Message::Tick => {
@@ -1164,6 +1359,9 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             if let Some((reloaded, path)) = maybe_reload(panel) {
                 config_reloaded = true;
                 panel.config = reloaded;
+                // An in-flight data pass was flattened against the
+                // previous sensor list: its reply gets dropped.
+                panel.cfg_gen += 1;
                 // The colour chains follow the new config (see
                 // `restyle`); the readings and the geometry below
                 // don't need them, so one resolve covers the tick.
@@ -1188,158 +1386,12 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                 }
             }
 
-            // One compositor read for every Hyprland-backed sensor:
-            // the taskbar slots, the window title and the workspace
-            // buttons/text all ride the same three documents — one
-            // fetch each instead of one per sensor (see `hypr.rs`).
-            let hypr_needed = panel
-                .config
-                .panel
-                .sections
-                .iter()
-                .flat_map(|sec| &sec.sensors)
-                .any(|s| {
-                    matches!(
-                        s.source,
-                        config::SensorSource::Window {}
-                            | config::SensorSource::Workspace {}
-                            | config::SensorSource::Taskbar {}
-                    )
-                });
-            let hypr = hypr_needed.then(hypr::snapshot);
-
-            // Samples of this tick for the graph history (one read per
-            // sensor, collected here so the closure and the history
-            // never borrow the panel at once).
-            let mut graph_samples: Vec<((usize, usize), f64)> = Vec::new();
-            let mut sections: Vec<SectionData> = Vec::new();
-            // The styles are config-driven and already resolved
-            // (`restyle`, on load/reload/palette change): the tick only
-            // pairs this second's readings with them — no colour
-            // parsing, no shape strings per sensor per second. The zip
-            // stops at the shorter side, so a stale style list can
-            // never panic.
-            for (section_idx, (section_cfg, section_style)) in panel
-                .config
-                .panel
-                .sections
-                .iter()
-                .zip(&panel.styles)
-                .enumerate()
-            {
-                let sensors: Vec<SensorValue> = section_cfg
-                    .sensors
-                    .iter()
-                    .zip(&section_style.sensors)
-                    .enumerate()
-                    .map(|(sensor_idx, (s, st))| {
-                        let read = sensor_runner::run(&s.source, hypr.as_ref());
-                        // Graph engine: record this tick's sample for the
-                        // sensors that opted in (`draw_graph` on a
-                        // graphable source); the columns ignore the rest.
-                        if s.draw_graph {
-                            if let Some((sample, _)) = read.graph {
-                                graph_samples.push(((section_idx, sensor_idx), sample));
-                            }
-                        }
-                        let value = read.text;
-                        // Tray sensors render icons from the shared tray state
-                        // (tray.rs) instead of text.
-                        let tray_icons =
-                            matches!(s.source, config::SensorSource::Tray {}).then(tray::items);
-                        // Workspace sensors build their button list from
-                        // the shared snapshot (roadmap2 #4): one entry per
-                        // available workspace, the active one flagged.
-                        let workspace_buttons =
-                            matches!(s.source, config::SensorSource::Workspace {})
-                                .then(|| workspace::buttons(hypr.as_ref()));
-                        // Taskbar sensors rebuild their icon slots from the
-                        // shared snapshot per tick; the icons resolve
-                        // through the memoized theme lookups.
-                        let taskbar_icons = matches!(s.source, config::SensorSource::Taskbar {})
-                            .then(|| windows::task_icons(hypr.as_ref()));
-                        // Only the net rate sensors pin their value box
-                        // (roadmap M5), and the pin is the displayed value's
-                        // OWN tier: exact width (no headroom for units this
-                        // state never shows), constant while the value moves
-                        // inside the tier (figure spaces), moving with it on
-                        // a ×1024 crossing — same tick, same string, so the
-                        // box can never undershoot its content. Computed
-                        // before the literal because `value` is moved into
-                        // it; the measurement is cached per
-                        // font/size/patterns, so the per-tick rebuild only
-                        // re-measures when the tier label changes.
-                        let fixed_width = matches!(
-                            &s.source,
-                            config::SensorSource::UsedNetup { .. }
-                                | config::SensorSource::UsedNetdown { .. }
-                        )
-                        .then(|| {
-                            let font = value_font(&panel.config);
-                            let size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
-                            text_width::widest(&font, size, &sensors::net_rate_samples(&value))
-                        });
-                        SensorValue {
-                            name: st.name.clone(),
-                            description: st.description.clone(),
-                            value,
-                            text_color: Some(st.text_color),
-                            color_rules: st.color_rules.clone(),
-                            bg_color: st.bg_color,
-                            text_color_hover: st.text_color_hover,
-                            bg_color_hover: st.bg_color_hover,
-                            border_color: st.border_color,
-                            border_width: st.border_width,
-                            border_radius: st.border_radius,
-                            border_type: st.border_type.clone(),
-                            padding: st.padding,
-                            action: st.action.clone(),
-                            tray: tray_icons,
-                            workspaces: workspace_buttons,
-                            taskbar: taskbar_icons,
-                            is_notifications: st.is_notifications,
-                            icon: st.icon.clone(),
-                            icon_size: st.icon_size,
-                            fixed_width,
-                        }
-                    })
-                    .collect();
-
-                sections.push(SectionData {
-                    name: section_style.name.clone(),
-                    layout: section_style.layout.clone(),
-                    bg_color: section_style.bg_color,
-                    text_color: section_style.text_color,
-                    title_color: section_style.title_color,
-                    border_color: section_style.border_color,
-                    border_width: section_style.border_width,
-                    border_radius: section_style.border_radius,
-                    border_type: section_style.border_type.clone(),
-                    touch: section_style.touch,
-                    sensors,
-                });
-            }
-            panel.sections = sections;
-            // One ring advance per tick: columns repeat their last value
-            // when a reading was missing (time stays uniform).
-            panel.graphs.record(&graph_samples);
-            // Icons size to the space their sensor box really has; both the
-            // view and the icon resolution read tray::icon_target.
-            update_tray_icon_target(panel);
-            update_taskbar_icon_target(panel);
+            // Geometry or config moved: the reply that carries the
+            // fresh sections re-anchors the popup on them
+            // (`apply_read` consumes this). The data pass itself runs
+            // on a worker — the UI thread never forks a sensor.
+            panel.popup_resync |= geometry_changed || config_reloaded;
             let mut cmds: Vec<Command<Message>> = Vec::new();
-            // A popup that lost both its sensor and its pointer gets
-            // reaped once its grace runs out: the sensor's leave can act
-            // on stale coordinates and, after the cursor rests on another
-            // application's window, no event ever arrives again.
-            if let Some(gp) = reap_abandoned_popup(panel) {
-                cmds.push(iced::window::close(gp.id));
-            }
-            // The calendar popup's three-second grace runs on the same
-            // tick: neither sensor nor surface under the cursor spends it.
-            if let Some(cp) = reap_abandoned_calendar(panel) {
-                cmds.push(iced::window::close(cp.id));
-            }
             // With multiple layer surfaces the runtime routes actions by
             // surface id: target the bar explicitly. Its id is captured on
             // the first render, which always precedes this Tick (the guard
@@ -1393,7 +1445,24 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             // off-thread only when the wallpaper file changes, dropped
             // when the option turns off.
             cmds.push(sync_palette(panel));
+            // The data pass (compositor snapshot + every reading) runs
+            // on a worker; its reply rebuilds the sections. A pass
+            // already in flight covers this second — one at a time
+            // keeps replies ordered.
+            if !panel.read_pending {
+                cmds.push(spawn_read(panel));
+            }
             Command::batch(cmds)
+        }
+        Message::SensorsReady(cfg_gen, data) => {
+            panel.read_pending = false;
+            if cfg_gen != panel.cfg_gen {
+                // The config moved while this read ran: its readings
+                // no longer line up with the sensor list. Drop them
+                // and read again at once.
+                return spawn_read(panel);
+            }
+            Command::batch(apply_read(panel, data))
         }
         Message::PaletteReady(pal, key) => {
             // The next view applies the tones — or resolves the user's
@@ -5194,6 +5263,9 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         config: cfg,
                         sections: Vec::new(),
                         styles,
+                        read_pending: false,
+                        cfg_gen: 0,
+                        popup_resync: false,
                         hovered: None,
                         last_reload: config_file_state(),
                         last_size: size,

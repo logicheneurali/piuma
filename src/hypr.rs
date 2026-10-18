@@ -18,7 +18,7 @@ pub struct Workspace {
 /// The compositor state the sensors share for one tick. A `None` part
 /// is a failed document: every consumer degrades the way its own
 /// sensor already did (no slots, "No Focus", no buttons).
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Snapshot {
     /// Mapped windows (`hyprctl clients -j`), compositor order.
     pub clients: Option<Vec<windows::WinRow>>,
