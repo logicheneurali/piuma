@@ -6,8 +6,9 @@
 //! font's figures (tabular or not).
 
 use iced::font::{Family, Font, Weight};
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 /// Width of the longest measured sample, in px: any text that far can't be
 /// reached in practice, it only exists to disable line wrapping.
@@ -16,9 +17,101 @@ const UNBOUNDED: f32 = 100_000.0;
 /// Marked on a label that does not fit its budget (see [`fit`]).
 const ELLIPSIS: &str = "…";
 
-/// Result of the last measurement: the sections are rebuilt on every tick,
-/// so the system font scan must happen only when font/size really change.
-static CACHE: Mutex<Option<CacheKey>> = Mutex::new(None);
+/// How many distinct measurements stay shaped: the bar's own questions
+/// are few (section labels, pinned samples, one menu, one popup) — the
+/// value texts that change every tick simply push out the entries nobody
+/// asks for anymore.
+const CAP: usize = 128;
+
+/// Identity of a measured width: font, weight, size AND the pattern list
+/// (a different list is a different question and must be measured again).
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct MeasureKey {
+    family: String,
+    weight: Weight,
+    size: u32,
+    patterns: u64,
+}
+
+/// A cached width with its last-use stamp (a monotonic clock): an
+/// overflow drops the least-recently-used entry.
+struct Hit {
+    width: u16,
+    used: u64,
+}
+
+/// The width cache: bounded map, least-recently-used out. The previous
+/// single-slot version ping-ponged between the sensors' two per-tick
+/// questions and re-shaped on every pass; a hit now only bumps its
+/// stamp, so stable labels stay hot while dynamic texts drift out.
+struct MeasureCache {
+    map: HashMap<MeasureKey, Hit>,
+    clock: u64,
+}
+
+impl MeasureCache {
+    fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+            clock: 0,
+        }
+    }
+
+    /// The width for `key`, its stamp refreshed on a hit.
+    fn get(&mut self, key: &MeasureKey) -> Option<u16> {
+        let hit = self.map.get_mut(key)?;
+        self.clock += 1;
+        hit.used = self.clock;
+        Some(hit.width)
+    }
+
+    /// Remember `width`; the coldest entry leaves once over `CAP`.
+    fn put(&mut self, key: MeasureKey, width: u16) {
+        self.clock += 1;
+        self.map.insert(
+            key,
+            Hit {
+                width,
+                used: self.clock,
+            },
+        );
+        if self.map.len() > CAP {
+            let coldest = self
+                .map
+                .iter()
+                .min_by_key(|(_, hit)| hit.used)
+                .map(|(key, _)| key.clone());
+            if let Some(key) = coldest {
+                self.map.remove(&key);
+            }
+        }
+    }
+}
+
+/// The cache, recovered from poisoning (a panic while holding it can only
+/// make the cache stale, never wrong) — same pattern as `icons::cache`.
+fn cache() -> std::sync::MutexGuard<'static, MeasureCache> {
+    static CACHE: OnceLock<Mutex<MeasureCache>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| Mutex::new(MeasureCache::new()))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The key `widest` looks up — shared with the tests that pin the
+/// cache's behaviour.
+fn key_for(font: &Font, font_size: u32, patterns: &[String]) -> MeasureKey {
+    let mut hasher = std::hash::DefaultHasher::new();
+    for pattern in patterns {
+        pattern.hash(&mut hasher);
+    }
+    MeasureKey {
+        family: format!("{:?}", font.family),
+        weight: font.weight,
+        size: font_size,
+        patterns: hasher.finish(),
+    }
+}
 
 /// The font system itself, built on first use and reused after: it used
 /// to scan and keep every font on the disk (~1000 faces parsed and held
@@ -32,44 +125,17 @@ static CACHE: Mutex<Option<CacheKey>> = Mutex::new(None);
 /// it was built for and rebuilds when a config reload changes it.
 static SYSTEM: Mutex<Option<(String, cosmic_text::FontSystem)>> = Mutex::new(None);
 
-/// Identity of a measured width: font, size AND the pattern list (a
-/// different list is a different question and must be measured again).
-struct CacheKey {
-    family: String,
-    weight: Weight,
-    size: u32,
-    patterns: u64,
-    width: u16,
-}
-
 /// Widest pixel width among `patterns`, shaped with `font` at `font_size` px.
 /// Both shaping modes iced may use are measured and the larger result wins,
 /// so the pin can never be narrower than what gets drawn; fractional widths
 /// round up (a sub-pixel under-measure would make iced wrap the text).
 pub fn widest(font: &Font, font_size: u32, patterns: &[String]) -> u16 {
-    let family = format!("{:?}", font.family);
-    let mut hasher = std::hash::DefaultHasher::new();
-    for pattern in patterns {
-        pattern.hash(&mut hasher);
-    }
-    let patterns_hash = hasher.finish();
-    let mut cache = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some(hit) = cache.as_ref().filter(|k| {
-        k.family == family
-            && k.weight == font.weight
-            && k.size == font_size
-            && k.patterns == patterns_hash
-    }) {
-        return hit.width;
+    let key = key_for(font, font_size, patterns);
+    if let Some(hit) = cache().get(&key) {
+        return hit;
     }
     let width = measure(font, font_size, patterns);
-    *cache = Some(CacheKey {
-        family,
-        weight: font.weight,
-        size: font_size,
-        patterns: patterns_hash,
-        width,
-    });
+    cache().put(key, width);
     width
 }
 
@@ -288,6 +354,35 @@ mod tests {
         assert_eq!(wide, widest(&font, 12, &samples));
         // A different size invalidates the cache and measures again.
         assert!(widest(&font, 24, &samples) > wide);
+    }
+
+    /// Several questions stay shaped at once (the sensors ask two per
+    /// tick; the single-slot cache re-shaped one of them every pass) and
+    /// the coldest entry is the one an overflow drops.
+    #[test]
+    fn cache_holds_many_keys_and_drops_the_coldest() {
+        let font = Font::with_name("Noto Sans");
+        let alpha = key_for(&font, 12, &["alpha".to_string()]);
+        widest(&font, 12, &["alpha".to_string()]);
+        widest(&font, 12, &["beta".to_string()]);
+        assert!(
+            cache().map.len() >= 2,
+            "two live questions must coexist: {}",
+            cache().map.len()
+        );
+        assert!(cache().map.contains_key(&alpha), "alpha still warm");
+        for i in 0..=CAP {
+            widest(&font, 12, &[format!("evict-{i}")]);
+        }
+        assert!(
+            !cache().map.contains_key(&alpha),
+            "the coldest entry must leave the bounded cache"
+        );
+        assert!(
+            cache().map.len() <= CAP,
+            "hard bound: {}",
+            cache().map.len()
+        );
     }
 
     /// A short label passes through untouched; an overlong one comes back
