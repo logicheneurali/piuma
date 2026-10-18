@@ -10,16 +10,13 @@ use std::time::{Instant, SystemTime};
 
 use iced::widget::{container, text, Column, Row, MouseArea, Space, Stack};
 use iced::{
-    Alignment, Background, Color, Element, Event, Length, Rectangle, Size,
-    Subscription, Task as Command, Vector,
+    Alignment, Background, Color, Element, Event, Length, Subscription, Task as Command,
 };
 use iced::event;
 use iced::time;
 use iced::font::Font;
 use iced::widget::container::Style as ContainerStyle;
-use iced::advanced::layout::{Limits, Node};
-use iced::advanced::widget::{Operation, Tree, Widget};
-use iced::advanced::{mouse, overlay, renderer, Clipboard, Layout, Shell};
+use iced::advanced::widget::Operation;
 
 use iced_exwlshell::ExWlSettings;
 use iced_exwlshell::daemon;
@@ -35,6 +32,7 @@ mod autostart;
 mod calendar;
 mod config;
 mod dbusmenu;
+mod fill_sections;
 mod graphs;
 mod hypr;
 mod icons;
@@ -42,6 +40,8 @@ mod instance_lock;
 mod menus;
 mod notifications;
 mod palette;
+mod popup_calendar;
+mod popup_graph;
 mod popup_notifications;
 mod sensor_runner;
 mod sensors;
@@ -52,9 +52,16 @@ mod wallpaper_ui;
 mod windows;
 mod workspace;
 
+use fill_sections::FillSections;
 use menus::{
     fit_menu_labels, menu_placement, menu_size, taskbar_menu_size, taskbar_menu_view,
     tray_menu_view,
+};
+use popup_calendar::{
+    calendar_hover_sync, calendar_page, calendar_popup_view, reap_abandoned_calendar,
+};
+use popup_graph::{
+    graph_hover_sync, graph_link_view, graph_popup_view, reap_abandoned_popup, sync_graph_link,
 };
 use popup_notifications::{
     notif_list_row_h, notif_list_view, popup_dismiss, popup_view, scroll_rows, sync_popup,
@@ -100,36 +107,8 @@ pub(crate) const ACTION_CLOSE_PANEL: &str = "close_panel";
 // One popup at a time, on the sensor under the cursor: fixed size, the
 // surface ends where the box ends (no input-region games — the layout
 // below knows nothing of it, the popup is its own window).
-pub(crate) const GRAPH_POPUP_W: u32 = 260;
-pub(crate) const GRAPH_POPUP_H: u32 = 140;
-/// Padding around the connector's bounding box: its surface is the
-/// box plus this on every side (the end dots must not clip).
-pub(crate) const GRAPH_LINK_PAD: i32 = 4;
-/// Content geometry inside the popup: a fixed header box and gap, so
-/// the average label and the canvas share one exact coordinate system
-/// (the label sits on the guide line the draw pass computes).
-pub(crate) const GRAPH_HEADER_H: u32 = 20;
-pub(crate) const GRAPH_SPACING: u32 = 6;
-/// Grace ticks an open graph popup gets once its sensor and its
-/// surface both lost the cursor (≈2 s at the 1 Hz tick): the sensor's
-/// leave can act on stale coordinates and the widget's exit can be
-/// missed, so the reap is the backstop that cannot hang.
-pub(crate) const GRAPH_ABANDON_GRACE: u8 = 2;
-/// Alpha of the tinted plate behind the average label: opaque enough
-/// to hold the text where it crosses the trend line, translucent
-/// enough to keep the guide visible through it.
-pub(crate) const LABEL_BG_ALPHA: f32 = 0.7;
-/// The plate's padding around the average label (v, h).
-pub(crate) const LABEL_PAD_V: f32 = 1.0;
-pub(crate) const LABEL_PAD_H: f32 = 4.0;
 
 // ── calendar popup geometry (the `calendar` sensor) ────────────────
-/// Grace ticks the calendar popup gets after the cursor has left both
-/// its sensor and its surface (1 tick = 1 s at the 1 Hz tick): the
-/// spec asks for three seconds before it disappears.
-pub(crate) const CALENDAR_ABANDON_GRACE: u8 = 3;
-/// Horizontal padding inside one day/label cell, either side.
-pub(crate) const CALENDAR_CELL_PAD: u32 = 6;
 
 // ── tray menu geometry ──────────────────────────────────────────────
 // One row per entry, sized exactly (`menu_row_h` × count + 2× pad, see
@@ -598,11 +577,11 @@ fn sensor_box_id(section: usize, sensor: usize) -> iced::widget::Id {
 /// widget trees (on every window — one answer is enough, only the bar
 /// carries the tagged container) and reports the bounds of the
 /// container tagged with the sensor's widget id.
-struct FindSensorRect {
-    section: usize,
-    sensor: usize,
-    target: iced::widget::Id,
-    found: Option<(i32, i32, i32, i32)>,
+pub(crate) struct FindSensorRect {
+    pub(crate) section: usize,
+    pub(crate) sensor: usize,
+    pub(crate) target: iced::widget::Id,
+    pub(crate) found: Option<(i32, i32, i32, i32)>,
 }
 
 impl FindSensorRect {
@@ -2532,253 +2511,6 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
     surface_container.into()
 }
 
-// ── fill sections widget ───────────────────────────────────────────
-
-/// Sections container used by `align: "fill"`: it fills the whole main axis
-/// of the panel and distributes the sections along it, so the panel always
-/// spans 100% of the available screen space (width for a horizontal panel,
-/// height for a vertical one). Sections keep their intrinsic size; only the
-/// gaps between them move.
-///
-/// The offsets are recomputed on every layout pass from the measured
-/// section sizes:
-///
-/// * **exactly 3 sections** and enough room for both side gaps → the middle
-///   section is centred on the panel: `x1 = avail/2 - w1/2`, which implies
-///   `gap_left = avail/2 - w0 - w1/2` and `gap_right = avail/2 - w2 - w1/2`;
-/// * any other section count, or not enough room (a gap would be negative)
-///   → fallback to the standard distribution: equal spacers between the
-///   sections (space-between: the `n-1` gaps share the free space, clamped
-///   to 0 when the content overflows the panel).
-struct FillSections<'a> {
-    /// Main axis of the panel: `true` for a vertical panel (y axis).
-    vertical: bool,
-    children: Vec<Element<'a, Message>>,
-}
-
-impl<'a> FillSections<'a> {
-    fn new(vertical: bool, children: Vec<Element<'a, Message>>) -> Self {
-        Self { vertical, children }
-    }
-
-    /// Main-axis offset of each section for the given measured sizes; the
-    /// two distribution rules are documented on [`FillSections`].
-    fn distribute(mains: &[f32], avail: f32) -> Vec<f32> {
-        let n = mains.len();
-
-        // 3 sections: centre the middle one if both side gaps stay >= 0
-        // (which also guarantees the sections fit the panel).
-        if n == 3 {
-            let gap_left = avail / 2.0 - mains[0] - mains[1] / 2.0;
-            let gap_right = avail / 2.0 - mains[2] - mains[1] / 2.0;
-            if gap_left >= 0.0 && gap_right >= 0.0 {
-                return vec![0.0, avail / 2.0 - mains[1] / 2.0, avail - mains[2]];
-            }
-        }
-
-        // Standard: equal spacers, first section flush at the start edge,
-        // last one at the end edge (0 gap when the content overflows).
-        let content: f32 = mains.iter().sum();
-        let gap = if n > 1 {
-            (avail - content).max(0.0) / (n as f32 - 1.0)
-        } else {
-            0.0
-        };
-        let mut x = 0.0;
-        mains
-            .iter()
-            .map(|&m| {
-                let at = x;
-                x += m + gap;
-                at
-            })
-            .collect()
-    }
-}
-
-impl Widget<Message, iced::Theme, iced::Renderer> for FillSections<'_> {
-    fn children(&self) -> Vec<Tree> {
-        self.children.iter().map(Tree::new).collect()
-    }
-
-    fn diff(&self, tree: &mut Tree) {
-        tree.diff_children(&self.children);
-    }
-
-    fn size(&self) -> Size<Length> {
-        Size { width: Length::Fill, height: Length::Fill }
-    }
-
-    /// Measures every section unbounded on the main axis (its intrinsic size
-    /// decides the positions) and capped to the panel thickness on the cross
-    /// axis (`Fill` children resolve to `max_cross`), then places each node
-    /// at the offset given by [`FillSections::distribute`].
-    fn layout(
-        &mut self,
-        tree: &mut Tree,
-        renderer: &iced::Renderer,
-        limits: &Limits,
-    ) -> Node {
-        // Main axis = width (horizontal panel) / height (vertical); the
-        // cross axis carries the thickness and every section spans it fully.
-        let (max_main, max_cross) = if self.vertical {
-            (limits.max().height, limits.max().width)
-        } else {
-            (limits.max().width, limits.max().height)
-        };
-
-        let mut nodes = Vec::with_capacity(self.children.len());
-        let mut mains: Vec<f32> = Vec::with_capacity(self.children.len());
-
-        for (child, subtree) in self
-            .children
-            .iter_mut()
-            .zip(tree.children.iter_mut())
-        {
-            let child_limits = Limits::new(
-                Size::ZERO,
-                if self.vertical {
-                    Size::new(max_cross, f32::INFINITY)
-                } else {
-                    Size::new(f32::INFINITY, max_cross)
-                },
-            );
-            let node = child
-                .as_widget_mut()
-                .layout(subtree, renderer, &child_limits);
-            mains.push(if self.vertical {
-                node.size().height
-            } else {
-                node.size().width
-            });
-            nodes.push(node);
-        }
-
-        let positions = Self::distribute(&mains, max_main);
-        for (node, &at) in nodes.iter_mut().zip(&positions) {
-            node.move_to_mut(if self.vertical { (0.0, at) } else { (at, 0.0) });
-        }
-
-        // Fill on both axes: the panel node spans the whole surface.
-        let size = limits.resolve(Length::Fill, Length::Fill, Size::ZERO);
-        Node::with_children(size, nodes)
-    }
-
-    fn operate(
-        &mut self,
-        tree: &mut Tree,
-        layout: Layout<'_>,
-        renderer: &iced::Renderer,
-        operation: &mut dyn Operation,
-    ) {
-        operation.container(None, layout.bounds());
-        operation.traverse(&mut |operation| {
-            self.children
-                .iter_mut()
-                .zip(&mut tree.children)
-                .zip(layout.children())
-                .for_each(|((child, state), layout)| {
-                    child
-                        .as_widget_mut()
-                        .operate(state, layout, renderer, operation);
-                });
-        });
-    }
-
-    /// Forwards the events to the sections (hover/click on the sensors).
-    fn update(
-        &mut self,
-        tree: &mut Tree,
-        event: &Event,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        renderer: &iced::Renderer,
-        clipboard: &mut dyn Clipboard,
-        shell: &mut Shell<'_, Message>,
-        viewport: &Rectangle,
-    ) {
-        for ((child, tree), layout) in self
-            .children
-            .iter_mut()
-            .zip(&mut tree.children)
-            .zip(layout.children())
-        {
-            child.as_widget_mut().update(
-                tree, event, layout, cursor, renderer, clipboard, shell,
-                viewport,
-            );
-        }
-    }
-
-    fn mouse_interaction(
-        &self,
-        tree: &Tree,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-        renderer: &iced::Renderer,
-    ) -> mouse::Interaction {
-        self.children
-            .iter()
-            .zip(&tree.children)
-            .zip(layout.children())
-            .map(|((child, tree), layout)| {
-                child
-                    .as_widget()
-                    .mouse_interaction(tree, layout, cursor, viewport, renderer)
-            })
-            .max()
-            .unwrap_or_default()
-    }
-
-    fn draw(
-        &self,
-        tree: &Tree,
-        renderer: &mut iced::Renderer,
-        theme: &iced::Theme,
-        style: &renderer::Style,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-    ) {
-        for ((child, tree), layout) in self
-            .children
-            .iter()
-            .zip(&tree.children)
-            .zip(layout.children())
-            .filter(|(_, layout)| layout.bounds().intersects(viewport))
-        {
-            child.as_widget().draw(
-                tree, renderer, theme, style, layout, cursor, viewport,
-            );
-        }
-    }
-
-    fn overlay<'b>(
-        &'b mut self,
-        tree: &'b mut Tree,
-        layout: Layout<'b>,
-        renderer: &iced::Renderer,
-        viewport: &Rectangle,
-        translation: Vector,
-    ) -> Option<overlay::Element<'b, Message, iced::Theme, iced::Renderer>> {
-        overlay::from_children(
-            &mut self.children,
-            tree,
-            layout,
-            renderer,
-            viewport,
-            translation,
-        )
-    }
-}
-
-impl<'a> From<FillSections<'a>> for Element<'a, Message> {
-    fn from(fill: FillSections<'a>) -> Self {
-        Element::new(fill)
-    }
-}
-
 // ── positioning helpers ─────────────────────────────────────────────
 
 /// Panel thickness on the cross axis, in pixels: `panel.thickness` from the
@@ -3220,38 +2952,7 @@ pub(crate) fn popup_output_option() -> OutputOption {
 
 
 
-/// One tick of an open popup's abandonment bookkeeping: a pointer on
-/// its surface or back on any sensor resets the count (the popup is
-/// live), otherwise the grace ticks accumulate — `true` once they run
-/// out and the popup must close.
-///
-/// The leave-guard alone cannot decide this: `last_cursor` can be
-/// stale when the sensor's leave processes (widget messages run
-/// before the cursor's own update), and once the cursor rests on
-/// another application's window no event ever arrives again.
-fn popup_missed_tick(gp: &mut GraphPopup, sensor_under_cursor: bool) -> bool {
-    if sensor_under_cursor || gp.pointer_on_popup {
-        gp.missed = 0;
-        return false;
-    }
-    gp.missed = gp.missed.saturating_add(1);
-    gp.missed >= GRAPH_ABANDON_GRACE
-}
 
-/// Run once per tick: the abandoned popup to close (its grace spent —
-/// see `popup_missed_tick`), `None` while it lives.
-fn reap_abandoned_popup(panel: &mut Panel) -> Option<GraphPopup> {
-    let sensor_under_cursor = panel.hovered.is_some();
-    let expired = match panel.graph_popup.as_mut() {
-        Some(gp) => popup_missed_tick(gp, sensor_under_cursor),
-        None => return None,
-    };
-    if !expired {
-        return None;
-    }
-    eprintln!("[piuma] graph: close (cursor left the sensor and the popup)");
-    panel.graph_popup.take()
-}
 
 /// Both hover popups in step with one sensor hover: the trend popup
 /// (its own sensor type) and the calendar one — each opens only for
@@ -3263,249 +2964,10 @@ fn hover_sync(panel: &mut Panel, section: usize, sensor: usize, hovered: bool) -
     ])
 }
 
-/// Keep the calendar popup in step with a sensor hover: hovering a
-/// `calendar` sensor opens it at the cursor (the trend popup's
-/// output-clamped placement), crossing to another calendar sensor
-/// swaps it. No hover close runs here — the popup must survive three
-/// more seconds after the cursor leaves both it and its sensor: the
-/// tick's grace decides (see `reap_abandoned_calendar`).
-fn calendar_hover_sync(
-    panel: &mut Panel,
-    section: usize,
-    sensor: usize,
-    hovered: bool,
-) -> Command<Message> {
-    let showing = panel
-        .calendar
-        .as_ref()
-        .is_some_and(|cp| (cp.section, cp.sensor) == (section, sensor));
-    if !hovered || showing {
-        return Command::none();
-    }
-    // Opted in? Only the `calendar` source opens this popup (a hover
-    // on any other sensor leaves an open popup counting down).
-    let is_calendar = panel
-        .config
-        .panel
-        .sections
-        .get(section)
-        .and_then(|sec| sec.sensors.get(sensor))
-        .is_some_and(|s| matches!(s.source, config::SensorSource::Calendar { .. }));
-    if !is_calendar {
-        return Command::none();
-    }
-    let Some((x, y)) = tray::cursor_output_point(panel) else {
-        // The enter can beat the first CursorMoved event (nothing moved
-        // since startup): the motion itself retries via `IcedEvent`.
-        eprintln!("[piuma] calendar: no cursor position yet, waiting for the motion event");
-        return Command::none();
-    };
-    let Some(today) = calendar::today() else {
-        // Without today's date there is no month to open on.
-        eprintln!("[piuma] calendar: no local date, staying closed");
-        return Command::none();
-    };
-    let mut cmds: Vec<Command<Message>> = Vec::new();
-    // Crossing between two calendar sensors: the old surface dies with
-    // its own leave events too, but closing here keeps the order definite.
-    if let Some(old) = panel.calendar.take() {
-        cmds.push(iced::window::close(old.id));
-    }
-    let weekdays = calendar::weekday_labels();
-    let (w, h) = calendar_size(&panel.config, &weekdays);
-    let (sw, sh) = unsafe { (SCREEN_WIDTH as i32, SCREEN_HEIGHT as i32) };
-    let (anchor, margin) = menu_placement(x, y, w, h, sw, sh);
-    let rect = placement_rect(anchor, &margin, w, h, sw, sh);
-    // Where the surface really lands: the bar's reservation on the
-    // shared edge pushes it, so the pointer tests below must not use
-    // the intended rect (it contains the cursor while the surface,
-    // e.g. for a top bar, sits a zone lower).
-    let surface = shifted_surface_rect(rect, anchor, panel.last_anchor, panel.last_exclusive_zone);
-    let (id, open) = Message::layershell_open(NewLayerShellSettings {
-        size: LayerSize::px(w, h),
-        layer: Layer::Overlay,
-        anchor,
-        exclusive_zone: None,
-        margin: Some(margin),
-        keyboard_interactivity: KeyboardInteractivity::None,
-        // The bar's own output (the graph popup's `LastOutput` landed
-        // on the wrong monitor once a second one joined the session).
-        output_option: popup_output_option(),
-        namespace: Some("piuma-calendar".to_string()),
-        ..Default::default()
-    });
-    panel.calendar = Some(CalendarPopup {
-        id,
-        section,
-        sensor,
-        offset: 0,
-        today,
-        weekdays,
-        month_label: calendar::month_label(today.0, today.1),
-        // The cursor is on the surface only if it really lies inside
-        // it: on the sensor (the common open) that is false and the
-        // sensor's own hover keeps the popup alive; a flipped or
-        // pushed placement opens away from the cursor either way.
-        pointer_on_popup: (x >= surface.0 && x < surface.2 && y >= surface.1 && y < surface.3),
-        rect: surface,
-        missed: 0,
-    });
-    eprintln!(
-        "[piuma] calendar: open rect={rect:?} surface={surface:?} cursor=({x},{y}) \
-         pointer={} size={w}x{h}",
-        x >= surface.0 && x < surface.2 && y >= surface.1 && y < surface.3,
-    );
-    cmds.push(open);
-    Command::batch(cmds)
-}
 
-/// Page the calendar popup by `delta` months and refresh the header's
-/// month label (one `date` spawn per click).
-fn calendar_page(panel: &mut Panel, delta: i32) -> Command<Message> {
-    let Some(cp) = panel.calendar.as_mut() else {
-        return Command::none(); // a click can race the grace's close
-    };
-    cp.offset += delta;
-    let (year, month) = calendar::shift_month(cp.today.0, cp.today.1, cp.offset);
-    cp.month_label = calendar::month_label(year, month);
-    Command::none()
-}
 
-/// Run once per tick: the calendar popup whose grace is spent —
-/// neither its own sensor nor its surface has had the cursor for
-/// [`CALENDAR_ABANDON_GRACE`] seconds — `None` while it lives. The
-/// popup's pointer flag is event-driven (enter/exit), so this counts
-/// only real absences, including after the cursor rests for good on
-/// another application's window where no event ever arrives again.
-fn reap_abandoned_calendar(panel: &mut Panel) -> Option<CalendarPopup> {
-    let Some(cp) = panel.calendar.as_mut() else {
-        return None;
-    };
-    if panel.hovered == Some((cp.section, cp.sensor)) || cp.pointer_on_popup {
-        cp.missed = 0;
-        return None;
-    }
-    cp.missed = cp.missed.saturating_add(1);
-    if cp.missed < CALENDAR_ABANDON_GRACE {
-        return None;
-    }
-    eprintln!("[piuma] calendar: close (cursor left the sensor and the popup)");
-    panel.calendar.take()
-}
 
-/// The calendar popup's surface size from the panel's font: every cell
-/// fits the widest of a day number, the weekday labels and the paging
-/// arrows, and the eight rows (header, labels, six weeks) grow with
-/// `panel.font_size` — the surface adapts to the font, never the
-/// reverse. Returns `(width, height)`.
-fn calendar_size(config: &config::Config, weekdays: &[String; 7]) -> (u32, u32) {
-    let font = panel_font(config);
-    let fs = config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
-    // Only the padding matters for the size — no colour to resolve.
-    let st = popup_style(config, None);
-    let mut patterns: Vec<String> = vec!["88".into(), "←".into(), "→".into()];
-    patterns.extend(weekdays.iter().cloned());
-    let cell_w = u32::from(text_width::widest(&font, fs, &patterns)) + 2 * CALENDAR_CELL_PAD;
-    let row_h = fs.saturating_mul(14) / 10; // line height + breathing room
-    let w = st.padding.saturating_mul(2).saturating_add(cell_w.saturating_mul(7));
-    let h = st.padding.saturating_mul(2).saturating_add(row_h.saturating_mul(8));
-    (w, h)
-}
 
-/// Keep the hover graph popup in step with a sensor hover: it opens at
-/// the cursor (same output-clamped placement as the tray menu) when
-/// the sensor opted in with `draw_graph` on a graphable source that
-/// already recorded a sample (no data, no popup). On
-/// leave it closes only when the cursor sits outside the popup rect —
-/// right after opening the surface maps **under the cursor** and steals
-/// the pointer from the bar, and that leave must not close it (every
-/// other departure either clears the rect test or is caught by the
-/// popup's own `GraphPopupExited`). When neither lands — stale
-/// coordinates, a missed widget exit — the tick's reap closes the
-/// popup after `GRAPH_ABANDON_GRACE` (see `reap_abandoned_popup`).
-fn graph_hover_sync(
-    panel: &mut Panel,
-    section: usize,
-    sensor: usize,
-    hovered: bool,
-) -> Command<Message> {
-    let showing = panel
-        .graph_popup
-        .as_ref()
-        .is_some_and(|gp| (gp.section, gp.sensor) == (section, sensor));
-    if !hovered {
-        if showing && !cursor_in_graph_popup(panel) {
-            let gp = panel.graph_popup.take().expect("showing");
-            eprintln!("[piuma] graph: close (sensor left, cursor off the popup)");
-            return iced::window::close(gp.id);
-        }
-        if showing {
-            eprintln!("[piuma] graph: keep (sensor left, cursor still on the popup)");
-        }
-        return Command::none();
-    }
-    if showing {
-        return Command::none(); // this sensor is already on screen
-    }
-    // Opted in and already carrying data? The samples themselves
-    // arrive with the ticks; without one there is no trend to show.
-    let opted_in = panel
-        .config
-        .panel
-        .sections
-        .get(section)
-        .and_then(|sec| sec.sensors.get(sensor))
-        .is_some_and(|s| s.draw_graph && graphs::scale_of(&s.source).is_some())
-        && panel.graphs.has_samples(section, sensor);
-    if !opted_in {
-        return Command::none();
-    }
-    eprintln!("[piuma] graph: hover on a graphable sensor ({section},{sensor})");
-    let mut cmds: Vec<Command<Message>> = Vec::new();
-    // Crossing between two graph sensors: the old surface dies with its
-    // own leave events too, but closing here keeps the order definite.
-    if let Some(old) = panel.graph_popup.take() {
-        cmds.push(iced::window::close(old.id));
-    }
-    let Some((x, y)) = tray::cursor_output_point(panel) else {
-        // The enter can beat the first CursorMoved event (nothing moved
-        // since startup): the motion itself retries via `IcedEvent`.
-        eprintln!("[piuma] graph: no cursor position yet, waiting for the motion event");
-        return Command::batch(cmds);
-    };
-    let (sw, sh) = unsafe { (SCREEN_WIDTH as i32, SCREEN_HEIGHT as i32) };
-    let (anchor, margin) = menu_placement(x, y, GRAPH_POPUP_W, GRAPH_POPUP_H, sw, sh);
-    let rect = placement_rect(anchor, &margin, GRAPH_POPUP_W, GRAPH_POPUP_H, sw, sh);
-    let (id, open) = Message::layershell_open(NewLayerShellSettings {
-        size: LayerSize::px(GRAPH_POPUP_W, GRAPH_POPUP_H),
-        layer: Layer::Overlay,
-        anchor,
-        exclusive_zone: None,
-        margin: Some(margin),
-        keyboard_interactivity: KeyboardInteractivity::None,
-        // The bar's own output: `LastOutput` landed the popup on a
-        // second monitor once one joined the session.
-        output_option: popup_output_option(),
-        namespace: Some("piuma-graph".to_string()),
-        ..Default::default()
-    });
-    panel.graph_popup = Some(GraphPopup {
-        id,
-        section,
-        sensor,
-        rect,
-        anchor,
-        sensor_rect: None,
-        pointer_on_popup: false,
-        missed: 0,
-    });
-    eprintln!("[piuma] graph: open rect={rect:?} cursor=({x},{y})");
-    cmds.push(open);
-    // Ask the bar for the sensor box's on-screen rect: the connector
-    // window is pinned to it once the answer lands (`sync_graph_link`).
-    cmds.push(iced_runtime::task::widget(FindSensorRect::new(section, sensor)));
-    Command::batch(cmds)
-}
 
 /// Output-space rect `(x0, y0, x1, y1)` of a surface placed by
 /// `menu_placement`: the anchored side starts at its margin, the
@@ -3525,436 +2987,13 @@ pub(crate) fn placement_rect(anchor: Anchor, margin: &Margin, w: u32, h: u32, sw
     (x0, y0, x1, y1)
 }
 
-/// Whether the cursor sits inside the open graph popup's rect.
-fn cursor_in_graph_popup(panel: &Panel) -> bool {
-    let Some((x, y)) = tray::cursor_output_point(panel) else {
-        return false;
-    };
-    panel
-        .graph_popup
-        .as_ref()
-        .is_some_and(|gp| x >= gp.rect.0 && x < gp.rect.2 && y >= gp.rect.1 && y < gp.rect.3)
-}
 
-fn popup_surface_rect(gp: &GraphPopup, bar_anchor: Anchor, zone: i32) -> (i32, i32, i32, i32) {
-    shifted_surface_rect(gp.rect, gp.anchor, bar_anchor, zone)
-}
 
-/// The placement rect shifted to where the surface really lands (the
-/// graph popup's `popup_surface_rect` shares this math): a layer
-/// surface is pushed past the reservations of the edge it anchors to —
-/// and the bar's reservation lives on the edge the BAR anchors to. So
-/// the shift applies per axis, only where the two anchors point to the
-/// same side (measured on this stack: top bar, popup anchored Left|Top
-/// → +28 on y, none on x).
-fn shifted_surface_rect(
-    rect: (i32, i32, i32, i32),
-    anchor: Anchor,
-    bar_anchor: Anchor,
-    zone: i32,
-) -> (i32, i32, i32, i32) {
-    let (mut x0, mut y0, mut x1, mut y1) = rect;
-    if anchor.contains(Anchor::Top) && bar_anchor.contains(Anchor::Top) {
-        y0 += zone;
-        y1 += zone;
-    }
-    if anchor.contains(Anchor::Bottom) && bar_anchor.contains(Anchor::Bottom) {
-        y0 -= zone;
-        y1 -= zone;
-    }
-    if anchor.contains(Anchor::Left) && bar_anchor.contains(Anchor::Left) {
-        x0 += zone;
-        x1 += zone;
-    }
-    if anchor.contains(Anchor::Right) && bar_anchor.contains(Anchor::Right) {
-        x0 -= zone;
-        x1 -= zone;
-    }
-    (x0, y0, x1, y1)
-}
 
-/// The connector drawing in the link surface's own coordinates, the
-/// surface's top-left output position and its size — `None` while the
-/// popup or its sensor rect is missing (the window renders empty in
-/// that gap and the tick closes it).
-fn graph_link_geometry(panel: &Panel) -> Option<(graphs::Connector, (i32, i32), (u32, u32))> {
-    let gp = panel.graph_popup.as_ref()?;
-    let sensor = gp.sensor_rect?;
-    let popup = popup_surface_rect(gp, panel.last_anchor, panel.last_exclusive_zone);
-    let st = popup_style(&panel.config, panel.palette.as_ref());
-    let (d1, d2, path) = graphs::connector_geometry(sensor, popup);
-    // The surface is the connector's bounding box (the end dots are
-    // its extremes — the rail lies between them) plus a dot-sized
-    // padding on every side; the drawing shifts into local space.
-    let x0 = d1.x.min(d2.x).floor() as i32 - GRAPH_LINK_PAD;
-    let y0 = d1.y.min(d2.y).floor() as i32 - GRAPH_LINK_PAD;
-    let x1 = d1.x.max(d2.x).ceil() as i32 + GRAPH_LINK_PAD;
-    let y1 = d1.y.max(d2.y).ceil() as i32 + GRAPH_LINK_PAD;
-    let shift = |p: iced::Point| iced::Point::new(p.x - x0 as f32, p.y - y0 as f32);
-    let conn = graphs::Connector {
-        d1: shift(d1),
-        d2: shift(d2),
-        path: path.iter().copied().map(shift).collect(),
-        color: st.border,
-        width: (st.border_width as f32).max(1.0),
-    };
-    Some((conn, (x0, y0), ((x1 - x0) as u32, (y1 - y0) as u32)))
-}
 
-/// One place drives the connector surface: it opens once the popup's
-/// sensor rect has landed (the query answers a render after the popup
-/// opened), it swaps when the popup jumps to another sensor, and it
-/// dies with the popup. With `exclusive_zone = -1` the surface ignores
-/// every reservation, so its margins are the exact output position of
-/// the connector's bounding box.
-fn sync_graph_link(panel: &mut Panel) -> Option<Command<Message>> {
-    let wanted = panel
-        .graph_popup
-        .as_ref()
-        .filter(|gp| gp.sensor_rect.is_some())
-        .map(|gp| gp.id);
-    // Settled: the open connector draws the popup that is showing.
-    if let (Some((_, popup_id)), Some(wanted)) = (panel.graph_link, wanted) {
-        if popup_id == wanted {
-            return None;
-        }
-    }
-    let mut cmds: Vec<Command<Message>> = Vec::new();
-    // The popup died or moved to another sensor: the old connector
-    // goes (a swap reopens it on the new geometry right after).
-    if let Some((id, _)) = panel.graph_link.take() {
-        eprintln!("[piuma] graph: link close");
-        cmds.push(iced::window::close(id));
-    }
-    if let Some(popup_id) = wanted {
-        let (_, (ox, oy), (w, h)) = graph_link_geometry(panel)?;
-        let (id, open) = Message::layershell_open(NewLayerShellSettings {
-            size: LayerSize::px(w, h),
-            layer: Layer::Overlay,
-            anchor: Anchor::Top | Anchor::Left,
-            // -1 = ignore other surfaces' reservations (the bar's
-            // strip must not inset this one — as on the wallpaper).
-            exclusive_zone: Some(-1),
-            margin: Some(Margin {
-                top: oy,
-                right: 0,
-                bottom: 0,
-                left: ox,
-            }),
-            keyboard_interactivity: KeyboardInteractivity::None,
-            // Same output as the popup it points at (see above).
-            output_option: popup_output_option(),
-            // A pure drawing over the desktop: hovers and clicks
-            // pass through (as on the wallpaper).
-            events_transparent: true,
-            namespace: Some("piuma-graph-link".to_string()),
-            ..Default::default()
-        });
-        panel.graph_link = Some((id, popup_id));
-        eprintln!("[piuma] graph: link at ({ox},{oy}) size={w}x{h}");
-        cmds.push(open);
-    }
-    Some(Command::batch(cmds))
-}
 
-/// The connector window's view: one canvas with the polyline and the
-/// two end dots. The surface lives exactly as long as the popup; in
-/// the tick-sized gap before its close the drawing is empty.
-fn graph_link_view<'a>(panel: &'a Panel) -> Element<'a, Message> {
-    match graph_link_geometry(panel) {
-        Some((conn, _, _)) => graphs::link_widget(conn),
-        None => graphs::link_widget(graphs::Connector {
-            d1: iced::Point::new(0.0, 0.0),
-            d2: iced::Point::new(0.0, 0.0),
-            path: Vec::new(),
-            color: Color::TRANSPARENT,
-            width: 0.0,
-        }),
-    }
-}
 
-/// The hover graph popup: the sensor's name and current value over its
-/// trend line, inside the shared popup box (the notification cards'
-/// style, same as the tray menu). The whole surface is one MouseArea
-/// whose exit reports the departure to `GraphPopupExited`.
-fn graph_popup_view<'a>(panel: &'a Panel, gp: &GraphPopup) -> Element<'a, Message> {
-    let st = popup_style(&panel.config, panel.palette.as_ref());
-    let font = panel_font(&panel.config);
-    let sensor = panel
-        .sections
-        .get(gp.section)
-        .and_then(|sec| sec.sensors.get(gp.sensor));
-    let (name, current, color) = match sensor {
-        // The threshold rule tints the popup like the bar (header,
-        // trend, labels and average all follow the reading).
-        Some(s) => {
-            let base = s.text_color.unwrap_or(st.text);
-            let ruled = sensors::leading_number(&s.value)
-                .and_then(|v| {
-                    s.color_rules
-                        .iter()
-                        .rev()
-                        .find(|(min, _)| v >= *min)
-                        .map(|(_, c)| *c)
-                })
-                .unwrap_or(base);
-            (s.name.clone(), s.value.clone(), ruled)
-        }
-        // The sensor died under the popup (its exit will follow): keep
-        // the box empty rather than missing layers.
-        None => (String::new(), "N/A".to_string(), st.text),
-    };
-    let (scale, samples) = panel
-        .graphs
-        .window(gp.section, gp.sensor)
-        .unwrap_or((graphs::Scale::Auto, Vec::new()));
-    // Fixed content geometry: header box + gap, canvas takes the rest
-    // of the fixed-size window — the label below is positioned against
-    // exactly these numbers.
-    let graph_h = GRAPH_POPUP_H
-        .saturating_sub(2 * st.padding)
-        .saturating_sub(GRAPH_HEADER_H)
-        .saturating_sub(GRAPH_SPACING) as f32;
-    let header: Element<'_, Message> = container(
-        Row::new()
-            .push(
-                text(name)
-                    .size(st.font_size)
-                    .color(st.text)
-                    .font(font.clone())
-                    .wrapping(iced::widget::text::Wrapping::None)
-                    .width(Length::Fill),
-            )
-            // The current reading leads the header: bigger than the
-            // sensor's name, in the same colour as the trend below.
-            .push(
-                text(current)
-                    .size(st.font_size.saturating_add(6))
-                    .color(color)
-                    .font(font),
-            )
-            .align_y(Alignment::Center)
-            .spacing(8)
-            .width(Length::Fill)
-            .height(Length::Fill),
-    )
-    .height(Length::Fixed(GRAPH_HEADER_H as f32))
-    .into();
-    // The average guide and its label share the canvas's coordinates:
-    // the same `axis_y` / `y_bounds` math the draw pass uses.
-    let guide = graphs::mean(&samples).map(|avg| {
-        let (lo, hi) = graphs::y_bounds(scale, &samples);
-        (avg, graphs::axis_y(graph_h, (avg - lo) / (hi - lo)))
-    });
-    // The sensor's unit feeds both the canvas scale labels and the
-    // average label.
-    let unit = panel
-        .config
-        .panel
-        .sections
-        .get(gp.section)
-        .and_then(|sec| sec.sensors.get(gp.sensor))
-        .map(|s| graphs::unit_of(&s.source))
-        .unwrap_or("");
-    let graph_box: Element<'_, Message> = container(graphs::widget(samples, scale, color, unit))
-        .width(Length::Fill)
-        .height(Length::Fixed(graph_h))
-        .into();
-    let graph_area: Element<'_, Message> = match guide {
-        Some((avg, y)) => {
-            // The label rides centred on the guide, on a tinted plate
-            // that keeps it readable where it crosses the trend line
-            // (line-height estimate + the plate's own padding).
-            let label_h = st.font_size as f32 * 1.2 + 2.0 * LABEL_PAD_V;
-            let plate = container(
-                text(graphs::avg_label(avg, unit))
-                    .size(st.font_size.saturating_sub(1).max(8))
-                    .color(color),
-            )
-            .style(move |_theme: &iced::Theme| ContainerStyle {
-                background: Some(Background::Color(Color {
-                    a: LABEL_BG_ALPHA,
-                    ..st.bg
-                })),
-                ..ContainerStyle::default()
-            })
-            .padding(iced::Padding {
-                top: LABEL_PAD_V,
-                bottom: LABEL_PAD_V,
-                left: LABEL_PAD_H,
-                right: LABEL_PAD_H,
-            });
-            let label: Element<'_, Message> = container(plate)
-                .width(Length::Fill)
-                .height(Length::Fixed(graph_h))
-                .align_x(Alignment::Center)
-                .padding(iced::Padding {
-                    top: (y - label_h / 2.0).clamp(0.0, (graph_h - label_h).max(0.0)),
-                    right: 0.0,
-                    bottom: 0.0,
-                    left: 0.0,
-                })
-                .into();
-            Stack::with_children([graph_box, label])
-                .width(Length::Fill)
-                .height(Length::Fixed(graph_h))
-                .into()
-        }
-        None => graph_box,
-    };
-    let content: Element<'_, Message> = Column::new()
-        .push(header)
-        .push(graph_area)
-        .spacing(GRAPH_SPACING as f32)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into();
-    let surface = styled_box(
-        container(content)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .padding(iced::Padding::from(st.padding as f32))
-            .into(),
-        Some(st.bg),
-        Some(st.border),
-        st.border_width.min(u16::MAX as u32) as u16,
-        st.border_radius.min(u16::MAX as u32) as u16,
-        &st.border_type,
-        [false, false, false, false],
-        // The content carries the padding; the box only draws its border.
-        0,
-        Length::Fill,
-        Length::Fill,
-    );
-    MouseArea::new(surface).on_exit(Message::GraphPopupExited).into()
-}
 
-/// The calendar popup: the month header with its paging arrows, the
-/// weekday labels and the month's Monday-first grid, inside the shared
-/// popup box (the notification cards' style, like the graph popup).
-/// The panel's font and font size draw every cell — the surface was
-/// sized from them when the popup opened (`calendar_size`) — and today's
-/// number stands out on the accent plate of the notifications' border.
-fn calendar_popup_view<'a>(panel: &'a Panel, cp: &CalendarPopup) -> Element<'a, Message> {
-    let st = popup_style(&panel.config, panel.palette.as_ref());
-    let font = panel_font(&panel.config);
-    let fs = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
-    let accent = st.border;
-    let (year, month) = calendar::shift_month(cp.today.0, cp.today.1, cp.offset);
-    let weeks = calendar::month_matrix(year, month);
-
-    // One grid cell: its content centred in the cell's equal share.
-    let cell = |content: Element<'a, Message>| -> Element<'a, Message> {
-        container(content)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(Alignment::Center)
-            .align_y(Alignment::Center)
-            .into()
-    };
-    // A paging arrow: a hit target as tall as the header row.
-    let arrow = |label: &'static str, msg: Message| -> Element<'a, Message> {
-        MouseArea::new(
-            container(text(label).size(fs).color(st.text).font(font.clone()))
-                .width(Length::Fixed(fs as f32 * 1.6))
-                .height(Length::Fill)
-                .align_x(Alignment::Center)
-                .align_y(Alignment::Center),
-        )
-        .on_press(msg)
-        .into()
-    };
-
-    let header = Row::new()
-        .push(arrow("←", Message::CalendarPrev))
-        .push(
-            text(cp.month_label.clone())
-                .size(fs)
-                .color(st.text)
-                .font(font.clone())
-                .width(Length::Fill)
-                .align_x(Alignment::Center)
-                .wrapping(iced::widget::text::Wrapping::None),
-        )
-        .push(arrow("→", Message::CalendarNext))
-        .width(Length::Fill)
-        .height(Length::Fill);
-    let mut labels = Row::new().width(Length::Fill).height(Length::Fill);
-    for label in &cp.weekdays {
-        labels = labels.push(cell(
-            text(label.clone())
-                .size(fs)
-                .color(st.text)
-                .font(font.clone())
-                .into(),
-        ));
-    }
-    // Eight equal rows: header, weekday labels and the six week rows.
-    let mut rows = Column::new().width(Length::Fill).height(Length::Fill);
-    rows = rows.push(header).push(labels);
-    for week in weeks {
-        let mut row = Row::new().width(Length::Fill).height(Length::Fill);
-        for day in week {
-            // Today only exists in the month the offset started from.
-            let is_today = cp.offset == 0 && day == Some(cp.today.2);
-            let day_font = if is_today {
-                iced::Font {
-                    weight: iced::font::Weight::Bold,
-                    ..font.clone()
-                }
-            } else {
-                font.clone()
-            };
-            let body: Element<'_, Message> = match day {
-                Some(d) => text(d.to_string())
-                    .size(fs)
-                    .color(st.text)
-                    .font(day_font)
-                    .into(),
-                None => Space::new().into(),
-            };
-            let c = container(body)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .align_x(Alignment::Center)
-                .align_y(Alignment::Center);
-            let day_cell: Element<'_, Message> = if is_today {
-                c.style(move |_theme: &iced::Theme| {
-                    let mut style = ContainerStyle::default();
-                    style.background = Some(Background::Color(accent));
-                    style.border.radius = corner_radius([false; 4], 4.0);
-                    style
-                })
-                .into()
-            } else {
-                c.into()
-            };
-            row = row.push(day_cell);
-        }
-        rows = rows.push(row);
-    }
-    let content: Element<'_, Message> = rows.into();
-    let surface = styled_box(
-        container(content)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .padding(iced::Padding::from(st.padding as f32))
-            .into(),
-        Some(st.bg),
-        Some(st.border),
-        st.border_width.min(u16::MAX as u32) as u16,
-        st.border_radius.min(u16::MAX as u32) as u16,
-        &st.border_type,
-        [false, false, false, false],
-        // The content carries the padding; the box only draws its border.
-        0,
-        Length::Fill,
-        Length::Fill,
-    );
-    // The whole surface reports its departure: the tick's grace takes
-    // it from there (the cursor may still return within three seconds).
-    MouseArea::new(surface).on_exit(Message::CalendarExited).into()
-}
 
 
 // ── notification list popup ─────────────────────────────────────────
@@ -4208,11 +3247,9 @@ fn parse_config_arg() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        calendar_size, config, corner_radius, focused_output_in, icons_theme,
-        monitor_names_json, palette, panel_background, popup_card_h, popup_missed_tick,
-        popup_style, section_touch, shifted_surface_rect, GraphPopup, PopupStyle,
+        config, corner_radius, focused_output_in, icons_theme, monitor_names_json, palette,
+        panel_background, popup_card_h, popup_style, section_touch, PopupStyle,
     };
-    use iced_exwlshell::reexport::Anchor;
 
     /// The default popup style must keep the F3 geometry exactly (84px
     /// cards): the surface size is computed from it, and any drift would
@@ -4292,48 +3329,7 @@ mod tests {
 
 
 
-    /// The surface really lands shifted past the bar's reservation on
-    /// the shared edge only — the calendar popup's pointer tests and
-    /// the graph link both rely on this math: a top bar pushes a
-    /// top-anchored popup down by the zone (the intended rect then
-    /// contains the cursor while the surface does not); mismatched
-    /// edges leave the placement untouched.
-    #[test]
-    fn surface_rect_shifts_only_the_shared_edge() {
-        let rect = (100, 15, 397, 167);
-        assert_eq!(
-            shifted_surface_rect(rect, Anchor::Left | Anchor::Top, Anchor::Top, 30),
-            (100, 45, 397, 197),
-            "top bar + top popup: +30 on y, none on x"
-        );
-        assert_eq!(
-            shifted_surface_rect(rect, Anchor::Left | Anchor::Top, Anchor::Bottom, 30),
-            rect,
-            "different edges: no shift"
-        );
-        assert_eq!(
-            shifted_surface_rect(rect, Anchor::Right | Anchor::Bottom, Anchor::Bottom, 28),
-            (100, -13, 397, 139),
-            "bottom bar + bottom popup: -28 on y"
-        );
-    }
 
-    /// The calendar popup's surface adapts to the panel font: doubling
-    /// `panel.font_size` must grow both dimensions strictly (the cells
-    /// fit the numbers and labels they show, the rows follow the size).
-    #[test]
-    fn calendar_size_follows_the_font() {
-        let weekdays = ["lun", "mar", "mer", "gio", "ven", "sab", "dom"].map(String::from);
-        let mut cfg = crate::config::default_config();
-        cfg.panel.font_size = Some(12);
-        let small = calendar_size(&cfg, &weekdays);
-        cfg.panel.font_size = Some(24);
-        let large = calendar_size(&cfg, &weekdays);
-        assert!(large.0 > small.0 && large.1 > small.1, "{small:?} vs {large:?}");
-        // With the default style the surface holds seven columns of at
-        // least two characters plus padding — never a degenerate box.
-        assert!(small.0 >= 7 * (12 + 2 * 6), "narrow: {:?}", small);
-    }
 
     /// Roadmap2 #1: the monitor list is the `name` field of every entry
     /// of `hyprctl monitors -j`; junk or empty input yields no outputs
@@ -4447,59 +3443,4 @@ mod tests {
         );
     }
 
-    /// The tick reaps a popup whose sensor and surface both lost the
-    /// cursor — but only after the grace, and never while a sensor is
-    /// under the cursor or the pointer sits on the surface. The flag
-    /// is two-way: a pointer that visits and then leaves falls back to
-    /// the grace instead of pinning the popup open forever.
-    #[test]
-    fn an_abandoned_popup_is_reaped_after_its_grace() {
-        let fresh = || GraphPopup {
-            id: iced::window::Id::unique(),
-            section: 0,
-            sensor: 0,
-            rect: (0, 0, 10, 10),
-            anchor: Anchor::Top,
-            sensor_rect: None,
-            pointer_on_popup: false,
-            missed: 0,
-        };
-        let mut abandoned = fresh();
-        assert!(
-            !popup_missed_tick(&mut abandoned, false),
-            "the first tick only grants grace"
-        );
-        assert!(
-            popup_missed_tick(&mut abandoned, false),
-            "the second tick reaps it"
-        );
-
-        let mut on_surface = fresh();
-        on_surface.pointer_on_popup = true;
-        assert!(
-            !popup_missed_tick(&mut on_surface, false),
-            "pointer on it: never abandoned"
-        );
-
-        let mut visited = fresh();
-        visited.pointer_on_popup = true;
-        assert!(
-            !popup_missed_tick(&mut visited, false),
-            "pointer on it: never abandoned"
-        );
-        visited.pointer_on_popup = false;
-        assert!(
-            !popup_missed_tick(&mut visited, false),
-            "the pointer left: the first tick only grants grace"
-        );
-        assert!(
-            popup_missed_tick(&mut visited, false),
-            "the pointer left: the second tick reaps it"
-        );
-
-        let mut on_sensor = fresh();
-        on_sensor.missed = 1;
-        assert!(!popup_missed_tick(&mut on_sensor, true), "still hovered");
-        assert_eq!(on_sensor.missed, 0, "a hover resets the count");
-    }
 }
