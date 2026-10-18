@@ -113,12 +113,13 @@ pub fn unit_of(source: &config::SensorSource) -> &'static str {
     }
 }
 
-/// The average guide's label: `avg 5%`, `avg 61.5°C`,
-/// `avg 9318 B/s` — percentages round to whole percents like their
-/// sensors, rates drop the decimal (bytes have none).
+/// The average guide's label: `avg 5%`, `avg 61.5°C`, `avg 9.1 K/s` —
+/// percentages round to whole percents like their sensors; byte rates
+/// step into the tier the average itself reaches (the same step the
+/// sensor box shows) instead of staying raw bytes.
 pub fn avg_label(avg: f32, unit: &str) -> String {
     match unit {
-        "B/s" => format!("avg {avg:.0} {unit}"),
+        "B/s" => format!("avg {}", crate::sensors::rate_label(f64::from(avg))),
         "%" => format!("avg {avg:.0}{unit}"),
         "" => format!("avg {avg:.1}"),
         _ => format!("avg {avg:.1}{unit}"),
@@ -126,11 +127,12 @@ pub fn avg_label(avg: f32, unit: &str) -> String {
 }
 
 /// Edge label of the canvas scale: the axis bounds in the sensor's
-/// unit, formatted like the average label (`100%`, `61.5°C`,
-/// `9318 B/s`).
+/// unit, formatted like the average label (`100%`, `61.5°C`, `9.1 K/s`)
+/// — each edge steps into ITS OWN tier, so a quiet minimum still reads
+/// in bytes while a busy maximum reads in megabytes.
 pub fn axis_label(v: f32, unit: &str) -> String {
     match unit {
-        "B/s" => format!("{v:.0} {unit}"),
+        "B/s" => crate::sensors::rate_label(f64::from(v)),
         "%" => format!("{v:.0}{unit}"),
         "" => format!("{v:.1}"),
         _ => format!("{v:.1}{unit}"),
@@ -678,7 +680,7 @@ mod tests {
     fn average_labels_carry_the_units() {
         assert_eq!(avg_label(4.84, "%"), "avg 5%");
         assert_eq!(avg_label(61.54, "°C"), "avg 61.5°C");
-        assert_eq!(avg_label(9318.4, "B/s"), "avg 9318 B/s");
+        assert_eq!(avg_label(9318.4, "B/s"), "avg 9.1 K/s");
         assert_eq!(avg_label(1.0, ""), "avg 1.0");
     }
 
@@ -689,7 +691,11 @@ mod tests {
         assert_eq!(axis_label(100.0, "%"), "100%");
         assert_eq!(axis_label(0.0, "%"), "0%");
         assert_eq!(axis_label(61.54, "°C"), "61.5°C");
-        assert_eq!(axis_label(9318.4, "B/s"), "9318 B/s");
+        assert_eq!(axis_label(9318.4, "B/s"), "9.1 K/s");
+        // Each edge adapts on its own value: bytes down low, megas up top.
+        assert_eq!(axis_label(1023.9, "B/s"), "1023.9 B/s");
+        assert_eq!(axis_label(0.0, "B/s"), "0.0 B/s");
+        assert_eq!(axis_label(2_000_000.0, "B/s"), "1.9 M/s");
         assert_eq!(axis_label(1.0, ""), "1.0");
     }
 

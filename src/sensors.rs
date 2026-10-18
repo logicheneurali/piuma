@@ -744,18 +744,34 @@ const RATE_INT_SLOTS: usize = 4;
 /// one-glyph width, so the pinned box barely moves with the unit).
 const RATE_UNITS: [&str; 5] = ["B", "K", "M", "G", "T"];
 
-/// Format a byte rate with a FIXED composition (roadmap M5): a
-/// [`RATE_INT_SLOTS`]-slot integer part padded with figure spaces, one
-/// decimal digit, a space and the tier unit. The string's pixel width can't
-/// change with the value, so the sensor box never resizes ("dances") while
-/// the rate changes.
-fn fmt_rate(bytes_per_sec: f64) -> String {
+/// A byte rate scaled into its tier and that tier's index (`(9.1, 1)`
+/// for 9318): the scale step both rate formattings share.
+fn rate_tier(bytes_per_sec: f64) -> (f64, usize) {
     let mut value = bytes_per_sec;
     let mut unit = 0;
     while value >= 1024.0 && unit < RATE_UNITS.len() - 1 {
         value /= 1024.0;
         unit += 1;
     }
+    (value, unit)
+}
+
+/// A byte rate in its own tier without the sensor box's fixed-width
+/// padding, for labels whose width may breathe (the graph popup's
+/// min/max/average): `9.1 K/s`, `1.9 M/s` — the same step and digits
+/// the sensor box shows, so the two never disagree on a unit.
+pub(crate) fn rate_label(bytes_per_sec: f64) -> String {
+    let (value, tier) = rate_tier(bytes_per_sec);
+    format!("{value:.1} {}/s", RATE_UNITS[tier])
+}
+
+/// Format a byte rate with a FIXED composition (roadmap M5): a
+/// [`RATE_INT_SLOTS`]-slot integer part padded with figure spaces, one
+/// decimal digit, a space and the tier unit. The string's pixel width can't
+/// change with the value, so the sensor box never resizes ("dances") while
+/// the rate changes.
+fn fmt_rate(bytes_per_sec: f64) -> String {
+    let (value, unit) = rate_tier(bytes_per_sec);
     let shaped = format!("{value:.1}");
     let (int, dec) = shaped.split_once('.').unwrap_or((shaped.as_str(), "0"));
     let pad = std::iter::repeat_n(FIGURE_SPACE, RATE_INT_SLOTS.saturating_sub(int.len()))
@@ -876,6 +892,18 @@ mod tests {
         assert_eq!(fmt_rate(1023.9), "1023.9 B");
         assert_eq!(fmt_rate(1024.0), format!("{f}{f}{f}1.0 K"));
         assert_eq!(fmt_rate(2_000_000.0), format!("{f}{f}{f}1.9 M"));
+    }
+
+    /// The unpadded tier label adapts per value: bytes below a KiB, the
+    /// tier the value itself reaches, and the top tier as a hard cap.
+    #[test]
+    fn rate_label_steps_through_the_tiers() {
+        assert_eq!(rate_label(0.0), "0.0 B/s");
+        assert_eq!(rate_label(1023.9), "1023.9 B/s");
+        assert_eq!(rate_label(1024.0), "1.0 K/s");
+        assert_eq!(rate_label(9318.4), "9.1 K/s");
+        assert_eq!(rate_label(2_000_000.0), "1.9 M/s");
+        assert_eq!(rate_label(1024f64.powi(6)), "1048576.0 T/s");
     }
 
     /// The pin is exactly the displayed value's width: same tier ⇒ equal
