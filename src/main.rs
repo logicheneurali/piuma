@@ -95,6 +95,9 @@ pub(crate) static mut SCREEN_HEIGHT: u32 = 1080;
 
 pub(crate) const DEFAULT_FONT: &str = "Noto Sans";
 pub(crate) const DEFAULT_FONT_SIZE: u32 = 14;
+/// Gap between two sensor boxes inside a section: the same rhythm on
+/// both axes, whether the sensors sit in a row or a stacked column.
+const SENSOR_SPACING: f32 = 8.0;
 pub(crate) const DEFAULT_BG_COLOR: Color = Color::from_rgba(0.06, 0.06, 0.08, 0.85);
 pub(crate) const DEFAULT_TEXT_COLOR: Color = Color::from_rgb(0.88, 0.88, 0.94);
 
@@ -2075,8 +2078,11 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
                     .font(font_obj)
             ).align_x(Alignment::Center);
             let title_el: Element<'a, Message> = title_widget.padding(SECTION_CONTENT_PAD).into();
+            // Spaced like the horizontal row: stacked boxes must not
+            // touch and form one continuous strip.
             let sensor_col = Column::new()
                 .extend(sensor_widgets)
+                .spacing(SENSOR_SPACING)
                 .padding(SECTION_CONTENT_PAD);
             // `stretch` here means: stacked sensors that must fill the
             // thickness (width) so the boxes stretch — a vertical panel
@@ -2093,7 +2099,7 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
         } else {
             let row = Row::new()
                 .extend(sensor_widgets)
-                .spacing(8)
+                .spacing(SENSOR_SPACING)
                 .padding(SECTION_CONTENT_PAD);
             // `stretch` here means: horizontal section in a horizontal panel ->
             // fill the thickness (height) so the boxes stretch.
