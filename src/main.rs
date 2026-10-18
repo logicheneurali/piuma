@@ -175,7 +175,6 @@ pub(crate) struct SensorValue {
 }
 
 /// Rendered section data.
-#[derive(Clone)]
 pub(crate) struct SectionData {
     pub(crate) name: String,
     pub(crate) layout: String,       // "horizontal" or "vertical"
@@ -245,7 +244,6 @@ pub(crate) struct SectionStyle {
     pub(crate) sensors: Vec<SensorStyle>,
 }
 
-#[derive(Clone)]
 pub(crate) struct Panel {
     pub(crate) config: config::Config,
     pub(crate) sections: Vec<SectionData>,
