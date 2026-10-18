@@ -2070,15 +2070,20 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
             )
         }).collect();
 
-        // Optionally prepend a section title.
+        // The section title, in both orientations: above the stacked
+        // column, leading the horizontal row (a thin bar has room only
+        // sideways). Hidden by an empty name or `panel.section_title`.
+        let title_el: Element<'a, Message> = container(
+            text(section.name.clone())
+                .color(title_color)
+                .size(font_size.saturating_add(2))
+                .font(font_obj),
+        )
+        .align_x(Alignment::Center)
+        .padding(SECTION_CONTENT_PAD)
+        .into();
+
         let sensors_inner: Element<'a, Message> = if stack_sensors {
-            let title_widget = container(
-                text(section.name.clone())
-                    .color(title_color)
-                    .size(font_size.saturating_add(2))
-                    .font(font_obj)
-            ).align_x(Alignment::Center);
-            let title_el: Element<'a, Message> = title_widget.padding(SECTION_CONTENT_PAD).into();
             // Spaced like the horizontal row: stacked boxes must not
             // touch and form one continuous strip.
             let sensor_col = Column::new()
@@ -2098,10 +2103,16 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
             };
             col.into()
         } else {
-            let row = Row::new()
-                .extend(sensor_widgets)
+            // The title leads the row; `align_y` centres it against the
+            // stretched (Fill-height) sensor boxes.
+            let mut row = Row::new()
                 .spacing(SENSOR_SPACING)
-                .padding(SECTION_CONTENT_PAD);
+                .padding(SECTION_CONTENT_PAD)
+                .align_y(Alignment::Center);
+            if has_title {
+                row = row.push(title_el);
+            }
+            row = row.extend(sensor_widgets);
             // `stretch` here means: horizontal section in a horizontal panel ->
             // fill the thickness (height) so the boxes stretch.
             let row = if stretch { row.height(Length::Fill) } else { row };
