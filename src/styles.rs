@@ -21,8 +21,15 @@ pub(crate) fn resolve_color<'a>(cfg: Option<Color>, default: Color) -> Color {
 /// built-in default. Used by both the surface's container and the
 /// sections' fallback, so they can't disagree.
 pub(crate) fn panel_background(config: &config::Config, pal: Option<&palette::Palette>) -> Color {
-    let configured = config
-        .panel
+    panel_bg(&config.panel, pal)
+}
+
+/// The background tone from `PanelConfig` alone, with the palette's
+/// precedence (palette base tone with the configured alpha, else the
+/// configured colour, else the built-in). Shared with the GTK bridge
+/// (`app_theme`) so both surfaces always show the same colour.
+pub(crate) fn panel_bg(cfg: &config::PanelConfig, pal: Option<&palette::Palette>) -> Color {
+    let configured = cfg
         .default_bg_color
         .as_ref()
         .and_then(|s| config::parse_color(s).ok());
@@ -35,6 +42,19 @@ pub(crate) fn panel_background(config: &config::Config, pal: Option<&palette::Pa
         })
         .or(configured)
         .unwrap_or(DEFAULT_BG_COLOR)
+}
+
+/// The default text tone with the same precedence the style matrix uses
+/// (wallpaper palette > configured default > built-in), alpha kept.
+/// Shared with the GTK bridge.
+pub(crate) fn default_text(cfg: &config::PanelConfig, pal: Option<&palette::Palette>) -> Color {
+    pal.and_then(|p| config::parse_color(&p.text).ok())
+        .or_else(|| {
+            cfg.default_text_color
+                .as_ref()
+                .and_then(|s| config::parse_color(s).ok())
+        })
+        .unwrap_or(DEFAULT_TEXT_COLOR)
 }
 
 /// Every section's and sensor's resolved style: the precedence chains
@@ -55,15 +75,7 @@ pub(crate) fn resolve_styles(
         .iter()
         .enumerate()
         .map(|(section_idx, section_cfg)| {
-            let section_default_txt = pal
-                .and_then(|p| config::parse_color(&p.text).ok())
-                .or_else(|| {
-                    cfg.panel
-                        .default_text_color
-                        .as_ref()
-                        .and_then(|s| config::parse_color(s).ok())
-                })
-                .unwrap_or(DEFAULT_TEXT_COLOR);
+            let section_default_txt = default_text(&cfg.panel, pal);
 
             // Text colour chain: section > wallpaper palette (when
             // active) > section_defaults > panel > built-in. The

@@ -1041,7 +1041,11 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                 panel.graphs = graphs::History::new(&panel.config.panel.sections);
                 // Roadmap N3: keep the generated GTK bridge in step with
                 // hot reloads (rewritten only when its content changes).
-                app_theme::sync(std::path::Path::new(&path), &panel.config.panel);
+                app_theme::sync(
+                    std::path::Path::new(&path),
+                    &panel.config.panel,
+                    panel.palette.as_ref(),
+                );
                 let size = panel_size(&panel.config, unsafe { SCREEN_WIDTH }, unsafe { SCREEN_HEIGHT });
                 let anchor = panel_anchor(&panel.config);
                 let zone = panel_thickness(&panel.config) as i32;
@@ -1142,6 +1146,15 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             // The palette feeds the same colour chains as the config
             // (`restyle`): every chain re-resolves once, not per tick.
             restyle(panel);
+            // The GTK bridge renders the same tones: re-render it too
+            // (the write is a no-op when the content is unchanged).
+            if let Some(path) = CONFIG_PATH.get() {
+                app_theme::sync(
+                    std::path::Path::new(path),
+                    &panel.config.panel,
+                    panel.palette.as_ref(),
+                );
+            }
             Command::none()
         }
         Message::IcedEvent(id, e) => {
@@ -2596,7 +2609,8 @@ fn main() -> Result<(), iced_exwlshell::Error> {
 
     // Roadmap N3: render the GTK theme bridge from the bar's own style
     // (writes/removes only piuma's own file; off = untouched).
-    app_theme::sync(&resolved_config_path, &config.panel);
+    // The palette arrives with PaletteReady below, which resyncs.
+    app_theme::sync(&resolved_config_path, &config.panel, None);
 
     // Best-effort primary monitor dimensions for screen-wide surface sizing.
     unsafe {
