@@ -177,6 +177,11 @@ struct SensorValue {
     /// otherwise), one per open window, built per tick by
     /// `windows::task_icons()`.
     taskbar: Option<Vec<windows::TaskIcon>>,
+    /// Whether this sensor shows the notification feed: its text
+    /// refreshes from the shared state alone when a notification
+    /// changes (`refresh_tray_and_notif`), without re-reading every
+    /// other sensor.
+    is_notifications: bool,
     /// Pinned pixel width of the value text (roadmap M5): net rate sensors
     /// keep a stable box while the value moves inside its unit, and the pin
     /// follows the value across ×1024 unit crossings (same tick), so it is
@@ -1124,6 +1129,10 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                             tray: tray_icons,
                             workspaces: workspace_buttons,
                             taskbar: taskbar_icons,
+                            is_notifications: matches!(
+                                s.source,
+                                config::SensorSource::Notifications {}
+                            ),
                             icon,
                             icon_size,
                             fixed_width,
@@ -1359,13 +1368,19 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                     cmds.push(iced::window::close(id));
                 }
             }
-            cmds.push(update(panel, Message::Tick));
+            // Only the tray sensors change with the items — a full
+            // tick would re-run (and re-fork) every other sensor for
+            // an icon that merely reported a new state.
+            refresh_tray_and_notif(panel);
             Command::batch(cmds)
         }
         Message::NotificationsChanged => {
             // A notification arrived, was replaced, expired or closed:
-            // rebuild at once (same full path as the tray poke).
-            update(panel, Message::Tick)
+            // only the feed sensor's text moves (see
+            // `refresh_tray_and_notif`); the popup and the list read
+            // the shared state on their own.
+            refresh_tray_and_notif(panel);
+            Command::none()
         }
         Message::PopupCardClicked(id) => {
             // Whole-card click = the spec's default action, then dismiss.
@@ -2647,6 +2662,24 @@ fn update_taskbar_icon_target(panel: &Panel) {
     }
     if let Some(target) = smallest {
         windows::set_icon_target(target);
+    }
+}
+
+/// Tray and notification events refresh only their own sensors: the
+/// slots and the feed text come from the shared in-memory state and
+/// every other reading stays what the last tick read — a chatty tray
+/// icon must not re-fork (and re-read) the whole sensor set. The
+/// tint follows in the view: colour rules are evaluated per render.
+fn refresh_tray_and_notif(panel: &mut Panel) {
+    for section in &mut panel.sections {
+        for sensor in &mut section.sensors {
+            if sensor.tray.is_some() {
+                sensor.tray = Some(tray::items());
+            }
+            if sensor.is_notifications {
+                sensor.value = notifications::display_value();
+            }
+        }
     }
 }
 
