@@ -124,6 +124,9 @@ pub struct PanelConfig {
     /// restores the user's own colours on the next rebuild.
     pub wallpaper_palette: Option<bool>,
     pub section_layout: Option<String>,
+    /// Draw each section's title above its stacked sensors (the title
+    /// exists only where sensors stack); absent = true.
+    pub section_title: Option<bool>,
     pub default_section_weight: Option<u32>,
     pub default_bg_color: Option<String>,
     pub default_text_color: Option<String>,
@@ -427,6 +430,7 @@ pub fn default_config() -> Config {
             wallpaper: None,
             wallpaper_palette: None,
             section_layout: Some("horizontal".to_string()),
+            section_title: None,
             default_section_weight: Some(1),
             default_bg_color: None,
             default_text_color: None,
@@ -675,6 +679,20 @@ mod tests {
         let bare: Config =
             serde_json::from_str(r#"{"panel":{"sections":[]}}"#).expect("bare config parses");
         assert!(bare.panel.app_theme.is_none());
+    }
+
+    /// `panel.section_title` parses and roundtrips; absent stays `None`
+    /// — the bar draws the titles by default.
+    #[test]
+    fn section_title_key_parse_and_roundtrip() {
+        let json = r#"{"panel":{"section_title":false,"sections":[]}}"#;
+        let cfg: Config = serde_json::from_str(json).expect("section_title must parse");
+        assert_eq!(cfg.panel.section_title, Some(false));
+        let out = serde_json::to_string(&cfg).expect("config must serialize");
+        assert!(out.contains(r#""section_title":false"#), "got: {out}");
+        let bare: Config =
+            serde_json::from_str(r#"{"panel":{"sections":[]}}"#).expect("bare config parses");
+        assert!(bare.panel.section_title.is_none());
     }
 
     /// `panel.notifications`: presence gates the D-Bus server, missing

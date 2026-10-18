@@ -69,6 +69,8 @@ pub struct PiumaConfig {
     /// GTK theme bridge generation (roadmap N3): `None` = key absent (no
     /// file written or removed).
     pub app_theme: Option<bool>,
+    /// Draw each section's title above its sensors (bar default: true).
+    pub section_title: Option<bool>,
     /// Desktop background the bar draws itself (roadmap2 #1): `None` =
     /// key absent (the bar opens no background window).
     pub wallpaper: Option<WallpaperCfg>,
@@ -240,6 +242,7 @@ impl Default for PiumaConfig {
             wallpaper: None,
             wallpaper_palette: None,
             section_layout: "horizontal".to_string(),
+            section_title: None,
             default_section_weight: 1,
             default_bg_color: Some("#1a1b26".to_string()),
             default_text_color: Some("#e8e8e8".to_string()),
@@ -325,6 +328,9 @@ pub enum Message {
     AutostartAppToggled(String, bool),
     /// GTK theme bridge toggle (roadmap N3).
     AppThemeChanged(bool),
+    /// Section title toggle: draw each section's title above its
+    /// stacked sensors.
+    SectionTitleChanged(bool),
     /// Wallpaper enable toggle (roadmap2 #1).
     WallpaperEnabled(bool),
     /// Wallpaper image path, from the scanned list or a hand-typed
@@ -664,6 +670,9 @@ impl PiumaSetup {
         }
         if let Some(t) = self.config.app_theme {
             panel.insert("app_theme".to_string(), JsonValue::Bool(t));
+        }
+        if let Some(t) = self.config.section_title {
+            panel.insert("section_title".to_string(), JsonValue::Bool(t));
         }
         // Only the toggle travels to the file: the palette it selects is
         // derived at runtime and never serialized.
@@ -1063,6 +1072,7 @@ impl PiumaSetup {
             wallpaper: None,
             wallpaper_palette: None,
             section_layout: "horizontal".to_string(),
+            section_title: None,
             default_section_weight: 1,
             default_bg_color: None,
             default_text_color: None,
@@ -1108,6 +1118,9 @@ impl PiumaSetup {
         // Absent `app_theme` stays `None`: no bridge file is written or
         // removed (roadmap N3).
         self.config.app_theme = panel.get("app_theme").and_then(|v| v.as_bool());
+        // Absent `section_title` stays `None` (the bar draws titles by
+        // default); an explicit false is kept as-is.
+        self.config.section_title = panel.get("section_title").and_then(|v| v.as_bool());
         // Absent `wallpaper` stays `None`: the bar draws no background
         // (roadmap2 #1). A partial block falls back per field.
         self.config.wallpaper = panel.get("wallpaper").and_then(|v| {
@@ -1416,6 +1429,11 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
         Message::AppThemeChanged(value) => {
             // On = explicit true; off drops back to absent (≈ false).
             state.config.app_theme = value.then_some(true);
+        }
+        Message::SectionTitleChanged(value) => {
+            // Unlike app_theme, both states are explicit: the default
+            // is titles drawn, so off must write a false.
+            state.config.section_title = Some(value);
         }
         Message::WallpaperEnabled(value) => {
             // The toggle only flips `enabled`: the chosen path survives
@@ -3504,6 +3522,10 @@ fn panel_settings(state: &PiumaSetup) -> Element<'_, Message> {
             Some(state.config.section_layout.clone()),
             Message::SectionLayoutChanged,
         ).width(Length::Fill).into()),
+        ("Section Title", toggler(state.config.section_title.unwrap_or(true))
+            .label("Show section titles")
+            .on_toggle(Message::SectionTitleChanged)
+            .into()),
         ("Default BG", color_control(state.config.default_bg_color.as_deref().unwrap_or(""), Message::DefaultBgColorChanged)),
         ("Default Text", color_control(state.config.default_text_color.as_deref().unwrap_or(""), Message::DefaultTextColorChanged)),
         ("Anchor", picklist(
@@ -4817,6 +4839,39 @@ mod tests {
         let bare: JsonValue =
             serde_json::from_str(&state.serialize().expect("serialize must succeed")).unwrap();
         assert!(bare["panel"].get("app_theme").is_none());
+    }
+
+    /// The `panel.section_title` key roundtrips load→save with its
+    /// value, and an untouched config never gets the key injected —
+    /// unlike app_theme, its bar default is titles drawn.
+    #[test]
+    fn section_title_key_roundtrip() {
+        let json = r##"{
+  "panel": {
+    "align": "fill",
+    "anchor": "top",
+    "section_title": false,
+    "section_layout": "horizontal",
+    "sections": [],
+    "thickness": 26
+  }
+}"##;
+        let mut state = fixture();
+        state.load_from_json(json).expect("config must load");
+        assert_eq!(state.config.section_title, Some(false));
+        let saved = state.serialize().expect("serialize must succeed");
+        let out: JsonValue = serde_json::from_str(&saved).expect("saved JSON must parse");
+        assert_eq!(out["panel"]["section_title"], false);
+        serde_json::from_str::<config::Config>(&saved)
+            .expect("piuma must accept the saved config (pre-save validation)");
+        // Absent stays absent: no key is injected on save.
+        let mut bare_state = fixture();
+        bare_state
+            .load_from_json(r##"{"panel": {"sections": [], "thickness": 26}}"##)
+            .expect("config must load");
+        let bare: JsonValue =
+            serde_json::from_str(&bare_state.serialize().expect("serialize must succeed")).unwrap();
+        assert!(bare["panel"].get("section_title").is_none());
     }
 
     /// Roadmap N4: the sidebar switches the visible category while the

@@ -90,6 +90,7 @@ Example configuration:
     "font_size": 12,
     "bold": false,
     "section_layout": "horizontal",
+    "section_title": true,
     "default_section_weight": 1,
     "default_bg_color": "#1a1b26",
     "default_text_color": "#e8e8e8",

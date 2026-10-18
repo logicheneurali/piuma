@@ -1823,7 +1823,8 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
     for (section_idx, section) in panel.sections.iter().enumerate() {
         let section_bg = section.bg_color;
         let section_text = section.text_color;
-        let has_title = !section.name.is_empty();
+        // The `panel.section_title` toggle can hide the title entirely.
+        let has_title = !title_fit_name(panel, section).is_empty();
         let title_color = section.title_color;
 
         // A vertical panel stacks every section's sensors down its height,
@@ -2204,6 +2205,17 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
 // ── positioning helpers ─────────────────────────────────────────────
 
 
+/// The section name as the title-fit math sees it: empty when the
+/// title is hidden by `panel.section_title` — no title means no
+/// chrome on the thickness axis (and no drawn title at all).
+fn title_fit_name<'a>(panel: &'a Panel, section: &'a SectionData) -> &'a str {
+    if panel.config.panel.section_title.unwrap_or(true) {
+        section.name.as_str()
+    } else {
+        ""
+    }
+}
+
 /// Recompute `tray::icon_target` from the built sections (every tick and on
 /// every reload): the smallest fit across all tray sensors wins, so one icon
 /// size serves the whole bar and no tray sensor overflows. The stacked-title
@@ -2216,7 +2228,8 @@ fn update_tray_icon_target(panel: &Panel) {
     for section in &panel.sections {
         // Title height as the view draws it, shared with the sensor icon
         // fit: text in a box padded SECTION_CONTENT_PAD on both sides.
-        let title_extra = icons::stacked_title_extra(&section.layout, &section.name, font);
+        let title_extra =
+            icons::stacked_title_extra(&section.layout, title_fit_name(panel, section), font);
         for sensor in &section.sensors {
             if sensor.tray.is_some() {
                 let target =
@@ -2239,7 +2252,8 @@ fn update_taskbar_icon_target(panel: &Panel) {
     let font = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
     let mut smallest: Option<u16> = None;
     for section in &panel.sections {
-        let title_extra = icons::stacked_title_extra(&section.layout, &section.name, font);
+        let title_extra =
+            icons::stacked_title_extra(&section.layout, title_fit_name(panel, section), font);
         for sensor in &section.sensors {
             if sensor.taskbar.is_some() {
                 let target = icons::row_icon_target(
