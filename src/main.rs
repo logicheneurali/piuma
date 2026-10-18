@@ -40,14 +40,24 @@ mod graphs;
 mod hypr;
 mod icons;
 mod instance_lock;
+mod menus;
 mod notifications;
 mod palette;
 mod sensor_runner;
 mod sensors;
 mod text_width;
+mod tooltip;
 mod tray;
+mod wallpaper_ui;
 mod windows;
 mod workspace;
+
+use menus::{
+    fit_menu_labels, menu_placement, menu_row_h, menu_size, taskbar_menu_size, taskbar_menu_view,
+    tray_menu_view, MENU_PAD,
+};
+use tooltip::{tooltip_close, tooltip_open, tooltip_window_view};
+use wallpaper_ui::{sync_palette, sync_wallpaper, wallpaper_view};
 // Layout padding lives with the icon sizing helpers (icons.rs): the view
 // and the row-height size formula must read the same number.
 use icons::SECTION_CONTENT_PAD;
@@ -126,17 +136,6 @@ pub(crate) const CALENDAR_CELL_PAD: u32 = 6;
 // One row per entry, sized exactly (`menu_row_h` × count + 2× pad, see
 // `menu_size`): like the popup, the surface ends where the list ends,
 // so a stray click below it reaches the window underneath.
-/// Padding around the entry list (all four sides).
-pub(crate) const MENU_PAD: u32 = 6;
-/// Distance between a tooltip and the widget it describes (icons and
-/// tray items): enough to read it as attached, never on the widget.
-pub(crate) const TOOLTIP_GAP: f32 = 8.0;
-/// Indent per submenu level (rows and the width estimate agree on it).
-pub(crate) const MENU_INDENT: u32 = 14;
-/// Width bounds: a one-item menu stays grabbable, a long label does
-/// not take half the screen (it gets clipped instead).
-pub(crate) const MENU_MIN_W: u32 = 120;
-pub(crate) const MENU_MAX_W: u32 = 420;
 
 /// The notification list popup (the sensor's click): entries in the
 /// snapshot, rows shown at once (the wheel scrolls the rest) and the
@@ -650,7 +649,7 @@ impl Operation<Message> for FindSensorRect {
 
 // ── helpers ─────────────────────────────────────────────────────────
 
-fn resolve_color<'a>(cfg: Option<Color>, default: Color) -> Color {
+pub(crate) fn resolve_color<'a>(cfg: Option<Color>, default: Color) -> Color {
     cfg.unwrap_or(default)
 }
 
@@ -660,7 +659,7 @@ fn resolve_color<'a>(cfg: Option<Color>, default: Color) -> Color {
 /// see-through) — else the configured `default_bg_color`, else the
 /// built-in default. Used by both the surface's container and the
 /// sections' fallback, so they can't disagree.
-fn panel_background(config: &config::Config, pal: Option<&palette::Palette>) -> Color {
+pub(crate) fn panel_background(config: &config::Config, pal: Option<&palette::Palette>) -> Color {
     let configured = config
         .panel
         .default_bg_color
@@ -960,7 +959,7 @@ fn restyle(panel: &mut Panel) {
 }
 
 /// A solid bar widget used to compose partial sensor borders.
-fn border_bar(color: Color, width: Length, height: Length) -> Element<'static, Message> {
+pub(crate) fn border_bar(color: Color, width: Length, height: Length) -> Element<'static, Message> {
     container(Space::new().width(width).height(height))
         .style(move |_theme: &iced::Theme| ContainerStyle {
             background: Some(Background::Color(color)),
@@ -2003,7 +2002,7 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
 /// machinery — theme parsing, file lookups, cache — dormant otherwise, and
 /// it fires before the first `resolve` even happens. `panel.icon_theme`
 /// wins; without it the tray's GTK rule applies.
-fn icons_theme(config: &config::Config) -> Option<&str> {
+pub(crate) fn icons_theme(config: &config::Config) -> Option<&str> {
     let declares_icon = config
         .panel
         .sections
@@ -2074,7 +2073,7 @@ pub(crate) static FONT_NAMES: std::sync::Mutex<Vec<(&'static str, String)>> =
 
 /// The `'static` family name of `name` (roadmap M2): one leak per
 /// distinct family, so `Font::with_name` can take it repeatedly.
-fn family_name_static(name: &str) -> &'static str {
+pub(crate) fn family_name_static(name: &str) -> &'static str {
     let mut names = FONT_NAMES
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2089,7 +2088,7 @@ fn family_name_static(name: &str) -> &'static str {
 /// The panel font exactly as configured: family from `panel.font` (default
 /// [`DEFAULT_FONT`]) and the `panel.bold` flag as the weight (roadmap M2).
 /// Single source for every bar text and for the M5 width measurement.
-fn panel_font(config: &config::Config) -> Font {
+pub(crate) fn panel_font(config: &config::Config) -> Font {
     let weight = if config.panel.bold.unwrap_or(false) {
         iced::font::Weight::Bold
     } else {
@@ -2106,7 +2105,7 @@ fn panel_font(config: &config::Config) -> Font {
 /// The font of the sensors' value texts: `panel.value_font` when set
 /// (a monospaced family keeps the digits one width wide, so the
 /// values never jitter), the panel font otherwise — same weight.
-fn value_font(config: &config::Config) -> Font {
+pub(crate) fn value_font(config: &config::Config) -> Font {
     let weight = if config.panel.bold.unwrap_or(false) {
         iced::font::Weight::Bold
     } else {
@@ -2792,7 +2791,7 @@ impl<'a> From<FillSections<'a>> for Element<'a, Message> {
 /// Panel thickness on the cross axis, in pixels: `panel.thickness` from the
 /// config (default 32px, minimum 1px). Single source of truth for the surface
 /// size and for the exclusive zone hyprland reserves.
-fn panel_thickness(config: &config::Config) -> u32 {
+pub(crate) fn panel_thickness(config: &config::Config) -> u32 {
     config
         .panel
         .thickness
@@ -2880,7 +2879,7 @@ fn refresh_tray_and_notif(panel: &mut Panel) {
 /// * vertical panel   -> `thickness x screen_height`
 ///
 /// `thickness` comes from `panel.thickness` in the config (default 32px).
-fn panel_size(config: &config::Config, screen_width: u32, screen_height: u32) -> iced_exwlshell::settings::LayerSize {
+pub(crate) fn panel_size(config: &config::Config, screen_width: u32, screen_height: u32) -> iced_exwlshell::settings::LayerSize {
     let layout = config
         .panel
         .section_layout
@@ -2911,7 +2910,7 @@ fn panel_size(config: &config::Config, screen_width: u32, screen_height: u32) ->
 /// * horizontal, bottom -> `Bottom`
 /// * vertical,   left   -> `Left`
 /// * vertical,   right  -> `Right`
-fn panel_anchor(config: &config::Config) -> Anchor {
+pub(crate) fn panel_anchor(config: &config::Config) -> Anchor {
     let vertical = config
         .panel
         .section_layout
@@ -2938,170 +2937,11 @@ fn panel_anchor(config: &config::Config) -> Anchor {
     }
 }
 
-/// Anchor + edge margins for a tooltip window at the cursor point:
-/// just off the bar's anchored edge on the screen's inner side (a top
-/// bar's tooltip drops below the surface, never onto it — the bar
-/// surface is one `thickness` tall, there is no room inside it),
-/// centred on the cursor along the bar and clamped inside the output.
-fn tooltip_placement(
-    anchor: Anchor,
-    at: (i32, i32),
-    w: u32,
-    h: u32,
-    thickness: i32,
-    sw: i32,
-    sh: i32,
-) -> (Anchor, Margin) {
-    let (w, h) = (w as i32, h as i32);
-    let gap = TOOLTIP_GAP as i32;
-    if anchor.contains(Anchor::Top) {
-        let left = (at.0 - w / 2).clamp(0, (sw - w).max(0));
-        (
-            Anchor::Left | Anchor::Top,
-            Margin {
-                left,
-                top: thickness + gap,
-                right: 0,
-                bottom: 0,
-            },
-        )
-    } else if anchor.contains(Anchor::Bottom) {
-        let left = (at.0 - w / 2).clamp(0, (sw - w).max(0));
-        (
-            Anchor::Left | Anchor::Bottom,
-            Margin {
-                left,
-                top: 0,
-                right: 0,
-                bottom: thickness + gap,
-            },
-        )
-    } else if anchor.contains(Anchor::Left) {
-        let top = (at.1 - h / 2).clamp(0, (sh - h).max(0));
-        (
-            Anchor::Left | Anchor::Top,
-            Margin {
-                left: thickness + gap,
-                top,
-                right: 0,
-                bottom: 0,
-            },
-        )
-    } else {
-        let top = (at.1 - h / 2).clamp(0, (sh - h).max(0));
-        (
-            Anchor::Right | Anchor::Top,
-            Margin {
-                left: 0,
-                top,
-                right: thickness + gap,
-                bottom: 0,
-            },
-        )
-    }
-}
 
-/// The cursor point for tooltip placement, output-relative: the
-/// compositor's own view (`hyprctl cursorpos`) — `last_cursor` is
-/// stale when the pointer enters the bar straight from a window below
-/// (a layer surface only receives motion once the cursor is inside),
-/// and the tooltip would open at the previous hover's spot.
-fn tooltip_cursor_point(panel: &Panel) -> (i32, i32) {
-    if let Some((gx, gy)) = hyprctl_cursor_global() {
-        let (ox, oy) = tray::output_origin();
-        return (gx - ox, gy - oy);
-    }
-    tray::cursor_output_point(panel).unwrap_or((0, 0))
-}
 
-/// The cursor's global position straight from the compositor.
-fn hyprctl_cursor_global() -> Option<(i32, i32)> {
-    let out = std::process::Command::new("hyprctl")
-        .args(["cursorpos", "-j"])
-        .output()
-        .ok()?;
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-    Some((v["x"].as_i64()? as i32, v["y"].as_i64()? as i32))
-}
 
-/// The tooltip surface metrics for a text: every `\n`-separated line
-/// is fitted to `budget` (like the menu labels), the surface is as
-/// wide as the widest fitted line and one `menu_row_h` per line tall —
-/// so a multi-line SNI tooltip (`title\nbody`) is measured, not cut to
-/// one line's height. Returns (width, height, fitted text).
-fn tooltip_fit(font: &Font, font_size: u32, text: &str, budget: u32) -> (u32, u32, String) {
-    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    let jobs: Vec<(String, u32)> = lines.into_iter().map(|line| (line, budget)).collect();
-    let fitted = text_width::fit(font, font_size, &jobs);
-    let width = u32::from(text_width::widest(font, font_size, &fitted));
-    let height = menu_row_h(font_size) * fitted.len() as u32;
-    (width, height, fitted.join("\n"))
-}
 
-/// Open (or retarget) the tooltip window for a bar source: the text is
-/// fitted to half the output width, so a long title is cut like the
-/// tray menu's labels instead of stretching off-screen.
-fn tooltip_open(panel: &mut Panel, id: String, text: String) -> Command<Message> {
-    if text.is_empty() {
-        return Command::none();
-    }
-    // Already this source's tooltip: nothing to rebuild.
-    if panel
-        .bar_tooltip
-        .as_ref()
-        .is_some_and(|(_, tip)| tip.id == id)
-    {
-        return Command::none();
-    }
-    let mut cmds: Vec<Command<Message>> = Vec::new();
-    if let Some((win, _)) = panel.bar_tooltip.take() {
-        cmds.push(iced::window::close(win));
-    }
-    let font = panel_font(&panel.config);
-    let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
-    let (sw, sh) = unsafe { (SCREEN_WIDTH as i32, SCREEN_HEIGHT as i32) };
-    let budget = (sw as u32 / 2).saturating_sub(2 * MENU_PAD);
-    let (text_w, text_h, fitted) = tooltip_fit(&font, font_size, &text, budget);
-    let w = text_w.saturating_add(2 * MENU_PAD).max(48);
-    let h = text_h.saturating_add(2 * MENU_PAD);
-    let at = tooltip_cursor_point(panel);
-    let thickness = panel_thickness(&panel.config) as i32;
-    let (anchor, margin) =
-        tooltip_placement(panel_anchor(&panel.config), at, w, h, thickness, sw, sh);
-    let (win, open) = Message::layershell_open(NewLayerShellSettings {
-        size: LayerSize::px(w, h),
-        layer: Layer::Overlay,
-        anchor,
-        // `-1` = ignore other surfaces' exclusive zones: the default
-        // (`None` → protocol default 0) had the tooltip land *below*
-        // the bar's own 30 px reservation — `thickness + gap` turned
-        // into `thickness + gap + thickness`.
-        exclusive_zone: Some(-1),
-        margin: Some(margin),
-        keyboard_interactivity: KeyboardInteractivity::None,
-        output_option: popup_output_option(),
-        namespace: Some("piuma-tooltip".to_string()),
-        ..Default::default()
-    });
-    panel.bar_tooltip = Some((win, BarTooltip { id, text: fitted }));
-    cmds.push(open);
-    Command::batch(cmds)
-}
 
-/// Close the tooltip — only if `id` still owns it: an exit delivered
-/// after another source's enter (widget order) is stale.
-fn tooltip_close(panel: &mut Panel, id: String) -> Command<Message> {
-    if let Some((win, tip)) = panel.bar_tooltip.take() {
-        if tip.id == id {
-            return iced::window::close(win);
-        }
-        panel.bar_tooltip = Some((win, tip));
-    }
-    Command::none()
-}
 
 /// Which sides `[top, right, bottom, left]` of the section at `idx` sit
 /// flush on a screen edge (roadmap M3): the bar's anchored side touches for
@@ -3110,7 +2950,7 @@ fn tooltip_close(panel: &mut Panel, id: String) -> Command<Message> {
 /// `fill` keeps the first/last section at the panel ends (both flush when a
 /// single section fills the row), `left`/`top` parks only the first one
 /// there, `right`/`bottom` only the last, `center` none.
-fn section_touch(config: &config::Config, idx: usize, count: usize) -> [bool; 4] {
+pub(crate) fn section_touch(config: &config::Config, idx: usize, count: usize) -> [bool; 4] {
     let vertical = config.panel.section_layout.as_deref() == Some("vertical");
     let anchor = panel_anchor(config);
     let mut touch = [
@@ -3144,7 +2984,7 @@ fn section_touch(config: &config::Config, idx: usize, count: usize) -> [bool; 4]
 /// Border radius per corner for roadmap M3: `touch = [top, right, bottom,
 /// left]`; a corner renders square when **either** of its two sides is flush
 /// with a screen edge, rounded to `radius` otherwise.
-fn corner_radius(touch: [bool; 4], radius: f32) -> iced::border::Radius {
+pub(crate) fn corner_radius(touch: [bool; 4], radius: f32) -> iced::border::Radius {
     let corner = |flush: bool| if flush { 0.0 } else { radius };
     iced::border::Radius {
         top_left: corner(touch[0] || touch[3]),
@@ -3206,7 +3046,7 @@ impl Default for PopupStyle {
 /// palette replaces the card's configured COLOURS (bg/hover from the
 /// tones, borders from the vibrant one, text from the text tone);
 /// sizes and the border type stay configured.
-fn popup_style(config: &config::Config, pal: Option<&palette::Palette>) -> PopupStyle {
+pub(crate) fn popup_style(config: &config::Config, pal: Option<&palette::Palette>) -> PopupStyle {
     let d = PopupStyle::default();
     let Some(n) = config.panel.notifications.as_ref() else {
         return d;
@@ -3274,95 +3114,7 @@ fn popup_card_h(style: &PopupStyle) -> u32 {
     2 * style.padding + 5 * style.font_size
 }
 
-/// Open or close the wallpaper surface (roadmap2 #1) so it matches the
-/// config: the window exists while `panel.wallpaper` is enabled with an
-/// existing file and closes otherwise. Called on every tick — the
-/// comparison is cheap, and the first tick materializes the setting
-/// after startup (the daemon's init closure cannot open windows).
-/// One wallpaper surface per active output: a layer surface lives on a
-/// single output, so the window set tracks the monitor list. Runs on
-/// every tick — the output query only executes while something must be
-/// shown (the disabled case costs nothing), a monitor plugged later
-/// joins within a tick, and a removed one closes its surface.
-fn sync_wallpaper(panel: &mut Panel) -> Command<Message> {
-    let wanted = panel.config.panel.wallpaper.as_ref().is_some_and(|w| {
-        w.enabled && !w.path.is_empty() && PathBuf::from(&w.path).is_file()
-    });
-    let desired = if wanted { monitor_names() } else { Vec::new() };
-    let (to_open, to_close) = wallpaper_plan(&panel.wallpaper, &desired);
-    let mut cmds: Vec<Command<Message>> = to_close.into_iter().map(iced::window::close).collect();
-    for name in to_open {
-        let (id, open) = Message::layershell_open(NewLayerShellSettings {
-            // `FILL` = both axes to the compositor: the surface covers
-            // this output whatever its size and scale (all four anchors
-            // are what `FILL` requires).
-            size: LayerSize::FILL,
-            layer: Layer::Background,
-            anchor: Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right,
-            // -1 = ignore other surfaces' reservations: the bar's strip
-            // must not inset the background (full output, exactly what
-            // a wallpaper tool does).
-            exclusive_zone: Some(-1),
-            margin: None,
-            keyboard_interactivity: KeyboardInteractivity::None,
-            output_option: OutputOption::OutputName(name.clone()),
-            // Clicks fall through to the bare desktop: the wallpaper
-            // never eats input meant for the compositor.
-            events_transparent: true,
-            namespace: Some("piuma-wallpaper".to_string()),
-            ..Default::default()
-        });
-        panel.wallpaper.push((name, id));
-        cmds.push(open);
-    }
-    Command::batch(cmds)
-}
 
-/// The derived palette rides the tick (see `sync_wallpaper`): the
-/// extraction re-runs only when the wallpaper file's path or mtime
-/// change — or the option just turned on — never every second. With the
-/// option (or the wallpaper) off the in-memory palette is dropped, so
-/// the next rebuild resolves the user's own configured colours again:
-/// nothing is ever written back to the config file.
-fn sync_palette(panel: &mut Panel) -> Command<Message> {
-    let cfg = &panel.config.panel;
-    let wanted = cfg
-        .wallpaper_palette
-        .unwrap_or(false)
-        .then_some(cfg.wallpaper.as_ref())
-        .flatten()
-        .filter(|w| w.enabled)
-        .filter(|w| !w.path.is_empty())
-        .and_then(|w| {
-            let mtime = std::fs::metadata(&w.path).ok().and_then(|m| m.modified().ok())?;
-            PathBuf::from(&w.path).is_file().then_some((w.path.clone(), mtime))
-        });
-    let Some(key) = wanted else {
-        // Dropping a palette that was live re-resolves the chains
-        // back to the configured colours (see `restyle`); an already
-        // empty palette needs no work.
-        if panel.palette.is_some() {
-            panel.palette = None;
-            panel.palette_key = None;
-            restyle(panel);
-        }
-        return Command::none();
-    };
-    if panel.palette_key.as_ref() == Some(&key) {
-        return Command::none();
-    }
-    // The decode runs off the UI thread (a 4K image is tens of ms of
-    // CPU); the key travels with the result, so a failed decode retries
-    // only on the next file change, not every tick.
-    let task_key = key.clone();
-    Command::perform(
-        async move {
-            let path = task_key.0.clone();
-            smol::unblock(move || palette::extract(std::path::Path::new(&path))).await
-        },
-        move |pal| Message::PaletteReady(pal, key),
-    )
-}
 
 /// Last monitor list with its timestamp: outputs change rarely (hotplug),
 /// so the wallpaper sync — which asks every tick — gets a cached answer
@@ -3378,7 +3130,7 @@ pub(crate) const MONITORS_TTL: std::time::Duration = std::time::Duration::from_s
 /// best-effort, the same source the bar's geometry helpers use (cached,
 /// see [`MONITORS`]); no answer = no surface for now (retried on the
 /// next tick).
-fn monitor_names() -> Vec<String> {
+pub(crate) fn monitor_names() -> Vec<String> {
     if let Ok(cached) = MONITORS.lock() {
         if let Some((at, names)) = cached.as_ref() {
             if at.elapsed() < MONITORS_TTL && !names.is_empty() {
@@ -3402,7 +3154,7 @@ fn monitor_names() -> Vec<String> {
 
 /// `name` of every entry of the `hyprctl monitors -j` array; anything
 /// unparseable yields no outputs instead of breaking the bar.
-fn monitor_names_json(json: &str) -> Vec<String> {
+pub(crate) fn monitor_names_json(json: &str) -> Vec<String> {
     let Ok(monitors) = serde_json::from_str::<Vec<serde_json::Value>>(json) else {
         return Vec::new();
     };
@@ -3418,7 +3170,7 @@ fn monitor_names_json(json: &str) -> Vec<String> {
 /// from a fresh `hyprctl monitors -j`. `OutputOption::LastOutput`
 /// picked another output once a second monitor joined (the popup
 /// opened over on it); no answer falls back to the old behaviour.
-fn focused_output() -> Option<(String, i32, i32)> {
+pub(crate) fn focused_output() -> Option<(String, i32, i32)> {
     let output = std::process::Command::new("hyprctl")
         .args(["monitors", "-j"])
         .output()
@@ -3428,7 +3180,7 @@ fn focused_output() -> Option<(String, i32, i32)> {
 
 /// The (`name`, `x`, `y`) of the `hyprctl monitors -j` entry with
 /// `"focused": true`; unparseable input yields no output.
-fn focused_output_in(json: &str) -> Option<(String, i32, i32)> {
+pub(crate) fn focused_output_in(json: &str) -> Option<(String, i32, i32)> {
     let monitors = serde_json::from_str::<Vec<serde_json::Value>>(json).ok()?;
     let m = monitors
         .iter()
@@ -3442,57 +3194,20 @@ fn focused_output_in(json: &str) -> Option<(String, i32, i32)> {
 
 /// The output the cursor-driven popup surfaces pin themselves to (the
 /// bar's own, see [`focused_output`]); `LastOutput` as the fallback.
-fn active_output_name() -> Option<String> {
+pub(crate) fn active_output_name() -> Option<String> {
     focused_output().map(|(name, _, _)| name)
 }
 
 /// The output for the graph popup and its connector: the bar's own
 /// ([`active_output_name`]), falling back to the old `LastOutput`
 /// behaviour when hyprctl can't answer.
-fn popup_output_option() -> OutputOption {
+pub(crate) fn popup_output_option() -> OutputOption {
     active_output_name()
         .map(OutputOption::OutputName)
         .unwrap_or(OutputOption::LastOutput)
 }
 
-/// Pure part of the wallpaper sync: outputs that still need a window
-/// and windows to close (their output is gone, or the whole feature
-/// switched off — an empty wanted list then closes everything).
-fn wallpaper_plan<T: Clone>(current: &[(String, T)], desired: &[String]) -> (Vec<String>, Vec<T>) {
-    let to_open = desired
-        .iter()
-        .filter(|name| !current.iter().any(|(n, _)| n == *name))
-        .cloned()
-        .collect();
-    let to_close = current
-        .iter()
-        .filter(|(name, _)| !desired.contains(name))
-        .map(|(_, id)| id.clone())
-        .collect();
-    (to_open, to_close)
-}
 
-/// The wallpaper surface: the configured image covering the whole output
-/// (cover fit keeps the aspect ratio and crops what spills over). The
-/// file is re-checked here — a path removed behind the config's back
-/// renders the surface empty instead of breaking the window.
-fn wallpaper_view(panel: &Panel) -> Element<'_, Message> {
-    let path = panel
-        .config
-        .panel
-        .wallpaper
-        .as_ref()
-        .map(|w| w.path.as_str())
-        .unwrap_or_default();
-    if path.is_empty() || !PathBuf::from(path).is_file() {
-        return container(text("")).width(Length::Fill).height(Length::Fill).into();
-    }
-    Image::new(iced::widget::image::Handle::from_path(path))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .content_fit(iced::ContentFit::Cover)
-        .into()
-}
 
 fn sync_popup(panel: &mut Panel, reposition: bool) -> Option<Command<Message>> {
     let enabled = panel.config.panel.notifications.is_some();
@@ -3811,96 +3526,9 @@ fn notif_list_size(rows: &[notifications::NotifRow], font: &Font, font_size: u32
 
 // ── tray menu window ────────────────────────────────────────────────
 
-/// Vertical rhythm of one menu row: the text line (~1.2× the font)
-/// plus a little air, so centered rows never clip at any font size.
-fn menu_row_h(font_size: u32) -> u32 {
-    font_size + font_size / 2 + 4
-}
 
-/// Surface size for `entries`: the height is exact (one `menu_row_h`
-/// per row plus padding — nothing clips, every row stays hit-exact);
-/// the width measures the widest label with the same shaper iced
-/// renders with (`text_width::widest`), adds the deepest indent and
-/// the horizontal margins on both sides — two `MENU_PAD` layers per
-/// side (the list container's and each row's own) — and is clamped so
-/// a one-item menu is still grabbable and a long label does not take
-/// half the screen.
-fn menu_size(entries: &[dbusmenu::MenuEntry], font: &Font, font_size: u32) -> (u32, u32) {
-    let patterns: Vec<String> = entries
-        .iter()
-        .map(|e| format!("{}{}", dbusmenu::toggle_glyph(e), e.label))
-        .collect();
-    let text_w = u32::from(text_width::widest(font, font_size, &patterns));
-    let max_depth = entries.iter().map(|e| e.depth).max().unwrap_or(0);
-    let w = text_w
-        .saturating_add(max_depth * MENU_INDENT)
-        .saturating_add(4 * MENU_PAD)
-        .clamp(MENU_MIN_W, MENU_MAX_W);
-    let h = entries.len() as u32 * menu_row_h(font_size) + 2 * MENU_PAD;
-    (w, h)
-}
 
-/// Cut every label to its row budget inside the finished surface width `w`
-/// (the deepest indent narrows the text area of its own row, and the
-/// budget keeps both `MENU_PAD` layers per side — the list container's
-/// and the row's own — so a cut label ends with the same margin as a
-/// short one): the toggle glyph measures with the label, so it is fitted
-/// too and then stripped back off. Runs once when the menu loads —
-/// [`tray_menu_view`] renders the result on a single line, so a too-long
-/// label ends with an ellipsis instead of spilling over the next row.
-fn fit_menu_labels(entries: &mut [dbusmenu::MenuEntry], w: u32, font: &Font, font_size: u32) {
-    let jobs: Vec<(String, u32)> = entries
-        .iter()
-        .map(|e| {
-            (
-                format!("{}{}", dbusmenu::toggle_glyph(e), e.label),
-                w.saturating_sub(4 * MENU_PAD + e.depth * MENU_INDENT),
-            )
-        })
-        .collect();
-    for (entry, fitted) in entries.iter_mut().zip(text_width::fit(font, font_size, &jobs)) {
-        let glyph = dbusmenu::toggle_glyph(entry);
-        entry.label = fitted.strip_prefix(glyph).unwrap_or_default().to_string();
-    }
-}
 
-/// Anchor + edge margins for the menu at the output-relative point
-/// (x, y): it opens right/down from the cursor — the natural quadrant
-/// under a top/left bar — and flips to the opposite side when the
-/// surface would leave the output, with the flipped edge **clamped to
-/// the output**: a menu that doesn't fit on that side is cut at the
-/// output edge instead of being pinned at the cursor and leaving the
-/// screen (the 116-row Cachy-Update menu used to open with its base at
-/// the top bar and ~2300 px of it above the screen). Cursor-driven
-/// callers pin the surface to the bar's own output via
-/// [`popup_output_option`], since `OutputOption::LastOutput` lands on
-/// another output once a second monitor joins.
-fn menu_placement(x: i32, y: i32, w: u32, h: u32, sw: i32, sh: i32) -> (Anchor, Margin) {
-    let (w, h) = (w as i32, h as i32);
-    // Fits: anchored at the point. Overflows: the far edge sticks to the
-    // output and the surface ends at the point — unless that would push
-    // the near edge off-screen, in which case the surface sits flush
-    // with the output edge (cut, not lost).
-    let (anchor_h, left, right) = if x + w <= sw {
-        (Anchor::Left, x, 0)
-    } else {
-        (Anchor::Right, 0, (sw - x).clamp(0, (sw - w).max(0)))
-    };
-    let (anchor_v, top, bottom) = if y + h <= sh {
-        (Anchor::Top, y, 0)
-    } else {
-        (Anchor::Bottom, 0, (sh - y).clamp(0, (sh - h).max(0)))
-    };
-    (
-        anchor_h | anchor_v,
-        Margin {
-            top,
-            right,
-            bottom,
-            left,
-        },
-    )
-}
 
 /// One tick of an open popup's abandonment bookkeeping: a pointer on
 /// its surface or back on any sensor resets the count (the popup is
@@ -4192,7 +3820,7 @@ fn graph_hover_sync(
 /// Output-space rect `(x0, y0, x1, y1)` of a surface placed by
 /// `menu_placement`: the anchored side starts at its margin, the
 /// flipped side's margin pins the far edge to the output.
-fn placement_rect(anchor: Anchor, margin: &Margin, w: u32, h: u32, sw: i32, sh: i32) -> (i32, i32, i32, i32) {
+pub(crate) fn placement_rect(anchor: Anchor, margin: &Margin, w: u32, h: u32, sw: i32, sh: i32) -> (i32, i32, i32, i32) {
     let (w, h) = (w as i32, h as i32);
     let (x0, x1) = if anchor.contains(Anchor::Left) {
         (margin.left, margin.left + w)
@@ -4638,146 +4266,6 @@ fn calendar_popup_view<'a>(panel: &'a Panel, cp: &CalendarPopup) -> Element<'a, 
     MouseArea::new(surface).on_exit(Message::CalendarExited).into()
 }
 
-/// The tray menu surface: one row per entry inside the styled box
-/// (shared with the sensors and the notification cards), the whole list
-/// wrapped in a MouseArea whose exit dismisses the menu (the approved
-/// auto-close). Clickable rows carry their own MouseArea — press reports
-/// the entry, enter/leave drive the hover style.
-fn tray_menu_view(panel: &Panel) -> Element<'_, Message> {
-    let Some((_, menu)) = panel.tray_menu.as_ref() else {
-        // The window id exists only together with its state.
-        return container(text(""))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into();
-    };
-    let st = popup_style(&panel.config, panel.palette.as_ref());
-    let font = panel_font(&panel.config);
-    let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
-    let row_h = menu_row_h(font_size) as f32;
-    let dim = Color::from_rgba(st.text.r, st.text.g, st.text.b, 0.45);
-    // The configured hover colors equal the base ones — a color swap on
-    // hover would be invisible, so the feedback is an underline bar under
-    // the label (plus a hand pointer on the row itself).
-    let underline_hover = st.text_hover == st.text && st.bg_hover == st.bg;
-    let mut list: Column<'_, Message> = Column::new();
-    for entry in &menu.entries {
-        let padding = iced::Padding {
-            top: 0.0,
-            right: MENU_PAD as f32,
-            bottom: 0.0,
-            left: (MENU_PAD + entry.depth * MENU_INDENT) as f32,
-        };
-        let row: Element<'_, Message> = match entry.kind {
-            dbusmenu::EntryKind::Separator => container(
-                container(Space::new().width(Length::Fill).height(1))
-                    .style(move |_theme| ContainerStyle {
-                        background: Some(Background::Color(st.border)),
-                        ..ContainerStyle::default()
-                    }),
-            )
-            .width(Length::Fill)
-            .height(Length::Fixed(row_h))
-            .align_y(Alignment::Center)
-            .padding(padding)
-            .into(),
-            // A submenu header is a section label, never a target.
-            dbusmenu::EntryKind::Header => container(
-                text(&entry.label)
-                    .size(font_size)
-                    .color(st.text)
-                    .font(font)
-                    .width(Length::Fill)
-                    .wrapping(iced::widget::text::Wrapping::None),
-            )
-            .width(Length::Fill)
-            .height(Length::Fixed(row_h))
-            .align_y(Alignment::Center)
-            .padding(padding)
-            .into(),
-            dbusmenu::EntryKind::Item => {
-                let hovered = entry.enabled && panel.tray_menu_hover == Some(entry.id);
-                let fg = if !entry.enabled {
-                    dim
-                } else if hovered {
-                    st.text_hover
-                } else {
-                    st.text
-                };
-                let label = text(format!(
-                    "{}{}",
-                    dbusmenu::toggle_glyph(entry),
-                    entry.label
-                ))
-                .size(font_size)
-                .color(fg)
-                .font(font)
-                .wrapping(iced::widget::text::Wrapping::None);
-                // In underline mode the column shrinks to the label and the
-                // bar fills it — the text's exact width without measuring,
-                // and the bar is laid out even while transparent (only its
-                // color changes on hover), so nothing jumps.
-                let inner: Element<'_, Message> = if underline_hover {
-                    Column::new()
-                        .push(label.width(Length::Shrink))
-                        .push(
-                            container(Space::new().width(Length::Fill).height(Length::Fixed(2.0)))
-                                .style(move |_theme| ContainerStyle {
-                                    background: hovered.then(|| Background::Color(fg)),
-                                    ..ContainerStyle::default()
-                                }),
-                        )
-                        .spacing(1)
-                        .into()
-                } else {
-                    label.width(Length::Fill).into()
-                };
-                let body = container(inner)
-                    .width(Length::Fill)
-                    .height(Length::Fixed(row_h))
-                    .align_y(Alignment::Center)
-                    .padding(padding);
-                let styled = if hovered {
-                    body.style(move |_theme| ContainerStyle {
-                        background: Some(Background::Color(st.bg_hover)),
-                        ..ContainerStyle::default()
-                    })
-                } else {
-                    body.style(move |_theme| ContainerStyle::default())
-                };
-                if entry.enabled {
-                    MouseArea::new(styled)
-                        .on_press(Message::TrayMenuClicked(entry.id))
-                        .on_enter(Message::TrayMenuEnter(entry.id))
-                        .on_exit(Message::TrayMenuLeave(entry.id))
-                        .interaction(iced::mouse::Interaction::Pointer)
-                        .into()
-                } else {
-                    styled.into()
-                }
-            }
-        };
-        list = list.push(row);
-    }
-    let surface = styled_box(
-        container(list)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .padding(iced::Padding::from(MENU_PAD as f32))
-            .into(),
-        Some(st.bg),
-        Some(st.border),
-        st.border_width.min(u16::MAX as u32) as u16,
-        st.border_radius.min(u16::MAX as u32) as u16,
-        &st.border_type,
-        [false, false, false, false],
-        // The list carries the padding; the box only draws its border.
-        0,
-        Length::Fill,
-        Length::Fill,
-    );
-    MouseArea::new(surface).on_exit(Message::TrayMenuClosed).into()
-}
 
 // ── notification list popup ─────────────────────────────────────────
 
@@ -4898,142 +4386,10 @@ fn notif_list_view(panel: &Panel) -> Element<'_, Message> {
 
 // ── taskbar menu window ─────────────────────────────────────────────
 
-/// Surface size for the taskbar menu: one `menu_row_h` row per
-/// workspace (1..9), width from the widest label — exact, so every
-/// row stays hit-exact.
-fn taskbar_menu_size(font: &Font, font_size: u32) -> (u32, u32) {
-    let labels: Vec<String> = (1..=9).map(|n| n.to_string()).collect();
-    let text_w = u32::from(text_width::widest(font, font_size, &labels));
-    let w = text_w.saturating_add(2 * MENU_PAD).max(48);
-    let h = 9u32
-        .saturating_mul(menu_row_h(font_size))
-        .saturating_add(2 * MENU_PAD);
-    (w, h)
-}
 
-/// The taskbar's move menu: workspace rows 1..9, the hovered one
-/// highlighted; a press moves the menu's window there silently and
-/// closes the menu, and leaving the surface closes without acting
-/// (same exit rule as the tray menu).
-fn taskbar_menu_view(panel: &Panel) -> Element<'_, Message> {
-    if panel.taskbar_menu.is_none() {
-        // The window id exists only together with its state.
-        return container(text(""))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into();
-    }
-    let st = popup_style(&panel.config, panel.palette.as_ref());
-    let font = panel_font(&panel.config);
-    let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
-    let row_h = menu_row_h(font_size);
-    // A hover row rounds at most to half its own height.
-    let radius = (st.border_radius as f32).min(row_h as f32 / 2.0);
-    let mut list: Column<'_, Message> = Column::new();
-    for workspace in 1..=9u32 {
-        let hovered = panel.taskbar_menu_hover == Some(workspace);
-        // The hover fill follows the menu's own corners: the top row
-        // rounds up, the last rounds down, the middle rows meet their
-        // neighbours square (`corner_radius`: touching sides are flat).
-        let touch = if workspace == 1 {
-            [false, false, true, false]
-        } else if workspace == 9 {
-            [true, false, false, false]
-        } else {
-            [true, true, true, true]
-        };
-        let cell = container(
-            // Centred in the cell (width Fill only on the cell): the
-            // label keeps its own width and sits mid-menu instead of
-            // glued to the left edge.
-            text(workspace.to_string())
-                .size(font_size)
-                .color(st.text)
-                .font(font),
-        )
-        .width(Length::Fill)
-        .height(Length::Fixed(row_h as f32))
-        .center_x(Length::Fill)
-        .align_y(Alignment::Center)
-        .style(move |_theme| ContainerStyle {
-            background: hovered.then(|| Background::Color(st.bg_hover)),
-            border: iced::Border {
-                radius: corner_radius(touch, radius),
-                ..Default::default()
-            },
-            ..ContainerStyle::default()
-        });
-        list = list.push(
-            MouseArea::new(cell)
-                .on_press(Message::TaskbarMenuWs(workspace))
-                .on_enter(Message::TaskbarMenuHover(Some(workspace)))
-                // The exit names its row: a stale one (arriving after
-                // the next row's enter) must not clear the new hover.
-                .on_exit(Message::TaskbarMenuLeft(workspace))
-                .interaction(iced::mouse::Interaction::Pointer),
-        );
-    }
-    let surface = styled_box(
-        container(list)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .padding(iced::Padding::from(MENU_PAD as f32))
-            .into(),
-        Some(st.bg),
-        Some(st.border),
-        st.border_width.min(u16::MAX as u32) as u16,
-        st.border_radius.min(u16::MAX as u32) as u16,
-        &st.border_type,
-        [false, false, false, false],
-        // The list carries the padding; the box only draws its border.
-        0,
-        Length::Fill,
-        Length::Fill,
-    );
-    MouseArea::new(surface).on_exit(Message::TaskbarMenuClosed).into()
-}
 
 // ── bar tooltip window ──────────────────────────────────────────────
 
-/// The tooltip window: one fitted line in the popup style — a label
-/// just off the bar (see [`tooltip_placement`]), never a strip inside
-/// the bar surface itself.
-fn tooltip_window_view(panel: &Panel) -> Element<'_, Message> {
-    let Some((_, tip)) = panel.bar_tooltip.as_ref() else {
-        // The window id exists only together with its state.
-        return container(text(""))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into();
-    };
-    let st = popup_style(&panel.config, panel.palette.as_ref());
-    let font = panel_font(&panel.config);
-    let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
-    let body = container(
-        text(&tip.text)
-            .size(font_size)
-            .color(st.text)
-            .font(font)
-            .width(Length::Fill),
-    )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .center_x(Length::Fill)
-    .align_y(Alignment::Center)
-    .padding(iced::Padding::from(MENU_PAD as f32));
-    styled_box(
-        body.into(),
-        Some(st.bg),
-        Some(st.border),
-        st.border_width.min(u16::MAX as u32) as u16,
-        st.border_radius.min(u16::MAX as u32) as u16,
-        &st.border_type,
-        [false, false, false, false],
-        0,
-        Length::Fill,
-        Length::Fill,
-    )
-}
 
 // ── style ───────────────────────────────────────────────────────────
 
@@ -5275,14 +4631,17 @@ fn parse_config_arg() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        calendar_size, config, corner_radius, dbusmenu, fit_menu_labels, focused_output_in,
-        icons_theme, menu_placement, menu_row_h, menu_size, monitor_names_json,
-        notif_list_row_h, notif_list_size, notifications, palette, panel_background,
-        popup_card_h, popup_missed_tick, popup_placement, popup_style, scroll_rows,
-        section_touch, shifted_surface_rect, taskbar_menu_size, text_width, tooltip_fit,
-        tooltip_placement, wallpaper_plan, GraphPopup, PopupStyle, MENU_INDENT, MENU_MAX_W,
-        MENU_MIN_W, MENU_PAD, NOTIF_LIST_W_MAX,
+        calendar_size, config, corner_radius, dbusmenu, focused_output_in, icons_theme,
+        monitor_names_json, notif_list_row_h, notif_list_size, notifications, palette,
+        panel_background, popup_card_h, popup_missed_tick, popup_placement, popup_style,
+        scroll_rows, section_touch, shifted_surface_rect, text_width, GraphPopup, PopupStyle,
+        NOTIF_LIST_W_MAX,
     };
+    use crate::menus::{
+        fit_menu_labels, menu_placement, menu_row_h, menu_size, taskbar_menu_size, MENU_INDENT,
+        MENU_MAX_W, MENU_MIN_W, MENU_PAD,
+    };
+    use crate::wallpaper_ui::wallpaper_plan;
     use iced::font::Font;
     use iced_exwlshell::reexport::Anchor;
 
@@ -5545,54 +4904,7 @@ mod tests {
         assert!(h_big > h, "a bigger font never measures shorter");
     }
 
-    /// Every `\n`-separated line is fitted and measured: the surface
-    /// is as wide as the widest line, one row per line tall, and an
-    /// over-budget line is cut on its own.
-    #[test]
-    fn tooltip_fit_measures_every_line() {
-        let font = Font::with_name("Noto Sans");
-        let (w, h, fitted) = tooltip_fit(&font, 14, "Title\nSome longer body line", 500);
-        assert_eq!(fitted, "Title\nSome longer body line");
-        assert_eq!(h, 2 * menu_row_h(14));
-        let widest = text_width::widest(&font, 14, &["Some longer body line".to_string()]);
-        assert_eq!(w, u32::from(widest));
-        // The long line is cut, the short one keeps; two rows still.
-        let long = "x".repeat(400);
-        let (w2, h2, fitted2) = tooltip_fit(&font, 14, &format!("ok\n{long}"), 60);
-        assert_eq!(h2, 2 * menu_row_h(14));
-        assert!(w2 <= 60);
-        let (first, second) = fitted2.split_once('\n').unwrap();
-        assert_eq!(first, "ok");
-        assert!(second.ends_with('…'));
-    }
 
-    /// A tooltip window sits just off the bar's anchored edge on the
-    /// inner side of the screen — a top bar's drops below the surface —
-    /// centred on the cursor and clamped inside the output.
-    #[test]
-    fn tooltip_placement_sits_off_the_bar_and_inside_the_output() {
-        // Top bar: below the surface (bar 30 + gap 8), centred on x.
-        let (a, m) = tooltip_placement(Anchor::Top, (100, 15), 80, 20, 30, 1920, 1080);
-        assert_eq!(a, Anchor::Left | Anchor::Top);
-        assert_eq!((m.left, m.top), (60, 38));
-        // Near the left edge the centring clamps to the output edge…
-        let (_, m) = tooltip_placement(Anchor::Top, (10, 15), 80, 20, 30, 1920, 1080);
-        assert_eq!(m.left, 0);
-        // …and near the right edge to its far edge.
-        let (_, m) = tooltip_placement(Anchor::Top, (1915, 15), 80, 20, 30, 1920, 1080);
-        assert_eq!(m.left, 1920 - 80);
-        // Bottom bar: above the surface.
-        let (a, m) = tooltip_placement(Anchor::Bottom, (100, 1065), 80, 20, 30, 1920, 1080);
-        assert_eq!(a, Anchor::Left | Anchor::Bottom);
-        assert_eq!(m.bottom, 38);
-        // Side bars push inward.
-        let (a, m) = tooltip_placement(Anchor::Left, (15, 500), 80, 20, 30, 1920, 1080);
-        assert_eq!(a, Anchor::Left | Anchor::Top);
-        assert_eq!(m.left, 38);
-        let (a, m) = tooltip_placement(Anchor::Right, (1905, 500), 80, 20, 30, 1920, 1080);
-        assert_eq!(a, Anchor::Right | Anchor::Top);
-        assert_eq!(m.right, 38);
-    }
 
     /// Down-right from the cursor; flips to the opposite edge when the
     /// surface would leave the output (margins never go negative).

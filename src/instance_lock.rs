@@ -146,8 +146,7 @@ mod tests {
     #[test]
     fn lock_blocks_the_second_handle_until_the_first_drops() {
         use std::fs::TryLockError;
-        let path =
-            std::env::temp_dir().join(format!("piuma-lock-test-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("piuma-lock-test-{}", std::process::id()));
         let open = || {
             std::fs::OpenOptions::new()
                 .create(true)
