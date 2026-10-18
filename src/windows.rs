@@ -141,13 +141,25 @@ pub(crate) fn parse_clients(json: &str) -> Vec<WinRow> {
 
 /// Workspace order (numeric names first, in numeric order — "2" before
 /// "10" — named/special ones after), then title case-insensitively.
-/// (`hypr::snapshot` sorts the shared list with it.)
+/// (`hypr::snapshot` sorts the shared list with it.) The lowercase is
+/// computed once per row — not twice per comparison — and the
+/// permutation applies by clone: rows are four small strings.
 pub(crate) fn sort_rows(rows: &mut [WinRow]) {
-    rows.sort_by(|a, b| {
-        ws_key(&a.workspace)
-            .cmp(&ws_key(&b.workspace))
-            .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
+    let keys: Vec<((u8, u64, &str), String)> = rows
+        .iter()
+        .map(|r| (ws_key(&r.workspace), r.title.to_lowercase()))
+        .collect();
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by(|&a, &b| {
+        keys[a]
+            .0
+            .cmp(&keys[b].0)
+            .then_with(|| keys[a].1.cmp(&keys[b].1))
     });
+    let original: Vec<WinRow> = rows.to_vec();
+    for (dst, &src) in order.iter().enumerate() {
+        rows[dst] = original[src].clone();
+    }
 }
 
 fn ws_key(ws: &str) -> (u8, u64, &str) {
