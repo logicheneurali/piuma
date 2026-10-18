@@ -218,10 +218,64 @@ struct SectionData {
     sensors: Vec<SensorValue>,
 }
 
+/// A sensor's resolved style: every colour and shape field the view
+/// draws plus its labels — the whole precedence chain (sensor >
+/// wallpaper palette > defaults) resolved once per config load or
+/// palette change instead of once per sensor per second.
+#[derive(Clone)]
+struct SensorStyle {
+    /// Display name — empty for the sensors that never show it
+    /// (`static_text`, tray, workspace buttons).
+    name: String,
+    description: String,
+    action: Option<String>,
+    /// `true` for the notification feed sensor: its text refreshes
+    /// from the shared state alone (`refresh_tray_and_notif`).
+    is_notifications: bool,
+    padding: u16,
+    text_color: Color,
+    bg_color: Option<Color>,
+    text_color_hover: Option<Color>,
+    bg_color_hover: Option<Color>,
+    border_color: Option<Color>,
+    border_width: u16,
+    border_radius: u16,
+    /// `full`, `corners`, `underline`, `upperline`, `left` or `right`.
+    border_type: String,
+    /// Threshold colours sorted ascending: the view picks the highest
+    /// rule the reading reaches.
+    color_rules: Vec<(f32, Color)>,
+    /// Theme file for the sensor's icon (`None` = none configured).
+    icon: Option<PathBuf>,
+    icon_size: u16,
+}
+
+/// A section's resolved style (same chain as [`SensorStyle`]): the
+/// box fields of `SectionData` plus the per-sensor styles — all of it
+/// config-driven, so the tick only pairs readings with it.
+#[derive(Clone)]
+struct SectionStyle {
+    name: String,
+    layout: String,
+    bg_color: Color,
+    text_color: Color,
+    title_color: Color,
+    border_color: Option<Color>,
+    border_width: u16,
+    border_radius: u16,
+    border_type: String,
+    touch: [bool; 4],
+    sensors: Vec<SensorStyle>,
+}
+
 #[derive(Clone)]
 struct Panel {
     config: config::Config,
     sections: Vec<SectionData>,
+    /// Every section's and sensor's resolved style (`resolve_styles`),
+    /// rebuilt on config reload and on wallpaper-palette change — the
+    /// tick pairs readings with it instead of re-resolving colours.
+    styles: Vec<SectionStyle>,
     /// Index into `sections[s]` and `sections[s].sensors[sensor]` under the cursor.
     hovered: Option<(usize, usize)>,
     /// State (mtime, len) of the last config read attempt: unchanged files
@@ -608,6 +662,288 @@ fn panel_background(config: &config::Config, pal: Option<&palette::Palette>) -> 
         .unwrap_or(DEFAULT_BG_COLOR)
 }
 
+/// Every section's and sensor's resolved style: the precedence chains
+/// the tick used to re-run per sensor per second — `parse_color` on
+/// every colour, `to_string` on every shape field — computed once per
+/// config load and once per wallpaper-palette change instead. The
+/// readings stay out of it: the tick pairs them with these styles.
+fn resolve_styles(cfg: &config::Config, pal: Option<&palette::Palette>) -> Vec<SectionStyle> {
+    let icon_theme = icons_theme(cfg);
+    let thickness = panel_thickness(cfg);
+    let font_size = cfg.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
+    let default_bg = panel_background(cfg, pal);
+    cfg.panel
+        .sections
+        .iter()
+        .enumerate()
+        .map(|(section_idx, section_cfg)| {
+            let section_default_txt = pal
+                .and_then(|p| config::parse_color(&p.text).ok())
+                .or_else(|| {
+                    cfg.panel
+                        .default_text_color
+                        .as_ref()
+                        .and_then(|s| config::parse_color(s).ok())
+                })
+                .unwrap_or(DEFAULT_TEXT_COLOR);
+
+            // Text colour chain: section > wallpaper palette (when
+            // active) > section_defaults > panel > built-in. The
+            // palette keeps the configured transparency, like bg.
+            let section_text_color = section_cfg.text_color.as_ref()
+                .and_then(|s| config::parse_color(s).ok())
+                .or_else(|| {
+                    let configured = cfg
+                        .panel
+                        .section_defaults
+                        .as_ref()
+                        .and_then(|sd| sd.text_color.as_ref())
+                        .and_then(|s| config::parse_color(s).ok());
+                    pal.and_then(|p| config::parse_color(&p.text).ok())
+                        .map(|mut t| {
+                            if let Some(c) = configured {
+                                t.a = c.a;
+                            }
+                            t
+                        })
+                })
+                .or_else(|| {
+                    cfg.panel
+                        .section_defaults
+                        .as_ref()
+                        .and_then(|sd| sd.text_color.as_ref())
+                        .and_then(|s| config::parse_color(s).ok())
+                })
+                .unwrap_or(section_default_txt);
+
+            let sensors: Vec<SensorStyle> = section_cfg
+                .sensors
+                .iter()
+                .map(|s| {
+                    // Style precedence, per style GROUP: a sensor takes a
+                    // group over only when it defines the group's key
+                    // colour (`border_color`, `bg_color`, `text_color`).
+                    // When that key is null on the sensor, every override
+                    // of that group on the sensor is ignored and
+                    // `cfg.panel.sensor_defaults` applies as a whole. When
+                    // the key is set, the sensor's own fields win and the
+                    // remaining ones fall back to the defaults.
+                    // `padding` is a single value: sensor when set,
+                    // otherwise the default. It also feeds the icon fit
+                    // below, so it is resolved before the icon.
+                    let defaults = cfg.panel.sensor_defaults.as_ref();
+                    let padding = config::style_num(s.padding)
+                        .or(defaults.and_then(|sd| config::style_num(sd.padding)))
+                        .unwrap_or(0) as u16;
+                    // Roadmap N1: theme file for the sensor's icon, sized
+                    // to this sensor row's real height — the fit the tray
+                    // already uses (thickness minus the layout chrome,
+                    // clamped), so the icon fills its box instead of
+                    // trailing the font size. The size travels with the
+                    // path (resolve and widget must agree on it); the
+                    // lookup is memoized, so a rebuild only clones the
+                    // cached path. With `icon_theme == None` (gate) this
+                    // arm never runs.
+                    let icon_size = icons::row_icon_target(
+                        thickness,
+                        icons::stacked_title_extra(
+                            section_cfg.layout.as_deref().unwrap_or("horizontal"),
+                            &section_cfg.name,
+                            font_size,
+                        ),
+                        u32::from(padding),
+                    );
+                    let icon = match (icon_theme, s.icon.as_deref()) {
+                        (Some(theme), Some(icon_name)) => {
+                            icons::resolve(theme, icon_name, icon_size)
+                        }
+                        _ => None,
+                    };
+                    let own_border = s.border_color.is_some();
+                    let own_bg = s.bg_color.is_some();
+                    let own_text = s.text_color.is_some();
+                    // Key fields: per-sensor, then the wallpaper
+                    // palette (when active), then defaults, then
+                    // section/built-in. The palette overrides the
+                    // configured defaults only — an explicit
+                    // per-sensor value always wins — and the
+                    // configured TRANSPARENCY survives it (a
+                    // `#..80` default keeps its alpha in the
+                    // wallpaper's hue).
+                    let tc_pal = pal.map(|p| {
+                        palette::keep_config_alpha(
+                            &p.text,
+                            defaults.and_then(|sd| sd.text_color.as_deref()),
+                        )
+                    });
+                    let tc_str = s.text_color.as_deref()
+                        .or(tc_pal.as_deref())
+                        .or(defaults.and_then(|sd| sd.text_color.as_deref()));
+                    let bg_pal = pal.map(|p| {
+                        palette::keep_config_alpha(
+                            &p.card,
+                            defaults.and_then(|sd| sd.bg_color.as_deref()),
+                        )
+                    });
+                    let bg_str = s.bg_color.as_deref()
+                        .or(bg_pal.as_deref())
+                        .or(defaults.and_then(|sd| sd.bg_color.as_deref()));
+                    let bc_str = s.border_color.as_deref().or(defaults.and_then(|sd| sd.border_color.as_deref()));
+                    // Secondary fields only count when the sensor owns the group.
+                    let bg_h_pal = pal.map(|p| {
+                        palette::keep_config_alpha(
+                            &p.card_hover,
+                            defaults.and_then(|sd| sd.bg_color_hover.as_deref()),
+                        )
+                    });
+                    let bg_h_str = (if own_bg { s.bg_color_hover.as_deref() } else { None })
+                        .or(bg_h_pal.as_deref())
+                        .or(defaults.and_then(|sd| sd.bg_color_hover.as_deref()));
+                    let tc_h_pal = pal.map(|p| {
+                        palette::keep_config_alpha(
+                            &p.text_hover,
+                            defaults.and_then(|sd| sd.text_color_hover.as_deref()),
+                        )
+                    });
+                    let tc_h_str = (if own_text { s.text_color_hover.as_deref() } else { None })
+                        .or(tc_h_pal.as_deref())
+                        .or(defaults.and_then(|sd| sd.text_color_hover.as_deref()));
+                    // Numeric style fields follow the -1 = disabled rule:
+                    // only an enabled value (>= 0) overrides the defaults.
+                    let bw_val = (if own_border { config::style_num(s.border_width) } else { None })
+                        .or(defaults.and_then(|sd| config::style_num(sd.border_width)))
+                        .unwrap_or(0);
+                    let br_val = (if own_border { config::style_num(s.border_radius) } else { None })
+                        .or(defaults.and_then(|sd| config::style_num(sd.border_radius)))
+                        .unwrap_or(0);
+                    let bt_str = (if own_border { s.border_type.as_deref() } else { None })
+                        .or(defaults.and_then(|sd| sd.border_type.as_deref()))
+                        .unwrap_or("full");
+
+                    let sensor_tc = tc_str
+                        .and_then(|sc| config::parse_color(sc).ok())
+                        .unwrap_or(section_text_color);
+                    let sensor_bg: Option<Color> = bg_str.and_then(|sc| config::parse_color(sc).ok());
+                    let sensor_bg_hover: Option<Color> = bg_h_str.and_then(|sc| config::parse_color(sc).ok());
+                    let sensor_tc_hover: Option<iced::Color> = tc_h_str.and_then(|sc| config::parse_color(sc).ok());
+                    let sensor_border: Option<Color> = bc_str.and_then(|sc| config::parse_color(sc).ok());
+                    // Threshold colour rules, colours resolved once and
+                    // sorted ascending: the view picks the highest rule
+                    // the reading reaches.
+                    let mut color_rules: Vec<(f32, Color)> = s
+                        .color_rules
+                        .as_deref()
+                        .unwrap_or_default()
+                        .iter()
+                        .filter_map(|r| {
+                            config::parse_color(&r.color)
+                                .ok()
+                                .map(|c| (r.min as f32, c))
+                        })
+                        .collect();
+                    color_rules.sort_by(|a, b| a.0.total_cmp(&b.0));
+                    SensorStyle {
+                        // static_text and tray sensors render only their
+                        // content: the name stays in the config (setup
+                        // keeps editing it) but never appears on the bar.
+                        name: if matches!(
+                            s.source,
+                            config::SensorSource::StaticText { .. }
+                                | config::SensorSource::Tray {}
+                                // The buttons carry the names already.
+                                | config::SensorSource::Workspace {}
+                        ) {
+                            String::new()
+                        } else {
+                            s.name.clone()
+                        },
+                        description: s.description.as_ref().map(|d| d.to_string()).unwrap_or_default(),
+                        action: s.action.clone(),
+                        is_notifications: matches!(s.source, config::SensorSource::Notifications {}),
+                        padding,
+                        text_color: sensor_tc,
+                        bg_color: sensor_bg,
+                        text_color_hover: sensor_tc_hover,
+                        bg_color_hover: sensor_bg_hover,
+                        border_color: sensor_border,
+                        border_width: bw_val as u16,
+                        border_radius: br_val as u16,
+                        border_type: bt_str.to_string(),
+                        color_rules,
+                        icon,
+                        icon_size,
+                    }
+                })
+                .collect();
+
+            // Section style precedence, per style GROUP (the same rule as
+            // `cfg.panel.sensor_defaults`): the border group belongs to the
+            // section only when it sets `border_color`; otherwise the
+            // whole group comes from `cfg.panel.section_defaults`. bg/text
+            // are single keys: section value when set, then the active
+            // wallpaper palette, else the default.
+            let sdefaults = cfg.panel.section_defaults.as_ref();
+            let own_border = section_cfg.border_color.is_some();
+            let bg_pal = pal.map(|p| {
+                palette::keep_config_alpha(
+                    &p.card,
+                    sdefaults.and_then(|sd| sd.bg_color.as_deref()),
+                )
+            });
+            let bg_str = section_cfg.bg_color.as_deref()
+                .or(bg_pal.as_deref())
+                .or(sdefaults.and_then(|sd| sd.bg_color.as_deref()));
+            let bc_str = section_cfg.border_color.as_deref()
+                .or(sdefaults.and_then(|sd| sd.border_color.as_deref()));
+            // Numeric fields follow the -1 = disabled rule: only an
+            // enabled value (>= 0) overrides the defaults.
+            let bw_val = (if own_border { config::style_num(section_cfg.border_width) } else { None })
+                .or(sdefaults.and_then(|sd| config::style_num(sd.border_width)))
+                .unwrap_or(0);
+            let br_val = (if own_border { config::style_num(section_cfg.border_radius) } else { None })
+                .or(sdefaults.and_then(|sd| config::style_num(sd.border_radius)))
+                .unwrap_or(0);
+            let bt_str = (if own_border { section_cfg.border_type.as_deref() } else { None })
+                .or(sdefaults.and_then(|sd| sd.border_type.as_deref()))
+                .unwrap_or("full");
+
+            SectionStyle {
+                name: section_cfg.name.clone(),
+                layout: section_cfg.layout.as_ref().map(|s| s.to_string()).unwrap_or("horizontal".to_string()),
+                bg_color: resolve_color(
+                    bg_str.and_then(|s| config::parse_color(s).ok()),
+                    default_bg,
+                ),
+                text_color: section_text_color,
+                // Title = section text colour at 80% alpha (same chain).
+                title_color: section_text_color.scale_alpha(0.8),
+                border_color: bc_str.and_then(|s| config::parse_color(s).ok()),
+                border_width: bw_val as u16,
+                border_radius: br_val as u16,
+                border_type: bt_str.to_string(),
+                // Roadmap M3: the edge rule is a layout hint coming from
+                // the defaults only (a section's own border group
+                // doesn't carry it).
+                touch: if sdefaults
+                    .and_then(|sd| sd.respect_screen_edges)
+                    .unwrap_or(false)
+                {
+                    section_touch(cfg, section_idx, cfg.panel.sections.len())
+                } else {
+                    [false; 4]
+                },
+                sensors,
+            }
+        })
+        .collect()
+}
+
+/// Re-resolve every colour chain: the config (reload) or the runtime
+/// wallpaper palette moved, and both feed the same precedence.
+fn restyle(panel: &mut Panel) {
+    panel.styles = resolve_styles(&panel.config, panel.palette.as_ref());
+}
+
 /// A solid bar widget used to compose partial sensor borders.
 fn border_bar(color: Color, width: Length, height: Length) -> Element<'static, Message> {
     container(Space::new().width(width).height(height))
@@ -828,6 +1164,10 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             if let Some((reloaded, path)) = maybe_reload(panel) {
                 config_reloaded = true;
                 panel.config = reloaded;
+                // The colour chains follow the new config (see
+                // `restyle`); the readings and the geometry below
+                // don't need them, so one resolve covers the tick.
+                restyle(panel);
                 // The graph history follows the new sensor set: one
                 // ring per `draw_graph` column of the new config.
                 panel.graphs = graphs::History::new(&panel.config.panel.sections);
@@ -847,17 +1187,6 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                     zone_changed = true;
                 }
             }
-
-            // Roadmap N1: with no icon-declaring sensor the whole icon path
-            // stays dormant — `icons_theme` is `None`, so no theme lookup
-            // (it spawns `gsettings`), no file resolution, no cache entries.
-            let icon_theme = icons_theme(&panel.config);
-
-            // Wallpaper palette (`panel.wallpaper_palette`): runtime-only
-            // tones applied over the configured defaults below — the
-            // config file never sees them (sync_palette keeps or drops
-            // the palette in memory).
-            let pal = panel.palette.as_ref();
 
             // One compositor read for every Hyprland-backed sensor:
             // the taskbar slots, the window title and the workspace
@@ -884,52 +1213,26 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             // never borrow the panel at once).
             let mut graph_samples: Vec<((usize, usize), f64)> = Vec::new();
             let mut sections: Vec<SectionData> = Vec::new();
-            for (section_idx, section_cfg) in panel.config.panel.sections.iter().enumerate() {
-                let section_default_txt = pal
-                    .and_then(|p| config::parse_color(&p.text).ok())
-                    .or_else(|| {
-                        panel
-                            .config
-                            .panel
-                            .default_text_color
-                            .as_ref()
-                            .and_then(|s| config::parse_color(s).ok())
-                    })
-                    .unwrap_or(DEFAULT_TEXT_COLOR);
-
-                // Text colour chain: section > wallpaper palette (when
-                // active) > section_defaults > panel > built-in. The
-                // palette keeps the configured transparency, like bg.
-                let section_text_color = section_cfg.text_color.as_ref()
-                    .and_then(|s| config::parse_color(s).ok())
-                    .or_else(|| {
-                        let configured = panel
-                            .config
-                            .panel
-                            .section_defaults
-                            .as_ref()
-                            .and_then(|sd| sd.text_color.as_ref())
-                            .and_then(|s| config::parse_color(s).ok());
-                        pal.and_then(|p| config::parse_color(&p.text).ok())
-                            .map(|mut t| {
-                                if let Some(c) = configured {
-                                    t.a = c.a;
-                                }
-                                t
-                            })
-                    })
-                    .or_else(|| {
-                        panel.config.panel.section_defaults.as_ref()
-                            .and_then(|sd| sd.text_color.as_ref())
-                            .and_then(|s| config::parse_color(s).ok())
-                    })
-                    .unwrap_or(section_default_txt);
-
+            // The styles are config-driven and already resolved
+            // (`restyle`, on load/reload/palette change): the tick only
+            // pairs this second's readings with them — no colour
+            // parsing, no shape strings per sensor per second. The zip
+            // stops at the shorter side, so a stale style list can
+            // never panic.
+            for (section_idx, (section_cfg, section_style)) in panel
+                .config
+                .panel
+                .sections
+                .iter()
+                .zip(&panel.styles)
+                .enumerate()
+            {
                 let sensors: Vec<SensorValue> = section_cfg
                     .sensors
                     .iter()
+                    .zip(&section_style.sensors)
                     .enumerate()
-                    .map(|(sensor_idx, s)| {
+                    .map(|(sensor_idx, (s, st))| {
                         let read = sensor_runner::run(&s.source, hypr.as_ref());
                         // Graph engine: record this tick's sample for the
                         // sensors that opted in (`draw_graph` on a
@@ -955,128 +1258,6 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                         // through the memoized theme lookups.
                         let taskbar_icons = matches!(s.source, config::SensorSource::Taskbar {})
                             .then(|| windows::task_icons(hypr.as_ref()));
-                        // Style precedence, per style GROUP: a sensor takes a
-                        // group over only when it defines the group's key
-                        // colour (`border_color`, `bg_color`, `text_color`).
-                        // When that key is null on the sensor, every override
-                        // of that group on the sensor is ignored and
-                        // `panel.sensor_defaults` applies as a whole. When the
-                        // key is set, the sensor's own fields win and the
-                        // remaining ones fall back to the defaults.
-                        // `padding` is a single value: sensor when set,
-                        // otherwise the default. It also feeds the icon fit
-                        // below, so it is resolved before the icon.
-                        let defaults = panel.config.panel.sensor_defaults.as_ref();
-                        let padding = config::style_num(s.padding)
-                            .or(defaults.and_then(|sd| config::style_num(sd.padding)))
-                            .unwrap_or(0) as u16;
-                        // Roadmap N1: theme file for the sensor's icon, sized
-                        // to this sensor row's real height — the fit the tray
-                        // already uses (thickness minus the layout chrome,
-                        // clamped), so the icon fills its box instead of
-                        // trailing the font size. The size travels with the
-                        // path (resolve and widget must agree on it); the
-                        // lookup is memoized, so the per-second rebuild only
-                        // clones the cached path. With `icon_theme == None`
-                        // (gate) this arm never runs.
-                        let icon_size = icons::row_icon_target(
-                            panel_thickness(&panel.config),
-                            icons::stacked_title_extra(
-                                section_cfg.layout.as_deref().unwrap_or("horizontal"),
-                                &section_cfg.name,
-                                panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE),
-                            ),
-                            u32::from(padding),
-                        );
-                        let icon = match (icon_theme, s.icon.as_deref()) {
-                            (Some(theme), Some(icon_name)) => {
-                                icons::resolve(theme, icon_name, icon_size)
-                            }
-                            _ => None,
-                        };
-                        let own_border = s.border_color.is_some();
-                        let own_bg = s.bg_color.is_some();
-                        let own_text = s.text_color.is_some();
-                        // Key fields: per-sensor, then the wallpaper
-                        // palette (when active), then defaults, then
-                        // section/built-in. The palette overrides the
-                        // configured defaults only — an explicit
-                        // per-sensor value always wins — and the
-                        // configured TRANSPARENCY survives it (a
-                        // `#..80` default keeps its alpha in the
-                        // wallpaper's hue).
-                        let tc_pal = pal.map(|p| {
-                            palette::keep_config_alpha(
-                                &p.text,
-                                defaults.and_then(|sd| sd.text_color.as_deref()),
-                            )
-                        });
-                        let tc_str = s.text_color.as_deref()
-                            .or(tc_pal.as_deref())
-                            .or(defaults.and_then(|sd| sd.text_color.as_deref()));
-                        let bg_pal = pal.map(|p| {
-                            palette::keep_config_alpha(
-                                &p.card,
-                                defaults.and_then(|sd| sd.bg_color.as_deref()),
-                            )
-                        });
-                        let bg_str = s.bg_color.as_deref()
-                            .or(bg_pal.as_deref())
-                            .or(defaults.and_then(|sd| sd.bg_color.as_deref()));
-                        let bc_str = s.border_color.as_deref().or(defaults.and_then(|sd| sd.border_color.as_deref()));
-                        // Secondary fields only count when the sensor owns the group.
-                        let bg_h_pal = pal.map(|p| {
-                            palette::keep_config_alpha(
-                                &p.card_hover,
-                                defaults.and_then(|sd| sd.bg_color_hover.as_deref()),
-                            )
-                        });
-                        let bg_h_str = (if own_bg { s.bg_color_hover.as_deref() } else { None })
-                            .or(bg_h_pal.as_deref())
-                            .or(defaults.and_then(|sd| sd.bg_color_hover.as_deref()));
-                        let tc_h_pal = pal.map(|p| {
-                            palette::keep_config_alpha(
-                                &p.text_hover,
-                                defaults.and_then(|sd| sd.text_color_hover.as_deref()),
-                            )
-                        });
-                        let tc_h_str = (if own_text { s.text_color_hover.as_deref() } else { None })
-                            .or(tc_h_pal.as_deref())
-                            .or(defaults.and_then(|sd| sd.text_color_hover.as_deref()));
-                        // Numeric style fields follow the -1 = disabled rule:
-                        // only an enabled value (>= 0) overrides the defaults.
-                        let bw_val = (if own_border { config::style_num(s.border_width) } else { None })
-                            .or(defaults.and_then(|sd| config::style_num(sd.border_width)))
-                            .unwrap_or(0);
-                        let br_val = (if own_border { config::style_num(s.border_radius) } else { None })
-                            .or(defaults.and_then(|sd| config::style_num(sd.border_radius)))
-                            .unwrap_or(0);
-                        let bt_str = (if own_border { s.border_type.as_deref() } else { None })
-                            .or(defaults.and_then(|sd| sd.border_type.as_deref()))
-                            .unwrap_or("full");
-
-                        let sensor_tc = tc_str
-                            .and_then(|sc| config::parse_color(sc).ok())
-                            .unwrap_or(section_text_color);
-                        let sensor_bg: Option<Color> = bg_str.and_then(|sc| config::parse_color(sc).ok());
-                        let sensor_bg_hover: Option<Color> = bg_h_str.and_then(|sc| config::parse_color(sc).ok());
-                        let sensor_tc_hover: Option<iced::Color> = tc_h_str.and_then(|sc| config::parse_color(sc).ok());
-                        let sensor_border: Option<Color> = bc_str.and_then(|sc| config::parse_color(sc).ok());
-                        // Threshold colour rules, colours resolved once
-                        // per rebuild and sorted ascending: the view
-                        // picks the highest rule the reading reaches.
-                        let mut color_rules: Vec<(f32, Color)> = s
-                            .color_rules
-                            .as_deref()
-                            .unwrap_or_default()
-                            .iter()
-                            .filter_map(|r| {
-                                config::parse_color(&r.color)
-                                    .ok()
-                                    .map(|c| (r.min as f32, c))
-                            })
-                            .collect();
-                        color_rules.sort_by(|a, b| a.0.total_cmp(&b.0));
                         // Only the net rate sensors pin their value box
                         // (roadmap M5), and the pin is the displayed value's
                         // OWN tier: exact width (no headroom for units this
@@ -1099,109 +1280,42 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                             text_width::widest(&font, size, &sensors::net_rate_samples(&value))
                         });
                         SensorValue {
-                            // static_text and tray sensors render only their
-                            // content: the name stays in the config (setup
-                            // keeps editing it) but never appears on the bar.
-                            name: if matches!(
-                                s.source,
-                                config::SensorSource::StaticText { .. }
-                                    | config::SensorSource::Tray {}
-                                    // The buttons carry the names already.
-                                    | config::SensorSource::Workspace {}
-                            ) {
-                                String::new()
-                            } else {
-                                s.name.clone()
-                            },
-                            description: s.description.as_ref().map(|d| d.to_string()).unwrap_or_default(),
+                            name: st.name.clone(),
+                            description: st.description.clone(),
                             value,
-                            text_color: Some(sensor_tc),
-                            color_rules,
-                            bg_color: sensor_bg,
-                            text_color_hover: sensor_tc_hover,
-                            bg_color_hover: sensor_bg_hover,
-                            border_color: sensor_border,
-                            border_width: bw_val as u16,
-                            border_radius: br_val as u16,
-                            border_type: bt_str.to_string(),
-                            padding,
-                            action: s.action.clone(),
+                            text_color: Some(st.text_color),
+                            color_rules: st.color_rules.clone(),
+                            bg_color: st.bg_color,
+                            text_color_hover: st.text_color_hover,
+                            bg_color_hover: st.bg_color_hover,
+                            border_color: st.border_color,
+                            border_width: st.border_width,
+                            border_radius: st.border_radius,
+                            border_type: st.border_type.clone(),
+                            padding: st.padding,
+                            action: st.action.clone(),
                             tray: tray_icons,
                             workspaces: workspace_buttons,
                             taskbar: taskbar_icons,
-                            is_notifications: matches!(
-                                s.source,
-                                config::SensorSource::Notifications {}
-                            ),
-                            icon,
-                            icon_size,
+                            is_notifications: st.is_notifications,
+                            icon: st.icon.clone(),
+                            icon_size: st.icon_size,
                             fixed_width,
                         }
                     })
                     .collect();
 
-                let default_bg = panel_background(&panel.config, pal);
-
-                // Section style precedence, per style GROUP (the same rule as
-                // `panel.sensor_defaults`): the border group belongs to the
-                // section only when it sets `border_color`; otherwise the
-                // whole group comes from `panel.section_defaults`. bg/text
-                // are single keys: section value when set, then the active
-                // wallpaper palette, else the default.
-                let sdefaults = panel.config.panel.section_defaults.as_ref();
-                let own_border = section_cfg.border_color.is_some();
-                let bg_pal = pal.map(|p| {
-                    palette::keep_config_alpha(
-                        &p.card,
-                        sdefaults.and_then(|sd| sd.bg_color.as_deref()),
-                    )
-                });
-                let bg_str = section_cfg.bg_color.as_deref()
-                    .or(bg_pal.as_deref())
-                    .or(sdefaults.and_then(|sd| sd.bg_color.as_deref()));
-                let bc_str = section_cfg.border_color.as_deref()
-                    .or(sdefaults.and_then(|sd| sd.border_color.as_deref()));
-                // Numeric fields follow the -1 = disabled rule: only an
-                // enabled value (>= 0) overrides the defaults.
-                let bw_val = (if own_border { config::style_num(section_cfg.border_width) } else { None })
-                    .or(sdefaults.and_then(|sd| config::style_num(sd.border_width)))
-                    .unwrap_or(0);
-                let br_val = (if own_border { config::style_num(section_cfg.border_radius) } else { None })
-                    .or(sdefaults.and_then(|sd| config::style_num(sd.border_radius)))
-                    .unwrap_or(0);
-                let bt_str = (if own_border { section_cfg.border_type.as_deref() } else { None })
-                    .or(sdefaults.and_then(|sd| sd.border_type.as_deref()))
-                    .unwrap_or("full");
-
                 sections.push(SectionData {
-                    name: section_cfg.name.clone(),
-                    layout: section_cfg.layout.as_ref().map(|s| s.to_string()).unwrap_or("horizontal".to_string()),
-                    bg_color: resolve_color(
-                        bg_str.and_then(|s| config::parse_color(s).ok()),
-                        default_bg,
-                    ),
-                    text_color: section_text_color,
-                    // Title = section text colour at 80% alpha (same chain).
-                    title_color: section_text_color.scale_alpha(0.8),
-                    border_color: bc_str.and_then(|s| config::parse_color(s).ok()),
-                    border_width: bw_val as u16,
-                    border_radius: br_val as u16,
-                    border_type: bt_str.to_string(),
-                    // Roadmap M3: the edge rule is a layout hint coming from
-                    // the defaults only (a section's own border group
-                    // doesn't carry it).
-                    touch: if sdefaults
-                        .and_then(|sd| sd.respect_screen_edges)
-                        .unwrap_or(false)
-                    {
-                        section_touch(
-                            &panel.config,
-                            section_idx,
-                            panel.config.panel.sections.len(),
-                        )
-                    } else {
-                        [false; 4]
-                    },
+                    name: section_style.name.clone(),
+                    layout: section_style.layout.clone(),
+                    bg_color: section_style.bg_color,
+                    text_color: section_style.text_color,
+                    title_color: section_style.title_color,
+                    border_color: section_style.border_color,
+                    border_width: section_style.border_width,
+                    border_radius: section_style.border_radius,
+                    border_type: section_style.border_type.clone(),
+                    touch: section_style.touch,
                     sensors,
                 });
             }
@@ -1286,6 +1400,9 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             // own colours again when the extraction failed (`None`).
             panel.palette = pal;
             panel.palette_key = Some(key);
+            // The palette feeds the same colour chains as the config
+            // (`restyle`): every chain re-resolves once, not per tick.
+            restyle(panel);
             Command::none()
         }
         Message::IcedEvent(id, e) => {
@@ -3151,8 +3268,14 @@ fn sync_palette(panel: &mut Panel) -> Command<Message> {
             PathBuf::from(&w.path).is_file().then_some((w.path.clone(), mtime))
         });
     let Some(key) = wanted else {
-        panel.palette = None;
-        panel.palette_key = None;
+        // Dropping a palette that was live re-resolves the chains
+        // back to the configured colours (see `restyle`); an already
+        // empty palette needs no work.
+        if panel.palette.is_some() {
+            panel.palette = None;
+            panel.palette_key = None;
+            restyle(panel);
+        }
         return Command::none();
     };
     if panel.palette_key.as_ref() == Some(&key) {
@@ -5063,9 +5186,14 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                     let anchor = panel_anchor(&cfg);
                     let zone = panel_thickness(&cfg) as i32;
                     let graphs = graphs::History::new(&cfg.panel.sections);
+                    // Colour chains resolve once, off the tick (see
+                    // `restyle`): the palette starts absent, so the
+                    // configured defaults lead until one arrives.
+                    let styles = resolve_styles(&cfg, None);
                     Panel {
                         config: cfg,
                         sections: Vec::new(),
+                        styles,
                         hovered: None,
                         last_reload: config_file_state(),
                         last_size: size,
