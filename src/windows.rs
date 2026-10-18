@@ -73,27 +73,17 @@ pub struct RowStyle {
     pub active_bg: Option<iced::Color>,
 }
 
-/// The open windows in list order (workspace, then title).
-pub fn list() -> Vec<WinRow> {
-    let Ok(out) = std::process::Command::new("hyprctl")
-        .args(["clients", "-j"])
-        .output()
-    else {
+/// The taskbar's slots: one per window of the shared snapshot, in
+/// list order, each with its app icon resolved through the memoized
+/// theme lookup (the per-tick cost is a map clone; the first lookup
+/// may walk the theme once). A failed document yields no slots — the
+/// sensor hides, like a tray with no items.
+pub fn task_icons(snap: Option<&crate::hypr::Snapshot>) -> Vec<TaskIcon> {
+    let Some(rows) = snap.and_then(|s| s.clients.as_ref()) else {
         return Vec::new();
     };
-    let json = String::from_utf8_lossy(&out.stdout);
-    let mut rows = parse_clients(&json);
-    sort_rows(&mut rows);
-    rows
-}
-
-/// The taskbar's slots: one per window, in list order, each with its
-/// app icon resolved through the memoized theme lookup (the per-tick
-/// cost is a map clone; the first lookup may walk the theme once).
-pub fn task_icons() -> Vec<TaskIcon> {
     let target = icon_target();
-    list()
-        .into_iter()
+    rows.iter()
         .map(|row| {
             let icon = app_icon(&row.class)
                 .and_then(|name| icons::resolve(icons::icon_theme(), &name, target))
@@ -101,9 +91,9 @@ pub fn task_icons() -> Vec<TaskIcon> {
                     icons::resolve(icons::icon_theme(), "application-x-executable", target)
                 });
             TaskIcon {
-                address: row.address,
+                address: row.address.clone(),
                 icon,
-                title: row.title,
+                title: row.title.clone(),
                 focused: row.focused,
             }
         })
@@ -112,8 +102,9 @@ pub fn task_icons() -> Vec<TaskIcon> {
 
 /// `hyprctl clients -j` → rows: mapped windows only (unmapped ones are
 /// mid-transition), with the address sanitized down to bare hex — it
-/// becomes a dispatch target later.
-fn parse_clients(json: &str) -> Vec<WinRow> {
+/// becomes a dispatch target later. (`hypr::snapshot` fetches the
+/// document once for every sensor that needs it.)
+pub(crate) fn parse_clients(json: &str) -> Vec<WinRow> {
     let Ok(clients) = serde_json::from_str::<Vec<serde_json::Value>>(json) else {
         return Vec::new();
     };
@@ -150,7 +141,8 @@ fn parse_clients(json: &str) -> Vec<WinRow> {
 
 /// Workspace order (numeric names first, in numeric order — "2" before
 /// "10" — named/special ones after), then title case-insensitively.
-fn sort_rows(rows: &mut [WinRow]) {
+/// (`hypr::snapshot` sorts the shared list with it.)
+pub(crate) fn sort_rows(rows: &mut [WinRow]) {
     rows.sort_by(|a, b| {
         ws_key(&a.workspace)
             .cmp(&ws_key(&b.workspace))

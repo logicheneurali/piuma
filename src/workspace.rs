@@ -32,57 +32,23 @@ pub struct Style {
     pub padding: u16,
 }
 
-/// One button per available workspace: normal workspaces only (the
-/// `special:*` overlays are toggled, not focused), ids in ascending
-/// order, the active one flagged so [`row`] can emphasise it. Any
-/// hyprctl failure yields nothing — the sensor then hides, exactly
-/// like a tray with no items.
-pub fn buttons() -> Vec<WorkspaceButton> {
-    let Ok(list) = hyprctl(["workspaces", "-j"]) else {
+/// One button per available workspace from the shared snapshot (the
+/// list is already `special:*`-free and id-ordered, see `hypr.rs`):
+/// the active one flagged so [`row`] can emphasise it. A failed
+/// document yields nothing — the sensor then hides, exactly like a
+/// tray with no items.
+pub fn buttons(snap: Option<&crate::hypr::Snapshot>) -> Vec<WorkspaceButton> {
+    let Some(snap) = snap else {
         return Vec::new();
     };
-    let active = hyprctl(["activeworkspace", "-j"]).unwrap_or_default();
-    buttons_from(&list, &active)
-}
-
-/// `hyprctl <args…>` stdout; a missing command or a non-zero exit is
-/// an error the caller turns into "no buttons".
-fn hyprctl(args: [&str; 2]) -> Result<String, ()> {
-    let out = std::process::Command::new("hyprctl").args(args).output().map_err(|_| ())?;
-    if !out.status.success() {
-        return Err(());
-    }
-    String::from_utf8(out.stdout).map_err(|_| ())
-}
-
-/// Pure parse of the two hyprctl documents (testable without a
-/// compositor): `special:*` entries drop out, ids sort ascending and
-/// the active workspace's name flags its button.
-fn buttons_from(workspaces: &str, active: &str) -> Vec<WorkspaceButton> {
-    let Ok(list) = serde_json::from_str::<Vec<serde_json::Value>>(workspaces) else {
+    let Some(list) = &snap.workspaces else {
         return Vec::new();
     };
-    let active_name: String = serde_json::from_str::<serde_json::Value>(active)
-        .ok()
-        .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(str::to_string))
-        .unwrap_or_default();
-    let mut items: Vec<(i64, String)> = list
-        .iter()
-        .filter_map(|w| {
-            let id = w.get("id").and_then(|i| i.as_i64())?;
-            let name = w.get("name").and_then(|n| n.as_str())?.to_string();
-            if name.starts_with("special:") {
-                return None;
-            }
-            Some((id, name))
-        })
-        .collect();
-    items.sort_by_key(|(id, _)| *id);
-    items
-        .into_iter()
-        .map(|(_, name)| WorkspaceButton {
-            active: name == active_name,
-            name,
+    let active = snap.active_workspace.as_deref();
+    list.iter()
+        .map(|w| WorkspaceButton {
+            name: w.name.clone(),
+            active: Some(w.name.as_str()) == active,
         })
         .collect()
 }
@@ -144,20 +110,28 @@ pub fn row<'a>(
 mod tests {
     use super::*;
 
-    /// Roadmap2 #4: ids ascending, `special:*` overlays left out, the
-    /// active workspace flagged; junk input yields no buttons (the
-    /// sensor then hides instead of showing a stale list).
+    /// The active workspace of the snapshot flags its button; a
+    /// missing snapshot yields no buttons at all (the sensor hides).
     #[test]
-    fn buttons_from_hyprctl_json() {
-        let list = r#"[{"id":10,"name":"10"},{"id":1,"name":"1"},{"id":-99,"name":"special:scratchpad"},{"id":268435455,"name":"mail"}]"#;
-        let active = "{\n    \"id\": 1,\n    \"name\": \"1\"\n}";
-        let buttons = buttons_from(list, active);
-        let names: Vec<&str> = buttons.iter().map(|b| b.name.as_str()).collect();
-        assert_eq!(names, vec!["1", "10", "mail"]);
-        assert!(buttons[0].active, "the active workspace is flagged");
-        assert!(!buttons[1].active);
-
-        assert!(buttons_from("not json at all", active).is_empty());
-        assert!(buttons_from("[]", active).is_empty());
+    fn buttons_flag_the_active_workspace() {
+        let snap = crate::hypr::Snapshot {
+            clients: None,
+            workspaces: Some(vec![
+                crate::hypr::Workspace {
+                    id: 1,
+                    name: "1".into(),
+                },
+                crate::hypr::Workspace {
+                    id: 10,
+                    name: "10".into(),
+                },
+            ]),
+            active_workspace: Some("1".into()),
+        };
+        let made = buttons(Some(&snap));
+        assert_eq!(made.len(), 2);
+        assert!(made[0].active, "the active workspace is flagged");
+        assert!(!made[1].active);
+        assert!(buttons(None).is_empty());
     }
 }

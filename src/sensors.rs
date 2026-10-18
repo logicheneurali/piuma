@@ -7,7 +7,6 @@ use std::fs;
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
-use serde_json;
 
 // ── CPU / GPU ───────────────────────────────────────────────────────
 
@@ -364,46 +363,23 @@ fn truncate_title(title: &str) -> String {
     format!("{cut}...")
 }
 
-/// Get the current focused window title (Hyprland specific).
-pub fn get_window_title() -> String {
-    let output = Command::new("hyprctl")
-        .args(["activewindow", "-j"])
-        .output();
-    match output {
-        Ok(out) if out.status.success() => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            // Parse JSON to extract window title
-            // Example output: {"id":1234,"title":"Firefox","class":"firefox","initialClass":"firefox","workspace":{"id":1,"name":"1"}}
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
-                if let Some(title) = json.get("title") {
-                    return truncate_title(title.as_str().unwrap_or("No Title"));
-                }
-            }
-            "No Title".to_string()
-        }
-        _ => "No Focus".to_string(),
-    }
+/// The focused window's title from the shared snapshot (`hypr.rs`):
+/// a failed document is "No Focus" (the old fork-failure path), a
+/// snapshot without a focused row keeps "No Title".
+pub fn window_title(snap: Option<&crate::hypr::Snapshot>) -> String {
+    let Some(rows) = snap.and_then(|s| s.clients.as_ref()) else {
+        return "No Focus".to_string();
+    };
+    rows.iter()
+        .find(|row| row.focused)
+        .map(|row| truncate_title(&row.title))
+        .unwrap_or_else(|| "No Title".to_string())
 }
 
-/// Get the current workspace (Hyprland specific).
-pub fn get_workspace() -> String {
-    let output = Command::new("hyprctl")
-        .args(["activeworkspace", "-j"])
-        .output();
-    match output {
-        Ok(out) if out.status.success() => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            // Parse JSON to extract workspace info
-            // Example output: {"id":1,"name":"1","monitor":"eDP-1","windows":1,"lastwindow":"Firefox","lastwindowtitle":"Firefox"}
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
-                if let Some(name) = json.get("name") {
-                    return name.as_str().unwrap_or("1").to_string();
-                }
-            }
-            "1".to_string()
-        }
-        _ => "1".to_string(),
-    }
+/// The active workspace's name from the shared snapshot (`hypr.rs`).
+pub fn workspace_name(snap: Option<&crate::hypr::Snapshot>) -> String {
+    snap.and_then(|s| s.active_workspace.clone())
+        .unwrap_or_else(|| "1".to_string())
 }
 
 // ── disk (df) ───────────────────────────────────────────────────────

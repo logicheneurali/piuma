@@ -101,7 +101,9 @@ fn maybe_measured(text: String, source: &SensorSource) -> Read {
 }
 
 /// Run a sensor source and return its value (text + optional sample).
-pub fn run(source: &SensorSource) -> Read {
+/// `hypr` is the tick's shared compositor snapshot (`None` = the read
+/// was not taken; the Hyprland-backed sources show their fallback).
+pub fn run(source: &SensorSource, hypr: Option<&crate::hypr::Snapshot>) -> Read {
     match source {
         // The user-authored text sources: the answer feeds the graph
         // sample when the whole thing is a number (see `strict_number`).
@@ -162,8 +164,10 @@ pub fn run(source: &SensorSource) -> Read {
         SensorSource::Calendar { format } => plain(sensors::clock_formatted(
             format.as_deref().unwrap_or("%H:%M:%S"),
         )),
-        SensorSource::Window {} => plain(sensors::get_window_title()),
-        SensorSource::Workspace {} => plain(sensors::get_workspace()),
+        // Both ride the tick's shared compositor snapshot — no fork
+        // of their own (see `hypr.rs`).
+        SensorSource::Window {} => plain(sensors::window_title(hypr)),
+        SensorSource::Workspace {} => plain(sensors::workspace_name(hypr)),
         // Tray items carry no text: the icons come from the shared tray
         // state (see `tray.rs`), rendered by the view directly.
         SensorSource::Tray {} => plain(String::new()),

@@ -37,6 +37,7 @@ mod calendar;
 mod config;
 mod dbusmenu;
 mod graphs;
+mod hypr;
 mod icons;
 mod notifications;
 mod palette;
@@ -853,6 +854,26 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             // the palette in memory).
             let pal = panel.palette.as_ref();
 
+            // One compositor read for every Hyprland-backed sensor:
+            // the taskbar slots, the window title and the workspace
+            // buttons/text all ride the same three documents — one
+            // fetch each instead of one per sensor (see `hypr.rs`).
+            let hypr_needed = panel
+                .config
+                .panel
+                .sections
+                .iter()
+                .flat_map(|sec| &sec.sensors)
+                .any(|s| {
+                    matches!(
+                        s.source,
+                        config::SensorSource::Window {}
+                            | config::SensorSource::Workspace {}
+                            | config::SensorSource::Taskbar {}
+                    )
+                });
+            let hypr = hypr_needed.then(hypr::snapshot);
+
             // Samples of this tick for the graph history (one read per
             // sensor, collected here so the closure and the history
             // never borrow the panel at once).
@@ -904,7 +925,7 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                     .iter()
                     .enumerate()
                     .map(|(sensor_idx, s)| {
-                        let read = sensor_runner::run(&s.source);
+                        let read = sensor_runner::run(&s.source, hypr.as_ref());
                         // Graph engine: record this tick's sample for the
                         // sensors that opted in (`draw_graph` on a
                         // graphable source); the columns ignore the rest.
@@ -919,18 +940,16 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                         let tray_icons =
                             matches!(s.source, config::SensorSource::Tray {}).then(tray::items);
                         // Workspace sensors build their button list from
-                        // hyprctl (roadmap2 #4): one entry per available
-                        // workspace, the active one flagged.
+                        // the shared snapshot (roadmap2 #4): one entry per
+                        // available workspace, the active one flagged.
                         let workspace_buttons =
                             matches!(s.source, config::SensorSource::Workspace {})
-                                .then(workspace::buttons);
-                        // Taskbar sensors rebuild their icon slots from
-                        // hyprctl per tick (one fork, like every polling
-                        // sensor); the icons resolve through the memoized
-                        // theme lookups.
-                        let taskbar_icons =
-                            matches!(s.source, config::SensorSource::Taskbar {})
-                                .then(windows::task_icons);
+                                .then(|| workspace::buttons(hypr.as_ref()));
+                        // Taskbar sensors rebuild their icon slots from the
+                        // shared snapshot per tick; the icons resolve
+                        // through the memoized theme lookups.
+                        let taskbar_icons = matches!(s.source, config::SensorSource::Taskbar {})
+                            .then(|| windows::task_icons(hypr.as_ref()));
                         // Style precedence, per style GROUP: a sensor takes a
                         // group over only when it defines the group's key
                         // colour (`border_color`, `bg_color`, `text_color`).
