@@ -1823,11 +1823,16 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
         let has_title = !section.name.is_empty();
         let title_color = section.title_color;
 
-        // Sensor boxes fill the `thickness` axis only when the section arranges
-        // them *across* it (section cross axis == panel cross axis); stacked
-        // along the thickness they stay content-sized (filling would split the
-        // thickness between them) and the group is centred by the container.
-        let stretch = vertical == (section.layout == "vertical");
+        // A vertical panel stacks every section's sensors down its height,
+        // whatever the section's own layout says (a row would squeeze them
+        // across the thickness): `stack_sensors` is that effective axis.
+        let stack_sensors = vertical || section.layout == "vertical";
+        // Sensor boxes fill the `thickness` axis only when the sensors run
+        // along the main axis (row across a horizontal panel, column down a
+        // vertical one); stacked along the thickness they stay content-sized
+        // (filling would split the thickness between them) and the group is
+        // centred by the container.
+        let stretch = vertical || !stack_sensors;
         let (box_w, box_h) = match (vertical, stretch) {
             (false, true) => (Length::Shrink, Length::Fill),
             (true, true) => (Length::Fill, Length::Shrink),
@@ -2062,7 +2067,7 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
         }).collect();
 
         // Optionally prepend a section title.
-        let sensors_inner: Element<'a, Message> = if section.layout == "vertical" {
+        let sensors_inner: Element<'a, Message> = if stack_sensors {
             let title_widget = container(
                 text(section.name.clone())
                     .color(title_color)
@@ -2073,9 +2078,10 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
             let sensor_col = Column::new()
                 .extend(sensor_widgets)
                 .padding(SECTION_CONTENT_PAD);
-            // `stretch` here means: vertical section in a vertical panel ->
-            // fill the thickness (width) so the boxes stretch; the title stays
-            // content-sized and is centred above them.
+            // `stretch` here means: stacked sensors that must fill the
+            // thickness (width) so the boxes stretch — a vertical panel
+            // always, a horizontal one only for vertical sections; the
+            // title stays content-sized and is centred above them.
             let sensor_col = if stretch { sensor_col.width(Length::Fill) } else { sensor_col };
             let col = if has_title {
                 let col = Column::new().push(title_el).push(sensor_col);
