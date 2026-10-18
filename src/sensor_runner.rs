@@ -4,6 +4,7 @@ use crate::config::SensorSource;
 use crate::graphs;
 use crate::notifications;
 use crate::sensors;
+use std::collections::HashMap;
 
 /// What one sensor run produced: the text for the bar and — for the
 /// graphable sources — the very same reading as a number with its
@@ -202,7 +203,7 @@ pub struct Reads {
 /// Read every source off the UI thread (the tick spawns this on a
 /// worker, see `spawn_read`): one pass forks the compositor documents
 /// every Hyprland-backed source shares and then each sensor in turn —
-/// duplicate commands still fork once each (see the tick's cadence).
+/// but duplicated sensors share one run (see the cache below).
 pub fn read_all(sources: &[SensorSource]) -> Reads {
     let needs_hypr = sources.iter().any(|s| {
         matches!(
@@ -213,7 +214,26 @@ pub fn read_all(sources: &[SensorSource]) -> Reads {
         )
     });
     let hypr = needs_hypr.then(crate::hypr::snapshot);
-    let values = sources.iter().map(|s| run(s, hypr.as_ref())).collect();
+    // One run per DISTINCT source per pass: two `df` disk sensors, two
+    // `date` clocks and the like showed the same numbers when each
+    // forked its own copy — they now clone the first reading. The key
+    // is the source's serialized form (deterministic field order).
+    let mut seen: HashMap<String, Read> = HashMap::new();
+    let values = sources
+        .iter()
+        .map(|s| {
+            let Ok(key) = serde_json::to_string(s) else {
+                // No key, no dedup: run it on its own.
+                return run(s, hypr.as_ref());
+            };
+            if let Some(hit) = seen.get(&key) {
+                return hit.clone();
+            }
+            let read = run(s, hypr.as_ref());
+            seen.insert(key, read.clone());
+            read
+        })
+        .collect();
     Reads { hypr, values }
 }
 
@@ -282,5 +302,32 @@ mod tests {
         let read = maybe_measured("hello".into(), &source);
         assert!(read.graph.is_none());
         assert_eq!(read.text, "hello");
+    }
+
+    /// Duplicated sensors share one reading per pass (no second fork
+    /// for a second `df`/`date`); distinct sources keep their own.
+    /// Static texts run without forking, so the test stays compositor-
+    /// and command-free.
+    #[test]
+    fn duplicated_sources_share_one_reading() {
+        let sources = [
+            SensorSource::StaticText {
+                static_text: "same".into(),
+            },
+            SensorSource::StaticText {
+                static_text: "same".into(),
+            },
+            SensorSource::StaticText {
+                static_text: "other".into(),
+            },
+        ];
+        let reads = read_all(&sources);
+        assert_eq!(reads.values.len(), 3);
+        assert_eq!(reads.values[0].text, "same");
+        assert_eq!(
+            reads.values[1].text, reads.values[0].text,
+            "the duplicate clones the first reading"
+        );
+        assert_eq!(reads.values[2].text, "other");
     }
 }
