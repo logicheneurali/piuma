@@ -285,14 +285,13 @@ fn best_pixmap(pixmaps: &[(i32, i32, Vec<u8>)]) -> Option<&(i32, i32, Vec<u8>)> 
 }
 
 /// Icon per the spec's preference: name from the theme first, pixmap
-/// (decoded from ARGB wire format) as fallback.
+/// (decoded from ARGB wire format) as fallback. The theme walk goes
+/// through `icons::resolve` — the sensors' own resolver — so both share
+/// one lookup policy and its cache (misses included: an unknown name is
+/// not re-searched on every property change).
 fn resolve_image(name: &str, pixmaps: &[(i32, i32, Vec<u8>)]) -> Option<TrayImage> {
     if !name.is_empty() {
-        if let Some(path) = freedesktop_icons::lookup(name)
-            .with_size(icon_target())
-            .with_theme(crate::icons::icon_theme())
-            .find()
-        {
+        if let Some(path) = crate::icons::resolve(crate::icons::icon_theme(), name, icon_target()) {
             return Some(TrayImage::File(path));
         }
     }
