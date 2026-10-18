@@ -149,6 +149,17 @@ pub fn row_icon_target(thickness: u32, title_extra: u32, padding: u32) -> u16 {
     thickness.saturating_sub(chrome).clamp(4, 48) as u16
 }
 
+/// How many icon slots of `slot` px fit in `available` px: the cap the
+/// taskbar and tray rows use, so their content can never paint over the
+/// neighbouring sensors (iced does not clip a Row that outgrows its
+/// box). At least one slot, so even a hairline bar shows the first icon.
+pub fn icon_capacity(available: u32, slot: u32) -> u16 {
+    if slot == 0 {
+        return 1;
+    }
+    (available / slot).clamp(1, u32::from(u16::MAX)) as u16
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,5 +215,16 @@ mod tests {
         assert_eq!(stacked_title_extra("horizontal", "Side", 14), 0);
         assert_eq!(stacked_title_extra("vertical", "", 14), 0);
         assert_eq!(stacked_title_extra("vertical", "Side", 14), 24);
+    }
+
+    /// Whole slots only, never zero, saturated at `u16` — a bar too
+    /// narrow still shows the first icon.
+    #[test]
+    fn icon_capacity_fits_whole_slots() {
+        assert_eq!(icon_capacity(100, 52), 1);
+        assert_eq!(icon_capacity(104, 52), 2);
+        assert_eq!(icon_capacity(0, 52), 1);
+        assert_eq!(icon_capacity(100, 0), 1);
+        assert_eq!(icon_capacity(u32::MAX, 1), u16::MAX);
     }
 }

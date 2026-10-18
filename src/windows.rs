@@ -18,6 +18,15 @@ const ICON_SIZE: u16 = 16;
 /// The slot's own padding around the icon (the hover fill covers the
 /// whole slot); main subtracts it from the row height as well.
 pub const SLOT_PAD: u16 = 2;
+/// Gap the row puts between two slots — part of one slot's width.
+const ROW_GAP: u16 = 4;
+
+/// One slot's total width in the row: the icon, its padding both sides
+/// and the gap after it — the number `main` needs to cap the row to the
+/// sensor's room.
+pub fn slot_width() -> u32 {
+    u32::from(icon_target()) + 2 * u32::from(SLOT_PAD) + u32::from(ROW_GAP)
+}
 
 /// The icon edge in px the taskbar renders at right now; main computes
 /// it from the sensor row's usable height (`icons::row_icon_target`,
@@ -329,17 +338,27 @@ fn parse_desktop(content: &str) -> (Option<String>, Option<String>) {
 /// The address rides the message — never an index a tick could shift
 /// under a queued press. The active window's slot keeps the sensor's
 /// fill (hover wins over it) and a non-empty title rides a tooltip,
-/// styled like the tray's.
+/// styled like the tray's. `max` caps the visible icons to what the
+/// sensor box holds (a "+N" text counts the hidden rest).
 pub fn row<'a>(
     items: &'a [TaskIcon],
     hover: Option<&str>,
     style: &RowStyle,
+    max: u16,
+    font_size: u32,
 ) -> iced::Element<'a, crate::Message> {
-    use iced::widget::{container, MouseArea, Row};
+    use iced::widget::{MouseArea, Row, container, text};
     let radius = f32::from(style.radius);
-    let mut row = Row::new().spacing(4);
+    let mut row = Row::new().spacing(f32::from(ROW_GAP));
+    let mut shown = 0usize;
+    let mut hidden = 0usize;
     for item in items {
         let Some(path) = &item.icon else { continue };
+        if shown == usize::from(max) {
+            hidden += 1;
+            continue;
+        }
+        shown += 1;
         let address = item.address.clone();
         // Hover wins over active: the slot under the cursor is the one
         // being acted on.
@@ -375,6 +394,9 @@ pub fn row<'a>(
             .on_exit(crate::Message::TaskbarIconLeave { address })
             .interaction(iced::mouse::Interaction::Pointer);
         row = row.push(interactive);
+    }
+    if hidden > 0 {
+        row = row.push(text(format!("+{hidden}")).size(font_size as f32));
     }
     row.into()
 }

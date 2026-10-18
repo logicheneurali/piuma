@@ -30,7 +30,7 @@ use iced::futures::channel::mpsc::Sender;
 use iced::futures::channel::oneshot;
 use iced::futures::stream::StreamExt;
 use iced::widget::container::Style as ContainerStyle;
-use iced::widget::{container, image, MouseArea, Row};
+use iced::widget::{container, image, text, MouseArea, Row};
 use iced::{Element, Length, Subscription};
 use iced_exwlshell::reexport::Anchor;
 use zbus::fdo::RequestNameFlags;
@@ -81,6 +81,15 @@ pub fn icon_target() -> u16 {
 /// the new size on the item's next refresh.
 pub fn set_icon_target(size: u16) {
     ICON_TARGET.store(size, Ordering::Relaxed);
+}
+
+/// Gap the row puts between two icons — part of one slot's width.
+const ROW_GAP: u16 = 4;
+
+/// One icon's total width in the row: the icon plus the gap after it —
+/// the number `main` needs to cap the row to the sensor's room.
+pub fn slot_width() -> u32 {
+    u32::from(icon_target()) + u32::from(ROW_GAP)
 }
 /// Qt scroll convention: 120 units per wheel notch; this stack reports
 /// 15 px per notch, so pixels are scaled by 8.
@@ -1081,9 +1090,14 @@ pub fn scroll_units(delta: iced::mouse::ScrollDelta) -> Option<(i32, bool)> {
 /// never an index that could go stale before the click lands.
 /// `style` is the sensor's own look; the tooltip reuses it via
 /// `crate::styled_box` (the 5px tooltip wrapper gap stays outside it).
-pub fn row<'a>(icons: &'a [TrayIcon]) -> Element<'a, Message> {
-    let mut row = Row::new().spacing(4);
-    for icon in icons {
+/// `max` caps the visible icons to what the sensor box holds (a "+N"
+/// text counts the hidden rest); icons are vertically centred so art of
+/// different aspects sits on one mid-line.
+pub fn row<'a>(icons: &'a [TrayIcon], max: u16, font_size: u32) -> Element<'a, Message> {
+    let mut row = Row::new().spacing(f32::from(ROW_GAP));
+    let mut shown = 0usize;
+    for icon in icons.iter().take(usize::from(max)) {
+        shown += 1;
         let size = Length::Fixed(f32::from(icon_target()));
         let art: Element<'a, Message> = match &icon.image {
             TrayImage::File(p) if icon.image.is_svg() => {
@@ -1148,6 +1162,9 @@ pub fn row<'a>(icons: &'a [TrayIcon]) -> Element<'a, Message> {
             .interaction(iced::mouse::Interaction::Pointer);
 
         row = row.push(interactive);
+    }
+    if let Some(rest) = icons.len().checked_sub(shown).filter(|n| *n > 0) {
+        row = row.push(text(format!("+{rest}")).size(font_size as f32));
     }
     row.into()
 }

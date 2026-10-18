@@ -1917,8 +1917,20 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
             // passed here drives the tooltip, which mirrors the sensor box;
             // a transparent sensor shows the section behind it on the bar,
             // so the tooltip borrows that colour to stay legible anywhere.
+            // Icon rows (tray, taskbar) never outgrow their sensor box: iced
+            // does not clip a Row, an overflow would paint over the
+            // neighbouring sensors. Only a vertical panel bounds the row's
+            // axis (its box fills the section's thickness width); anywhere
+            // else the box wraps the row itself and there is nothing to cap.
+            let icon_room = if vertical {
+                panel_thickness(&panel.config)
+                    .saturating_sub(2 * (u32::from(SECTION_CONTENT_PAD) + u32::from(s.padding)))
+            } else {
+                u32::MAX
+            };
             let main: Element<'a, Message> = if let Some(icons) = &s.tray {
-                tray::row(icons)
+                let cap = icons::icon_capacity(icon_room, tray::slot_width());
+                tray::row(icons, cap, font_size)
             } else if let Some(buttons) = &s.workspaces {
                 // One button per available workspace (roadmap2 #4): the
                 // names shown, the active one inverted, click focuses —
@@ -1958,7 +1970,15 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
                     hover_bg: s.bg_color_hover.or(active_bg),
                     active_bg,
                 };
-                windows::row(slots, panel.taskbar_hover.as_deref(), &row_style).into()
+                let cap = icons::icon_capacity(icon_room, windows::slot_width());
+                windows::row(
+                    slots,
+                    panel.taskbar_hover.as_deref(),
+                    &row_style,
+                    cap,
+                    font_size,
+                )
+                .into()
             } else {
                 // Icon first when the sensor declares one (roadmap N1), then
                 // the optional name, then the value: an empty name still
