@@ -361,3 +361,131 @@ pub(crate) fn taskbar_menu_view(panel: &Panel) -> Element<'_, Message> {
         .on_exit(Message::TaskbarMenuClosed)
         .into()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The height is exact (rows × row height + padding — the surface
+    /// must match the view pixel for pixel) and the width honours the
+    /// minimum/maximum bounds whatever the labels are.
+    #[test]
+    fn menu_size_is_exact_and_width_stays_in_bounds() {
+        let font = Font::with_name("Noto Sans");
+        let entry = |depth: u32, label: &str| dbusmenu::MenuEntry {
+            id: 1,
+            label: label.to_string(),
+            enabled: true,
+            toggle: 0,
+            depth,
+            kind: dbusmenu::EntryKind::Item,
+        };
+        let rows = vec![entry(0, "one"), entry(1, "two"), entry(2, "three")];
+        let (_, h) = menu_size(&rows, &font, 14);
+        assert_eq!(h, 3 * menu_row_h(14) + 2 * MENU_PAD);
+        // A tiny menu never shrinks below the minimum…
+        let (w, _) = menu_size(&[entry(0, "x")], &font, 14);
+        assert_eq!(w, MENU_MIN_W);
+        // …nor a huge label past the maximum.
+        let (w, _) = menu_size(&[entry(0, &"l".repeat(400))], &font, 14);
+        assert_eq!(w, MENU_MAX_W);
+    }
+    /// Labels are cut to their row budget inside the finished surface (the
+    /// toggle glyph measures with them and comes back stripped off), while
+    /// short labels pass through untouched.
+    #[test]
+    fn fit_menu_labels_cuts_long_and_keeps_short_labels() {
+        let font = Font::with_name("Noto Sans");
+        let entry = |label: &str, toggle: i32| dbusmenu::MenuEntry {
+            id: 1,
+            label: label.to_string(),
+            enabled: true,
+            toggle,
+            depth: 0,
+            kind: dbusmenu::EntryKind::Item,
+        };
+        // The narrowest legal surface: the long label cannot fit it.
+        let w = MENU_MIN_W;
+        let mut rows = vec![entry("Short", 0), entry(&"L".repeat(400), 1)];
+        fit_menu_labels(&mut rows, w, &font, 12);
+        assert_eq!(rows[0].label, "Short");
+        assert!(rows[1].label.ends_with('…'), "{}", rows[1].label);
+        // The drawn string (glyph included) measures within the budget,
+        // which carries both MENU_PAD layers per side (list + row).
+        let drawn = format!("{}{}", dbusmenu::toggle_glyph(&rows[1]), rows[1].label);
+        let budget = w - 4 * MENU_PAD;
+        assert!(text_width::widest(&font, 12, &[drawn]) <= budget as u16);
+    }
+    /// In the unclamped middle of the range, depth costs exactly
+    /// `MENU_INDENT` per level (the rows' indent and the estimate agree).
+    #[test]
+    fn menu_size_prices_submenus_by_indent() {
+        let font = Font::with_name("Noto Sans");
+        let entry = |depth: u32| dbusmenu::MenuEntry {
+            id: 1,
+            label: "Clickable menu entry row".to_string(),
+            enabled: true,
+            toggle: 0,
+            depth,
+            kind: dbusmenu::EntryKind::Item,
+        };
+        let (flat, _) = menu_size(&[entry(0)], &font, 14);
+        let (deep, _) = menu_size(&[entry(3)], &font, 14);
+        // Both widths must sit in the unclamped middle for the diff to
+        // be exact (guards against a pathological font measure).
+        assert!(flat > MENU_MIN_W && deep < MENU_MAX_W, "{flat} / {deep}");
+        assert_eq!(deep - flat, 3 * MENU_INDENT);
+    }
+    /// The taskbar menu is exactly nine workspace rows (1..9) plus the
+    /// pad layers, and never narrower than a hit-friendly minimum.
+    #[test]
+    fn taskbar_menu_size_prices_nine_workspace_rows() {
+        let font = Font::with_name("Noto Sans");
+        let (w, h) = taskbar_menu_size(&font, 14);
+        assert_eq!(h, 9 * menu_row_h(14) + 2 * MENU_PAD);
+        assert!(w >= 48, "the menu keeps a hit-friendly minimum, got {w}");
+        let (w_big, h_big) = taskbar_menu_size(&font, 24);
+        assert!(w_big >= w, "a bigger font never measures narrower");
+        assert!(h_big > h, "a bigger font never measures shorter");
+    }
+    /// Down-right from the cursor; flips to the opposite edge when the
+    /// surface would leave the output (margins never go negative).
+    #[test]
+    fn menu_placement_opens_down_right_and_flips_on_overflow() {
+        let (anchor, m) = menu_placement(100, 50, 200, 100, 1920, 1080);
+        assert_eq!(anchor, Anchor::Left | Anchor::Top);
+        assert_eq!((m.left, m.top, m.right, m.bottom), (100, 50, 0, 0));
+
+        // Near the right edge → the menu opens to the cursor's left…
+        let (anchor, m) = menu_placement(1850, 50, 200, 100, 1920, 1080);
+        assert_eq!(anchor, Anchor::Right | Anchor::Top);
+        assert_eq!((m.right, m.left), (1920 - 1850, 0));
+
+        // …near the bottom → above it; an oversized surface is cut at
+        // the output edge (flush with the bottom-right corner), not
+        // pinned at the cursor.
+        let (anchor, m) = menu_placement(100, 1050, 200, 100, 1920, 1080);
+        assert_eq!(anchor, Anchor::Left | Anchor::Bottom);
+        assert_eq!((m.bottom, m.top), (1080 - 1050, 0));
+
+        let (anchor, m) = menu_placement(10, 10, 4000, 4000, 1920, 1080);
+        assert_eq!(anchor, Anchor::Right | Anchor::Bottom);
+        assert_eq!((m.right, m.bottom), (0, 0));
+
+        // Regression: the 116-row Cachy-Update menu under a top bar (at
+        // = the tray icon, h ≈ 2332 px) used to open with its base at
+        // the cursor and 2300 px above the screen — only a sliver at
+        // the bar was visible. It now hangs from the right edge and is
+        // cut at the screen bottom.
+        let (anchor, m) = menu_placement(1700, 14, 240, 2332, 1920, 1080);
+        assert_eq!(anchor, Anchor::Right | Anchor::Bottom);
+        assert_eq!((m.right, m.bottom), (1920 - 1700, 0));
+
+        // Mid-screen cursor: a menu too tall to open downward flips up
+        // and stays fully visible (clamped to the top edge, not to the
+        // cursor).
+        let (anchor, m) = menu_placement(100, 500, 200, 600, 1920, 1080);
+        assert_eq!(anchor, Anchor::Left | Anchor::Bottom);
+        assert_eq!((m.bottom, m.top), (1080 - 600, 0));
+    }
+}

@@ -154,3 +154,24 @@ pub(crate) fn wallpaper_view(panel: &Panel) -> Element<'_, Message> {
         .content_fit(iced::ContentFit::Cover)
         .into()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Roadmap2 #1: the sync plan opens one window per wanted output,
+    /// keeps the ones already placed there and closes the rest — an
+    /// empty wanted list (feature off) closes everything.
+    #[test]
+    fn wallpaper_plan_opens_keeps_and_closes() {
+        let current = vec![("HDMI-A-2".to_string(), 1u32), ("GONE-1".to_string(), 2u32)];
+        let desired = vec!["HDMI-A-2".to_string(), "eDP-1".to_string()];
+        let (open, close) = wallpaper_plan(&current, &desired);
+        assert_eq!(open, vec!["eDP-1"]);
+        assert_eq!(close, vec![2]);
+
+        let (open, close) = wallpaper_plan(&current, &[]);
+        assert!(open.is_empty());
+        assert_eq!(close, vec![1, 2]);
+    }
+}

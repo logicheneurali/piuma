@@ -9,7 +9,6 @@ use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
 
 use iced::widget::{container, text, Column, Row, MouseArea, Space, Stack};
-use iced::widget::image::Image;
 use iced::{
     Alignment, Background, Color, Element, Event, Length, Rectangle, Size,
     Subscription, Task as Command, Vector,
@@ -43,6 +42,7 @@ mod instance_lock;
 mod menus;
 mod notifications;
 mod palette;
+mod popup_notifications;
 mod sensor_runner;
 mod sensors;
 mod text_width;
@@ -53,8 +53,12 @@ mod windows;
 mod workspace;
 
 use menus::{
-    fit_menu_labels, menu_placement, menu_row_h, menu_size, taskbar_menu_size, taskbar_menu_view,
-    tray_menu_view, MENU_PAD,
+    fit_menu_labels, menu_placement, menu_size, taskbar_menu_size, taskbar_menu_view,
+    tray_menu_view,
+};
+use popup_notifications::{
+    notif_list_row_h, notif_list_view, popup_dismiss, popup_view, scroll_rows, sync_popup,
+    toggle_notif_list, NOTIF_LIST_MAX, NOTIF_LIST_ROWS,
 };
 use tooltip::{tooltip_close, tooltip_open, tooltip_window_view};
 use wallpaper_ui::{sync_palette, sync_wallpaper, wallpaper_view};
@@ -91,11 +95,6 @@ pub(crate) const ACTION_CLOSE_PANEL: &str = "close_panel";
 // there reach the window underneath with no input-region handling.
 // The card height is style-derived (`popup_card_h`); with the default
 // style (12px font, 12px padding) it is exactly 84px.
-pub(crate) const POPUP_MAX_CARDS: usize = 5;
-pub(crate) const POPUP_WIDTH: u32 = 360;
-pub(crate) const POPUP_CARD_GAP: u32 = 8;
-/// Gap between the screen edges and the popup corner.
-pub(crate) const POPUP_MARGIN: i32 = 8;
 
 // ── sensor graph popup geometry (roadmap2 #11) ──────────────────────
 // One popup at a time, on the sensor under the cursor: fixed size, the
@@ -137,12 +136,6 @@ pub(crate) const CALENDAR_CELL_PAD: u32 = 6;
 // `menu_size`): like the popup, the surface ends where the list ends,
 // so a stray click below it reaches the window underneath.
 
-/// The notification list popup (the sensor's click): entries in the
-/// snapshot, rows shown at once (the wheel scrolls the rest) and the
-/// width cap for the measured rows.
-pub(crate) const NOTIF_LIST_MAX: usize = 30;
-pub(crate) const NOTIF_LIST_ROWS: usize = 8;
-pub(crate) const NOTIF_LIST_W_MAX: u32 = 460;
 
 // ── model ───────────────────────────────────────────────────────────
 
@@ -3209,320 +3202,17 @@ pub(crate) fn popup_output_option() -> OutputOption {
 
 
 
-fn sync_popup(panel: &mut Panel, reposition: bool) -> Option<Command<Message>> {
-    let enabled = panel.config.panel.notifications.is_some();
-    let cards = if enabled {
-        // Count only, and reap the icon handles that lost their card:
-        // the old path cloned every (possibly image-bearing) card each
-        // tick just to read `.len()`.
-        notifications::prune_icon_handles();
-        notifications::active_cards_len(POPUP_MAX_CARDS)
-    } else {
-        0
-    };
-    // A changed set invalidates the hover id: expiry reaches this path
-    // without passing through popup_dismiss.
-    if cards != panel.popup_cards {
-        panel.popup_hover = None;
-    }
-    match (panel.popup, cards) {
-        (None, 0) => None,
-        (Some(id), 0) => {
-            panel.popup = None;
-            panel.popup_cards = 0;
-            panel.popup_hover = None;
-            Some(iced::window::close(id))
-        }
-        (None, n) => {
-            let (anchor, margin) = popup_placement(&panel.config);
-            let (id, open) = Message::layershell_open(NewLayerShellSettings {
-                size: popup_size(panel, n),
-                layer: Layer::Overlay,
-                anchor,
-                exclusive_zone: None,
-                margin: Some(margin),
-                keyboard_interactivity: KeyboardInteractivity::None,
-                // The focused output, like every other popup (margins
-                // are pure offsets — safe on any output).
-                output_option: popup_output_option(),
-                namespace: Some("piuma-notifications".to_string()),
-                ..Default::default()
-            });
-            panel.popup = Some(id);
-            panel.popup_cards = n;
-            Some(open)
-        }
-        (Some(id), n) if reposition || n != panel.popup_cards => {
-            panel.popup_cards = n;
-            let (anchor, margin) = popup_placement(&panel.config);
-            // The margin rides along: position and margins are config keys
-            // (roadmap M4) and a reload can change them at any time.
-            Some(Command::batch([
-                Command::done(Message::LayoutChange {
-                    id,
-                    anchor,
-                    size: popup_size(panel, n),
-                }),
-                Command::done(Message::MarginChange { id, margin }),
-            ]))
-        }
-        _ => None,
-    }
-}
 
-/// Surface size for a stack of `cards`: exact, so there is no dead
-/// (click-blocking) surface below the last card. The card height comes
-/// from the configured popup style (see `popup_card_h`).
-fn popup_size(panel: &Panel, cards: usize) -> LayerSize {
-    let n = cards as u32;
-    let h = popup_card_h(&popup_style(&panel.config, panel.palette.as_ref()));
-    LayerSize::px(POPUP_WIDTH, n * h + n.saturating_sub(1) * POPUP_CARD_GAP)
-}
 
-/// Right-hand corner opposite to the bar's edge: a bottom bar leaves
-/// the top corner, a top bar the bottom one, side bars the top corner.
-fn popup_anchor(config: &config::Config) -> Anchor {
-    let bar = panel_anchor(config);
-    if bar == Anchor::Top {
-        Anchor::Bottom | Anchor::Right
-    } else {
-        Anchor::Top | Anchor::Right
-    }
-}
 
-/// Anchor + screen-edge margins for the notification popup (roadmap M4),
-/// from `panel.notifications.popup_position` / `popup_margin_h` /
-/// `popup_margin_v`. `auto` (absent/unknown key) reproduces the historic
-/// layout: opposite the bar on the right, 8px from the top/right edges.
-fn popup_placement(config: &config::Config) -> (Anchor, Margin) {
-    let notify = config.panel.notifications.as_ref();
-    let margin_h = notify.and_then(|n| n.popup_margin_h).unwrap_or(POPUP_MARGIN);
-    let margin_v = notify.and_then(|n| n.popup_margin_v).unwrap_or(POPUP_MARGIN);
-    let position = notify
-        .and_then(|n| n.popup_position.as_deref())
-        .unwrap_or("auto");
-    // Margins on the two sides of a corner position (the others stay 0).
-    let corner = |top: bool, left: bool| Margin {
-        top: if top { margin_v } else { 0 },
-        bottom: if top { 0 } else { margin_v },
-        left: if left { margin_h } else { 0 },
-        right: if left { 0 } else { margin_h },
-    };
-    // Centered positions anchor both horizontal edges (the compositor
-    // centres the fixed-width surface); equal margins keep it centred.
-    let center = |top: bool| Margin {
-        top: if top { margin_v } else { 0 },
-        bottom: if top { 0 } else { margin_v },
-        left: margin_h,
-        right: margin_h,
-    };
-    match position {
-        "top-left" => (Anchor::Top | Anchor::Left, corner(true, true)),
-        "top-center" => (Anchor::Top | Anchor::Left | Anchor::Right, center(true)),
-        "top-right" => (Anchor::Top | Anchor::Right, corner(true, false)),
-        "bottom-left" => (Anchor::Bottom | Anchor::Left, corner(false, true)),
-        "bottom-center" => {
-            (Anchor::Bottom | Anchor::Left | Anchor::Right, center(false))
-        }
-        "bottom-right" => (Anchor::Bottom | Anchor::Right, corner(false, false)),
-        // `auto` and anything unknown keep the historic layout.
-        _ => (
-            popup_anchor(config),
-            Margin {
-                top: POPUP_MARGIN,
-                right: POPUP_MARGIN,
-                bottom: 0,
-                left: 0,
-            },
-        ),
-    }
-}
 
-/// Dismiss a popup card: close the entry with the user's reason (and
-/// its `NotificationClosed` signal), refresh the sensor text at once
-/// and resize the stack.
-fn popup_dismiss(panel: &mut Panel, id: u32) -> Command<Message> {
-    if notifications::dismiss(id) {
-        notifications::spawn_closed_signal(id);
-        refresh_notification_sensor(panel);
-    }
-    sync_popup(panel, false).unwrap_or_else(Command::none)
-}
 
-/// Rewrite every `notifications` sensor's value in place after a UI
-/// change (the next tick confirms it), like the scroll/click arms do.
-fn refresh_notification_sensor(panel: &mut Panel) {
-    let value = notifications::display_value();
-    for (si, sec) in panel.config.panel.sections.iter().enumerate() {
-        for (sni, s) in sec.sensors.iter().enumerate() {
-            if matches!(s.source, config::SensorSource::Notifications {}) {
-                if let Some(sv) = panel
-                    .sections
-                    .get_mut(si)
-                    .and_then(|sec| sec.sensors.get_mut(sni))
-                {
-                    sv.value = value.clone();
-                }
-            }
-        }
-    }
-}
 
-/// The popup stack: one card per active notification (newest on top).
-/// The content block is one MouseArea (click → `PopupCardClicked` =
-/// default action + dismiss) and the ✕ a separate MouseArea inside the
-/// same card, so the two targets never overlap. Both targets also feed
-/// the hover id, and the card's look comes from the configured style
-/// through the shared `styled_box` helper (the sensors' border machinery).
-fn popup_view(panel: &Panel) -> Element<'_, Message> {
-    let st = popup_style(&panel.config, panel.palette.as_ref());
-    let card_h = popup_card_h(&st);
-    // Font audit (roadmap M2): every popup text takes the configured family;
-    // the summary renders bold on top of it, body and ✕ as configured.
-    let font = panel_font(&panel.config);
-    let bold = Font {
-        weight: iced::font::Weight::Bold,
-        ..font
-    };
-
-    let mut stack: Column<'_, Message> = Column::new().spacing(POPUP_CARD_GAP as f32);
-    for card in notifications::active_cards(POPUP_MAX_CARDS) {
-        // Hovered cards swap text/bg/border for their hover counterparts.
-        let (fg, bg, border_c) = if panel.popup_hover == Some(card.id) {
-            (st.text_hover, st.bg_hover, st.border_hover)
-        } else {
-            (st.text, st.bg, st.border)
-        };
-        // Icon: image-data wins (handle cached per notification — one
-        // decode, not one per frame), a real file path follows; anything
-        // else (e.g. a themed icon name) renders without an icon.
-        let icon: Option<Image> = match &card.icon {
-            Some(notifications::CardIcon::Image) => {
-                notifications::icon_handle(card.id).map(|handle| {
-                    Image::new(handle)
-                        .width(32)
-                        .height(32)
-                        .content_fit(iced::ContentFit::Contain)
-                })
-            }
-            Some(notifications::CardIcon::Path(p)) => std::path::Path::new(p)
-                .exists()
-                .then(|| {
-                    Image::new(iced::widget::image::Handle::from_path(p.clone()))
-                        .width(32)
-                        .height(32)
-                        .content_fit(iced::ContentFit::Contain)
-                }),
-            None => None,
-        };
-        let mut lines: Column<'_, Message> = Column::new()
-            .spacing(2)
-            .push(text(card.summary).size(st.font_size + 3).font(bold).color(fg).width(Length::Fill));
-        if !card.body.is_empty() {
-            lines = lines.push(
-                text(card.body)
-                    .size(st.font_size)
-                    .color(fg)
-                    .font(font)
-                    .width(Length::Fill),
-            );
-        }
-        let mut content = Row::new()
-            .spacing(8)
-            .align_y(Alignment::Center);
-        if let Some(icon) = icon {
-            content = content.push(icon);
-        }
-        let content = content
-            .push(lines.width(Length::Fill))
-            .width(Length::Fill);
-        let card_row: Row<'_, Message> = Row::new()
-            .spacing(8)
-            .align_y(Alignment::Center)
-            .width(Length::Fill)
-            .push(
-                MouseArea::new(content)
-                    .on_press(Message::PopupCardClicked(card.id))
-                    .on_enter(Message::PopupCardEnter(card.id))
-                    .on_exit(Message::PopupCardLeave),
-            )
-            // The ✕ gets 8px of padding: a small glyph alone is too small
-            // a target, and its MouseArea must not overlap the card's.
-            .push(
-                MouseArea::new(
-                    container(
-                        text("✕")
-                            .size(st.font_size + 2)
-                            .color(fg)
-                            .font(font),
-                    )
-                    .padding(8),
-                )
-                .on_press(Message::PopupCardDismissed(card.id))
-                .on_enter(Message::PopupCardEnter(card.id))
-                .on_exit(Message::PopupCardLeave),
-            );
-        let styled = styled_box(
-            card_row.into(),
-            Some(bg),
-            Some(border_c),
-            st.border_width.min(u16::MAX as u32) as u16,
-            st.border_radius.min(u16::MAX as u32) as u16,
-            &st.border_type,
-            [false, false, false, false],
-            st.padding.min(u16::MAX as u32) as u16,
-            Length::Fill,
-            Length::Fixed(card_h as f32),
-        );
-        // The clip keeps an overlong body inside the card box; the outer
-        // size is the same `card_h` the surface math uses.
-        stack = stack.push(
-            container(styled)
-                .width(Length::Fill)
-                .height(Length::Fixed(card_h as f32))
-                .clip(true),
-        );
-    }
-    container(stack)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
-}
 
 // ── notification list window ────────────────────────────────────────
 
-/// Vertical rhythm of one list row: a double-height row (summary +
-/// body, spaced) — `menu_row_h`'s maths for two stacked lines.
-fn notif_list_row_h(font_size: u32) -> u32 {
-    menu_row_h(font_size) * 2 + 4
-}
 
-/// The wheel's effect on the scroll offset: whole rows towards the
-/// oldest, clamped so the last page lands exactly on the bottom rows.
-fn scroll_rows(offset: u32, delta: i32, len: usize, visible: usize) -> u32 {
-    let max = len.saturating_sub(visible);
-    (offset as i32 + delta).clamp(0, max as i32) as u32
-}
 
-/// Surface size for `rows`: exact height (one `notif_list_row_h` per
-/// shown row plus padding — nothing clips, every row stays hit-exact)
-/// and the width from the widest truncated string, capped so a long
-/// body does not take half the screen.
-fn notif_list_size(rows: &[notifications::NotifRow], font: &Font, font_size: u32) -> (u32, u32) {
-    let patterns: Vec<String> = rows
-        .iter()
-        .flat_map(|r| [r.summary.clone(), r.body.clone()])
-        .collect();
-    let text_w = u32::from(text_width::widest(font, font_size, &patterns));
-    let w = text_w
-        .saturating_add(2 * MENU_PAD)
-        .min(NOTIF_LIST_W_MAX.saturating_add(2 * MENU_PAD));
-    let shown = rows.len().min(NOTIF_LIST_ROWS) as u32;
-    let h = shown
-        .saturating_mul(notif_list_row_h(font_size))
-        .saturating_add(2 * MENU_PAD);
-    (w, h)
-}
 
 // ── tray menu window ────────────────────────────────────────────────
 
@@ -4269,120 +3959,7 @@ fn calendar_popup_view<'a>(panel: &'a Panel, cp: &CalendarPopup) -> Element<'a, 
 
 // ── notification list popup ─────────────────────────────────────────
 
-/// Toggle the notification history list (the notifications sensor's
-/// click): closes it when open; opens it at the notification cards'
-/// corner with the newest entries — nothing to reread → nothing to
-/// open.
-fn toggle_notif_list(panel: &mut Panel) -> Command<Message> {
-    if let Some((id, _)) = panel.notif_list.take() {
-        return iced::window::close(id);
-    }
-    let rows = notifications::history_rows(NOTIF_LIST_MAX);
-    if rows.is_empty() {
-        return Command::none();
-    }
-    let font = panel_font(&panel.config);
-    let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
-    let (w, h) = notif_list_size(&rows, &font, font_size);
-    // The cards' own corner: the list belongs to the same notifications.
-    let (anchor, margin) = popup_placement(&panel.config);
-    let (id, open) = Message::layershell_open(NewLayerShellSettings {
-        size: LayerSize::px(w, h),
-        layer: Layer::Overlay,
-        anchor,
-        exclusive_zone: None,
-        margin: Some(margin),
-        keyboard_interactivity: KeyboardInteractivity::None,
-        output_option: popup_output_option(),
-        namespace: Some("piuma-notif-list".to_string()),
-        ..Default::default()
-    });
-    panel.notif_list = Some((id, NotifList { offset: 0 }));
-    open
-}
 
-/// The history list: newest on top, the wheel scrolls by whole rows, a
-/// row invokes its notification's spec `default` action and closes the
-/// popup (the sensor's old click). Closed entries render dimmed; the
-/// rows follow the notification popup style (palette included).
-fn notif_list_view(panel: &Panel) -> Element<'_, Message> {
-    let Some((_, state)) = panel.notif_list.as_ref() else {
-        // The window id exists only together with its state.
-        return container(text(""))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into();
-    };
-    let st = popup_style(&panel.config, panel.palette.as_ref());
-    let font = panel_font(&panel.config);
-    let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
-    let row_h = notif_list_row_h(font_size) as f32;
-    let dim = Color::from_rgba(st.text.r, st.text.g, st.text.b, 0.45);
-    let dim_closed = Color::from_rgba(st.text.r, st.text.g, st.text.b, 0.30);
-    let mut list: Column<'_, Message> = Column::new().spacing(2.0);
-    // Bound so the rows outlive the loop (the elements borrow them).
-    let rows = notifications::history_rows(NOTIF_LIST_MAX);
-    for row in rows
-        .iter()
-        .skip(state.offset as usize)
-        .take(NOTIF_LIST_ROWS)
-    {
-        let (summary_fg, body_fg) = if row.closed {
-            (dim_closed, dim_closed)
-        } else {
-            (st.text, dim)
-        };
-        let inner = Column::new()
-            .push(
-                text(row.summary.clone())
-                    .size(font_size)
-                    .color(summary_fg)
-                    .font(font),
-            )
-            .push(
-                text(row.body.clone())
-                    .size(font_size.saturating_sub(2))
-                    .color(body_fg)
-                    .font(font),
-            )
-            .spacing(2);
-        let styled = container(inner)
-            .width(Length::Fill)
-            .height(Length::Fixed(row_h))
-            .align_y(Alignment::Center)
-            .padding(iced::Padding::from(MENU_PAD as f32));
-        list = list.push(
-            MouseArea::new(styled)
-                .on_press(Message::NotifListClicked(row.id))
-                .interaction(iced::mouse::Interaction::Pointer),
-        );
-    }
-    let surface = styled_box(
-        container(list)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .padding(iced::Padding::from(MENU_PAD as f32))
-            .into(),
-        Some(st.bg),
-        Some(st.border),
-        st.border_width.min(u16::MAX as u32) as u16,
-        st.border_radius.min(u16::MAX as u32) as u16,
-        &st.border_type,
-        [false, false, false, false],
-        // The list carries the padding; the box only draws its border.
-        0,
-        Length::Fill,
-        Length::Fill,
-    );
-    // Only non-zero pixel deltas act (one adjustment per notch: the
-    // line form always accompanies the pixel one — see the sensors).
-    MouseArea::new(surface)
-        .on_scroll(move |delta| match delta {
-            iced::mouse::ScrollDelta::Pixels { y, .. } if y != 0.0 => Message::NotifListScrolled(y),
-            _ => Message::NotifListScrolled(0.0),
-        })
-        .into()
-}
 
 // ── taskbar menu window ─────────────────────────────────────────────
 
@@ -4631,18 +4208,10 @@ fn parse_config_arg() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        calendar_size, config, corner_radius, dbusmenu, focused_output_in, icons_theme,
-        monitor_names_json, notif_list_row_h, notif_list_size, notifications, palette,
-        panel_background, popup_card_h, popup_missed_tick, popup_placement, popup_style,
-        scroll_rows, section_touch, shifted_surface_rect, text_width, GraphPopup, PopupStyle,
-        NOTIF_LIST_W_MAX,
+        calendar_size, config, corner_radius, focused_output_in, icons_theme,
+        monitor_names_json, palette, panel_background, popup_card_h, popup_missed_tick,
+        popup_style, section_touch, shifted_surface_rect, GraphPopup, PopupStyle,
     };
-    use crate::menus::{
-        fit_menu_labels, menu_placement, menu_row_h, menu_size, taskbar_menu_size, MENU_INDENT,
-        MENU_MAX_W, MENU_MIN_W, MENU_PAD,
-    };
-    use crate::wallpaper_ui::wallpaper_plan;
-    use iced::font::Font;
     use iced_exwlshell::reexport::Anchor;
 
     /// The default popup style must keep the F3 geometry exactly (84px
@@ -4659,63 +4228,8 @@ mod tests {
         assert_eq!(popup_card_h(&styled), 96);
     }
 
-    /// `auto` (no `popup_position`) keeps the historic layout exactly: the
-    /// corner opposite the bar on the right, 8px from the top/right edges.
-    #[test]
-    fn popup_placement_auto_keeps_the_original_layout() {
-        let cfg = crate::config::default_config(); // horizontal bar, top
-        let (anchor, margin) = popup_placement(&cfg);
-        assert_eq!(anchor, Anchor::Bottom | Anchor::Right);
-        assert_eq!(
-            (margin.top, margin.right, margin.bottom, margin.left),
-            (8, 8, 0, 0)
-        );
-    }
 
-    /// An explicit position anchors the popup on that corner and only the
-    /// two relevant margins carry the configured values (roadmap M4).
-    #[test]
-    fn popup_placement_honours_explicit_position_and_margins() {
-        let cfg: crate::config::Config = serde_json::from_str(
-            r##"{
-                "panel": {
-                    "anchor": "top",
-                    "section_layout": "horizontal",
-                    "notifications": {
-                        "popup_position": "bottom-left",
-                        "popup_margin_h": 20,
-                        "popup_margin_v": 4
-                    },
-                    "sections": []
-                }
-            }"##,
-        )
-        .expect("config must parse");
-        let (anchor, margin) = popup_placement(&cfg);
-        assert_eq!(anchor, Anchor::Bottom | Anchor::Left);
-        assert_eq!(
-            (margin.top, margin.right, margin.bottom, margin.left),
-            (0, 0, 4, 20)
-        );
-    }
 
-    /// An unknown position key falls back to `auto` (bar-opposite layout).
-    #[test]
-    fn popup_placement_falls_back_to_auto_on_unknown_keys() {
-        let cfg: crate::config::Config = serde_json::from_str(
-            r##"{
-                "panel": {
-                    "anchor": "top",
-                    "section_layout": "horizontal",
-                    "notifications": { "popup_position": "diagonal" },
-                    "sections": []
-                }
-            }"##,
-        )
-        .expect("config must parse");
-        let (anchor, _) = popup_placement(&cfg);
-        assert_eq!(anchor, Anchor::Bottom | Anchor::Right);
-    }
 
     /// Touching sides `[top, right, bottom, left]` (roadmap M3): the bar's
     /// anchored side always touches; on the length axis `fill` flushes the
@@ -4769,183 +4283,14 @@ mod tests {
         assert_eq!(icons_theme(&cfg), Some("Papirus"));
     }
 
-    /// The height is exact (rows × row height + padding — the surface
-    /// must match the view pixel for pixel) and the width honours the
-    /// minimum/maximum bounds whatever the labels are.
-    #[test]
-    fn menu_size_is_exact_and_width_stays_in_bounds() {
-        let font = Font::with_name("Noto Sans");
-        let entry = |depth: u32, label: &str| dbusmenu::MenuEntry {
-            id: 1,
-            label: label.to_string(),
-            enabled: true,
-            toggle: 0,
-            depth,
-            kind: dbusmenu::EntryKind::Item,
-        };
-        let rows = vec![entry(0, "one"), entry(1, "two"), entry(2, "three")];
-        let (_, h) = menu_size(&rows, &font, 14);
-        assert_eq!(h, 3 * menu_row_h(14) + 2 * MENU_PAD);
-        // A tiny menu never shrinks below the minimum…
-        let (w, _) = menu_size(&[entry(0, "x")], &font, 14);
-        assert_eq!(w, MENU_MIN_W);
-        // …nor a huge label past the maximum.
-        let (w, _) = menu_size(&[entry(0, &"l".repeat(400))], &font, 14);
-        assert_eq!(w, MENU_MAX_W);
-    }
-
-    /// Labels are cut to their row budget inside the finished surface (the
-    /// toggle glyph measures with them and comes back stripped off), while
-    /// short labels pass through untouched.
-    #[test]
-    fn fit_menu_labels_cuts_long_and_keeps_short_labels() {
-        let font = Font::with_name("Noto Sans");
-        let entry = |label: &str, toggle: i32| dbusmenu::MenuEntry {
-            id: 1,
-            label: label.to_string(),
-            enabled: true,
-            toggle,
-            depth: 0,
-            kind: dbusmenu::EntryKind::Item,
-        };
-        // The narrowest legal surface: the long label cannot fit it.
-        let w = MENU_MIN_W;
-        let mut rows = vec![entry("Short", 0), entry(&"L".repeat(400), 1)];
-        fit_menu_labels(&mut rows, w, &font, 12);
-        assert_eq!(rows[0].label, "Short");
-        assert!(rows[1].label.ends_with('…'), "{}", rows[1].label);
-        // The drawn string (glyph included) measures within the budget,
-        // which carries both MENU_PAD layers per side (list + row).
-        let drawn = format!("{}{}", dbusmenu::toggle_glyph(&rows[1]), rows[1].label);
-        let budget = w - 4 * MENU_PAD;
-        assert!(text_width::widest(&font, 12, &[drawn]) <= budget as u16);
-    }
-
-    /// In the unclamped middle of the range, depth costs exactly
-    /// `MENU_INDENT` per level (the rows' indent and the estimate agree).
-    #[test]
-    fn menu_size_prices_submenus_by_indent() {
-        let font = Font::with_name("Noto Sans");
-        let entry = |depth: u32| dbusmenu::MenuEntry {
-            id: 1,
-            label: "Clickable menu entry row".to_string(),
-            enabled: true,
-            toggle: 0,
-            depth,
-            kind: dbusmenu::EntryKind::Item,
-        };
-        let (flat, _) = menu_size(&[entry(0)], &font, 14);
-        let (deep, _) = menu_size(&[entry(3)], &font, 14);
-        // Both widths must sit in the unclamped middle for the diff to
-        // be exact (guards against a pathological font measure).
-        assert!(flat > MENU_MIN_W && deep < MENU_MAX_W, "{flat} / {deep}");
-        assert_eq!(deep - flat, 3 * MENU_INDENT);
-    }
-
-    /// The list popup's wheel: whole rows towards the oldest, clamped
-    /// at both ends (the last page lands on the bottom rows) and a
-    /// history shorter than a page never scrolls.
-    #[test]
-    fn notif_list_scroll_clamps_by_whole_rows() {
-        assert_eq!(scroll_rows(0, 3, 20, 8), 3);
-        assert_eq!(scroll_rows(3, -5, 20, 8), 0, "up clamps at the newest");
-        assert_eq!(
-            scroll_rows(10, 4, 20, 8),
-            12,
-            "down clamps at the last page"
-        );
-        assert_eq!(scroll_rows(0, 2, 5, 8), 0, "a short history never scrolls");
-    }
-
-    /// The list popup's surface: exact height for the shown rows (the
-    /// cap at `NOTIF_LIST_ROWS`) and the measured width inside the cap.
-    #[test]
-    fn notif_list_size_is_exact_and_capped() {
-        let font = Font::with_name("Noto Sans");
-        let row = |i: usize| notifications::NotifRow {
-            id: i as u32,
-            summary: format!("summary {i}"),
-            body: "a body line".to_string(),
-            closed: false,
-        };
-        let rows: Vec<_> = (0..10)
-            .map(|i| notifications::NotifRow {
-                id: i as u32,
-                summary: format!("summary {i} with a tail long enough to widen the box"),
-                body: "a body line".to_string(),
-                closed: false,
-            })
-            .collect();
-        let (w, h) = notif_list_size(&rows, &font, 14);
-        assert_eq!(
-            h,
-            8 * notif_list_row_h(14) + 2 * MENU_PAD,
-            "only NOTIF_LIST_ROWS rows are shown"
-        );
-        assert!(
-            w <= NOTIF_LIST_W_MAX + 2 * MENU_PAD,
-            "the measured width stays capped, got {w}"
-        );
-        let (w_short, h_short) = notif_list_size(&[row(0)], &font, 14);
-        assert_eq!(h_short, notif_list_row_h(14) + 2 * MENU_PAD);
-        assert!(w_short < w, "fewer rows measure narrower");
-    }
-
-    /// The taskbar menu is exactly nine workspace rows (1..9) plus the
-    /// pad layers, and never narrower than a hit-friendly minimum.
-    #[test]
-    fn taskbar_menu_size_prices_nine_workspace_rows() {
-        let font = Font::with_name("Noto Sans");
-        let (w, h) = taskbar_menu_size(&font, 14);
-        assert_eq!(h, 9 * menu_row_h(14) + 2 * MENU_PAD);
-        assert!(w >= 48, "the menu keeps a hit-friendly minimum, got {w}");
-        let (w_big, h_big) = taskbar_menu_size(&font, 24);
-        assert!(w_big >= w, "a bigger font never measures narrower");
-        assert!(h_big > h, "a bigger font never measures shorter");
-    }
 
 
 
-    /// Down-right from the cursor; flips to the opposite edge when the
-    /// surface would leave the output (margins never go negative).
-    #[test]
-    fn menu_placement_opens_down_right_and_flips_on_overflow() {
-        let (anchor, m) = menu_placement(100, 50, 200, 100, 1920, 1080);
-        assert_eq!(anchor, Anchor::Left | Anchor::Top);
-        assert_eq!((m.left, m.top, m.right, m.bottom), (100, 50, 0, 0));
 
-        // Near the right edge → the menu opens to the cursor's left…
-        let (anchor, m) = menu_placement(1850, 50, 200, 100, 1920, 1080);
-        assert_eq!(anchor, Anchor::Right | Anchor::Top);
-        assert_eq!((m.right, m.left), (1920 - 1850, 0));
 
-        // …near the bottom → above it; an oversized surface is cut at
-        // the output edge (flush with the bottom-right corner), not
-        // pinned at the cursor.
-        let (anchor, m) = menu_placement(100, 1050, 200, 100, 1920, 1080);
-        assert_eq!(anchor, Anchor::Left | Anchor::Bottom);
-        assert_eq!((m.bottom, m.top), (1080 - 1050, 0));
 
-        let (anchor, m) = menu_placement(10, 10, 4000, 4000, 1920, 1080);
-        assert_eq!(anchor, Anchor::Right | Anchor::Bottom);
-        assert_eq!((m.right, m.bottom), (0, 0));
 
-        // Regression: the 116-row Cachy-Update menu under a top bar (at
-        // = the tray icon, h ≈ 2332 px) used to open with its base at
-        // the cursor and 2300 px above the screen — only a sliver at
-        // the bar was visible. It now hangs from the right edge and is
-        // cut at the screen bottom.
-        let (anchor, m) = menu_placement(1700, 14, 240, 2332, 1920, 1080);
-        assert_eq!(anchor, Anchor::Right | Anchor::Bottom);
-        assert_eq!((m.right, m.bottom), (1920 - 1700, 0));
 
-        // Mid-screen cursor: a menu too tall to open downward flips up
-        // and stays fully visible (clamped to the top edge, not to the
-        // cursor).
-        let (anchor, m) = menu_placement(100, 500, 200, 600, 1920, 1080);
-        assert_eq!(anchor, Anchor::Left | Anchor::Bottom);
-        assert_eq!((m.bottom, m.top), (1080 - 600, 0));
-    }
 
     /// The surface really lands shifted past the bar's reservation on
     /// the shared edge only — the calendar popup's pointer tests and
@@ -5019,21 +4364,6 @@ mod tests {
         assert!(focused_output_in(r#"[{"id":0,"name":"eDP-2"}]"#).is_none());
     }
 
-    /// Roadmap2 #1: the sync plan opens one window per wanted output,
-    /// keeps the ones already placed there and closes the rest — an
-    /// empty wanted list (feature off) closes everything.
-    #[test]
-    fn wallpaper_plan_opens_keeps_and_closes() {
-        let current = vec![("HDMI-A-2".to_string(), 1u32), ("GONE-1".to_string(), 2u32)];
-        let desired = vec!["HDMI-A-2".to_string(), "eDP-1".to_string()];
-        let (open, close) = wallpaper_plan(&current, &desired);
-        assert_eq!(open, vec!["eDP-1"]);
-        assert_eq!(close, vec![2]);
-
-        let (open, close) = wallpaper_plan(&current, &[]);
-        assert!(open.is_empty());
-        assert_eq!(close, vec![1, 2]);
-    }
 
     /// An active wallpaper palette replaces the notification card's
     /// configured COLOURS (bg/border/text) with its tones, while the
