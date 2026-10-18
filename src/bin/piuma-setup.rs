@@ -3494,8 +3494,8 @@ fn panel_settings(state: &PiumaSetup) -> Element<'_, Message> {
             .on_toggle(Message::AppThemeChanged)
             .into()),
         ("Thickness", Row::new()
-            .push(Slider::new(8..=64, thickness, Message::ThicknessChanged).width(Length::Fill))
-            .push(text(format!("{}px", thickness)).size(BODY).width(40))
+            .push(Slider::new(8..=200, thickness, Message::ThicknessChanged).width(Length::Fill))
+            .push(text(format!("{}px", thickness)).size(BODY).width(48))
             .spacing(8)
             .width(Length::Fill)
             .into()),
