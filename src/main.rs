@@ -14,14 +14,13 @@ use iced::{
 };
 use iced::event;
 use iced::time;
-use iced::font::Font;
 use iced::widget::container::Style as ContainerStyle;
 use iced::advanced::widget::Operation;
 
 use iced_exwlshell::ExWlSettings;
 use iced_exwlshell::daemon;
 use iced_exwlshell::reexport::{
-    Anchor, KeyboardInteractivity, Layer, Margin, NewLayerShellSettings, OutputOption,
+    Anchor, KeyboardInteractivity, Layer, NewLayerShellSettings, OutputOption,
 };
 use iced_exwlshell::settings::{LayerShellSettings, LayerSize, StartMode};
 use iced_exwlshell::to_layer_message;
@@ -33,6 +32,7 @@ mod calendar;
 mod config;
 mod dbusmenu;
 mod fill_sections;
+mod geometry;
 mod graphs;
 mod hypr;
 mod icons;
@@ -45,6 +45,8 @@ mod popup_graph;
 mod popup_notifications;
 mod sensor_runner;
 mod sensors;
+mod styles;
+mod text_util;
 mod text_width;
 mod tooltip;
 mod tray;
@@ -53,6 +55,7 @@ mod windows;
 mod workspace;
 
 use fill_sections::FillSections;
+use geometry::{corner_radius, panel_anchor, panel_size, panel_thickness, placement_rect};
 use menus::{
     fit_menu_labels, menu_placement, menu_size, taskbar_menu_size, taskbar_menu_view,
     tray_menu_view,
@@ -67,6 +70,8 @@ use popup_notifications::{
     notif_list_row_h, notif_list_view, popup_dismiss, popup_view, scroll_rows, sync_popup,
     toggle_notif_list, NOTIF_LIST_MAX, NOTIF_LIST_ROWS,
 };
+use styles::{panel_background, resolve_styles, restyle};
+use text_util::{panel_font, value_font};
 use tooltip::{tooltip_close, tooltip_open, tooltip_window_view};
 use wallpaper_ui::{sync_palette, sync_wallpaper, wallpaper_view};
 // Layout padding lives with the icon sizing helpers (icons.rs): the view
@@ -621,314 +626,9 @@ impl Operation<Message> for FindSensorRect {
 
 // ── helpers ─────────────────────────────────────────────────────────
 
-pub(crate) fn resolve_color<'a>(cfg: Option<Color>, default: Color) -> Color {
-    cfg.unwrap_or(default)
-}
 
-/// The panel's background: the wallpaper palette's base tone when it's
-/// active — keeping the configured colour's TRANSPARENCY (a `#000000ff`
-/// bar renders opaque in the palette's hue, a `#00000000` one stays
-/// see-through) — else the configured `default_bg_color`, else the
-/// built-in default. Used by both the surface's container and the
-/// sections' fallback, so they can't disagree.
-pub(crate) fn panel_background(config: &config::Config, pal: Option<&palette::Palette>) -> Color {
-    let configured = config
-        .panel
-        .default_bg_color
-        .as_ref()
-        .and_then(|s| config::parse_color(s).ok());
-    pal.and_then(|p| config::parse_color(&p.bg).ok())
-        .map(|mut c| {
-            if let Some(b) = configured {
-                c.a = b.a;
-            }
-            c
-        })
-        .or(configured)
-        .unwrap_or(DEFAULT_BG_COLOR)
-}
 
-/// Every section's and sensor's resolved style: the precedence chains
-/// the tick used to re-run per sensor per second — `parse_color` on
-/// every colour, `to_string` on every shape field — computed once per
-/// config load and once per wallpaper-palette change instead. The
-/// readings stay out of it: the tick pairs them with these styles.
-fn resolve_styles(cfg: &config::Config, pal: Option<&palette::Palette>) -> Vec<SectionStyle> {
-    let icon_theme = icons_theme(cfg);
-    let thickness = panel_thickness(cfg);
-    let font_size = cfg.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
-    let default_bg = panel_background(cfg, pal);
-    cfg.panel
-        .sections
-        .iter()
-        .enumerate()
-        .map(|(section_idx, section_cfg)| {
-            let section_default_txt = pal
-                .and_then(|p| config::parse_color(&p.text).ok())
-                .or_else(|| {
-                    cfg.panel
-                        .default_text_color
-                        .as_ref()
-                        .and_then(|s| config::parse_color(s).ok())
-                })
-                .unwrap_or(DEFAULT_TEXT_COLOR);
 
-            // Text colour chain: section > wallpaper palette (when
-            // active) > section_defaults > panel > built-in. The
-            // palette keeps the configured transparency, like bg.
-            let section_text_color = section_cfg.text_color.as_ref()
-                .and_then(|s| config::parse_color(s).ok())
-                .or_else(|| {
-                    let configured = cfg
-                        .panel
-                        .section_defaults
-                        .as_ref()
-                        .and_then(|sd| sd.text_color.as_ref())
-                        .and_then(|s| config::parse_color(s).ok());
-                    pal.and_then(|p| config::parse_color(&p.text).ok())
-                        .map(|mut t| {
-                            if let Some(c) = configured {
-                                t.a = c.a;
-                            }
-                            t
-                        })
-                })
-                .or_else(|| {
-                    cfg.panel
-                        .section_defaults
-                        .as_ref()
-                        .and_then(|sd| sd.text_color.as_ref())
-                        .and_then(|s| config::parse_color(s).ok())
-                })
-                .unwrap_or(section_default_txt);
-
-            let sensors: Vec<SensorStyle> = section_cfg
-                .sensors
-                .iter()
-                .map(|s| {
-                    // Style precedence, per style GROUP: a sensor takes a
-                    // group over only when it defines the group's key
-                    // colour (`border_color`, `bg_color`, `text_color`).
-                    // When that key is null on the sensor, every override
-                    // of that group on the sensor is ignored and
-                    // `cfg.panel.sensor_defaults` applies as a whole. When
-                    // the key is set, the sensor's own fields win and the
-                    // remaining ones fall back to the defaults.
-                    // `padding` is a single value: sensor when set,
-                    // otherwise the default. It also feeds the icon fit
-                    // below, so it is resolved before the icon.
-                    let defaults = cfg.panel.sensor_defaults.as_ref();
-                    let padding = config::style_num(s.padding)
-                        .or(defaults.and_then(|sd| config::style_num(sd.padding)))
-                        .unwrap_or(0) as u16;
-                    // Roadmap N1: theme file for the sensor's icon, sized
-                    // to this sensor row's real height — the fit the tray
-                    // already uses (thickness minus the layout chrome,
-                    // clamped), so the icon fills its box instead of
-                    // trailing the font size. The size travels with the
-                    // path (resolve and widget must agree on it); the
-                    // lookup is memoized, so a rebuild only clones the
-                    // cached path. With `icon_theme == None` (gate) this
-                    // arm never runs.
-                    let icon_size = icons::row_icon_target(
-                        thickness,
-                        icons::stacked_title_extra(
-                            section_cfg.layout.as_deref().unwrap_or("horizontal"),
-                            &section_cfg.name,
-                            font_size,
-                        ),
-                        u32::from(padding),
-                    );
-                    let icon = match (icon_theme, s.icon.as_deref()) {
-                        (Some(theme), Some(icon_name)) => {
-                            icons::resolve(theme, icon_name, icon_size)
-                        }
-                        _ => None,
-                    };
-                    let own_border = s.border_color.is_some();
-                    let own_bg = s.bg_color.is_some();
-                    let own_text = s.text_color.is_some();
-                    // Key fields: per-sensor, then the wallpaper
-                    // palette (when active), then defaults, then
-                    // section/built-in. The palette overrides the
-                    // configured defaults only — an explicit
-                    // per-sensor value always wins — and the
-                    // configured TRANSPARENCY survives it (a
-                    // `#..80` default keeps its alpha in the
-                    // wallpaper's hue).
-                    let tc_pal = pal.map(|p| {
-                        palette::keep_config_alpha(
-                            &p.text,
-                            defaults.and_then(|sd| sd.text_color.as_deref()),
-                        )
-                    });
-                    let tc_str = s.text_color.as_deref()
-                        .or(tc_pal.as_deref())
-                        .or(defaults.and_then(|sd| sd.text_color.as_deref()));
-                    let bg_pal = pal.map(|p| {
-                        palette::keep_config_alpha(
-                            &p.card,
-                            defaults.and_then(|sd| sd.bg_color.as_deref()),
-                        )
-                    });
-                    let bg_str = s.bg_color.as_deref()
-                        .or(bg_pal.as_deref())
-                        .or(defaults.and_then(|sd| sd.bg_color.as_deref()));
-                    let bc_str = s.border_color.as_deref().or(defaults.and_then(|sd| sd.border_color.as_deref()));
-                    // Secondary fields only count when the sensor owns the group.
-                    let bg_h_pal = pal.map(|p| {
-                        palette::keep_config_alpha(
-                            &p.card_hover,
-                            defaults.and_then(|sd| sd.bg_color_hover.as_deref()),
-                        )
-                    });
-                    let bg_h_str = (if own_bg { s.bg_color_hover.as_deref() } else { None })
-                        .or(bg_h_pal.as_deref())
-                        .or(defaults.and_then(|sd| sd.bg_color_hover.as_deref()));
-                    let tc_h_pal = pal.map(|p| {
-                        palette::keep_config_alpha(
-                            &p.text_hover,
-                            defaults.and_then(|sd| sd.text_color_hover.as_deref()),
-                        )
-                    });
-                    let tc_h_str = (if own_text { s.text_color_hover.as_deref() } else { None })
-                        .or(tc_h_pal.as_deref())
-                        .or(defaults.and_then(|sd| sd.text_color_hover.as_deref()));
-                    // Numeric style fields follow the -1 = disabled rule:
-                    // only an enabled value (>= 0) overrides the defaults.
-                    let bw_val = (if own_border { config::style_num(s.border_width) } else { None })
-                        .or(defaults.and_then(|sd| config::style_num(sd.border_width)))
-                        .unwrap_or(0);
-                    let br_val = (if own_border { config::style_num(s.border_radius) } else { None })
-                        .or(defaults.and_then(|sd| config::style_num(sd.border_radius)))
-                        .unwrap_or(0);
-                    let bt_str = (if own_border { s.border_type.as_deref() } else { None })
-                        .or(defaults.and_then(|sd| sd.border_type.as_deref()))
-                        .unwrap_or("full");
-
-                    let sensor_tc = tc_str
-                        .and_then(|sc| config::parse_color(sc).ok())
-                        .unwrap_or(section_text_color);
-                    let sensor_bg: Option<Color> = bg_str.and_then(|sc| config::parse_color(sc).ok());
-                    let sensor_bg_hover: Option<Color> = bg_h_str.and_then(|sc| config::parse_color(sc).ok());
-                    let sensor_tc_hover: Option<iced::Color> = tc_h_str.and_then(|sc| config::parse_color(sc).ok());
-                    let sensor_border: Option<Color> = bc_str.and_then(|sc| config::parse_color(sc).ok());
-                    // Threshold colour rules, colours resolved once and
-                    // sorted ascending: the view picks the highest rule
-                    // the reading reaches.
-                    let mut color_rules: Vec<(f32, Color)> = s
-                        .color_rules
-                        .as_deref()
-                        .unwrap_or_default()
-                        .iter()
-                        .filter_map(|r| {
-                            config::parse_color(&r.color)
-                                .ok()
-                                .map(|c| (r.min as f32, c))
-                        })
-                        .collect();
-                    color_rules.sort_by(|a, b| a.0.total_cmp(&b.0));
-                    SensorStyle {
-                        // static_text and tray sensors render only their
-                        // content: the name stays in the config (setup
-                        // keeps editing it) but never appears on the bar.
-                        name: if matches!(
-                            s.source,
-                            config::SensorSource::StaticText { .. }
-                                | config::SensorSource::Tray {}
-                                // The buttons carry the names already.
-                                | config::SensorSource::Workspace {}
-                        ) {
-                            String::new()
-                        } else {
-                            s.name.clone()
-                        },
-                        description: s.description.as_ref().map(|d| d.to_string()).unwrap_or_default(),
-                        action: s.action.clone(),
-                        is_notifications: matches!(s.source, config::SensorSource::Notifications {}),
-                        padding,
-                        text_color: sensor_tc,
-                        bg_color: sensor_bg,
-                        text_color_hover: sensor_tc_hover,
-                        bg_color_hover: sensor_bg_hover,
-                        border_color: sensor_border,
-                        border_width: bw_val as u16,
-                        border_radius: br_val as u16,
-                        border_type: bt_str.to_string(),
-                        color_rules,
-                        icon,
-                        icon_size,
-                    }
-                })
-                .collect();
-
-            // Section style precedence, per style GROUP (the same rule as
-            // `cfg.panel.sensor_defaults`): the border group belongs to the
-            // section only when it sets `border_color`; otherwise the
-            // whole group comes from `cfg.panel.section_defaults`. bg/text
-            // are single keys: section value when set, then the active
-            // wallpaper palette, else the default.
-            let sdefaults = cfg.panel.section_defaults.as_ref();
-            let own_border = section_cfg.border_color.is_some();
-            let bg_pal = pal.map(|p| {
-                palette::keep_config_alpha(
-                    &p.card,
-                    sdefaults.and_then(|sd| sd.bg_color.as_deref()),
-                )
-            });
-            let bg_str = section_cfg.bg_color.as_deref()
-                .or(bg_pal.as_deref())
-                .or(sdefaults.and_then(|sd| sd.bg_color.as_deref()));
-            let bc_str = section_cfg.border_color.as_deref()
-                .or(sdefaults.and_then(|sd| sd.border_color.as_deref()));
-            // Numeric fields follow the -1 = disabled rule: only an
-            // enabled value (>= 0) overrides the defaults.
-            let bw_val = (if own_border { config::style_num(section_cfg.border_width) } else { None })
-                .or(sdefaults.and_then(|sd| config::style_num(sd.border_width)))
-                .unwrap_or(0);
-            let br_val = (if own_border { config::style_num(section_cfg.border_radius) } else { None })
-                .or(sdefaults.and_then(|sd| config::style_num(sd.border_radius)))
-                .unwrap_or(0);
-            let bt_str = (if own_border { section_cfg.border_type.as_deref() } else { None })
-                .or(sdefaults.and_then(|sd| sd.border_type.as_deref()))
-                .unwrap_or("full");
-
-            SectionStyle {
-                name: section_cfg.name.clone(),
-                layout: section_cfg.layout.as_ref().map(|s| s.to_string()).unwrap_or("horizontal".to_string()),
-                bg_color: resolve_color(
-                    bg_str.and_then(|s| config::parse_color(s).ok()),
-                    default_bg,
-                ),
-                text_color: section_text_color,
-                // Title = section text colour at 80% alpha (same chain).
-                title_color: section_text_color.scale_alpha(0.8),
-                border_color: bc_str.and_then(|s| config::parse_color(s).ok()),
-                border_width: bw_val as u16,
-                border_radius: br_val as u16,
-                border_type: bt_str.to_string(),
-                // Roadmap M3: the edge rule is a layout hint coming from
-                // the defaults only (a section's own border group
-                // doesn't carry it).
-                touch: if sdefaults
-                    .and_then(|sd| sd.respect_screen_edges)
-                    .unwrap_or(false)
-                {
-                    section_touch(cfg, section_idx, cfg.panel.sections.len())
-                } else {
-                    [false; 4]
-                },
-                sensors,
-            }
-        })
-        .collect()
-}
-
-/// Re-resolve every colour chain: the config (reload) or the runtime
-/// wallpaper palette moved, and both feed the same precedence.
-fn restyle(panel: &mut Panel) {
-    panel.styles = resolve_styles(&panel.config, panel.palette.as_ref());
-}
 
 /// A solid bar widget used to compose partial sensor borders.
 pub(crate) fn border_bar(color: Color, width: Length, height: Length) -> Element<'static, Message> {
@@ -2043,54 +1743,8 @@ pub(crate) static BAR_ID: std::sync::OnceLock<iced::window::Id> = std::sync::Onc
 pub(crate) static FONT_NAMES: std::sync::Mutex<Vec<(&'static str, String)>> =
     std::sync::Mutex::new(Vec::new());
 
-/// The `'static` family name of `name` (roadmap M2): one leak per
-/// distinct family, so `Font::with_name` can take it repeatedly.
-pub(crate) fn family_name_static(name: &str) -> &'static str {
-    let mut names = FONT_NAMES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some((leaked, _)) = names.iter().find(|(_, original)| original == name) {
-        return *leaked;
-    }
-    let leaked = Box::leak(name.to_string().into_boxed_str());
-    names.push((leaked, name.to_string()));
-    leaked
-}
 
-/// The panel font exactly as configured: family from `panel.font` (default
-/// [`DEFAULT_FONT`]) and the `panel.bold` flag as the weight (roadmap M2).
-/// Single source for every bar text and for the M5 width measurement.
-pub(crate) fn panel_font(config: &config::Config) -> Font {
-    let weight = if config.panel.bold.unwrap_or(false) {
-        iced::font::Weight::Bold
-    } else {
-        iced::font::Weight::Normal
-    };
-    Font {
-        weight,
-        ..Font::with_name(family_name_static(
-            config.panel.font.as_deref().unwrap_or(DEFAULT_FONT),
-        ))
-    }
-}
 
-/// The font of the sensors' value texts: `panel.value_font` when set
-/// (a monospaced family keeps the digits one width wide, so the
-/// values never jitter), the panel font otherwise — same weight.
-pub(crate) fn value_font(config: &config::Config) -> Font {
-    let weight = if config.panel.bold.unwrap_or(false) {
-        iced::font::Weight::Bold
-    } else {
-        iced::font::Weight::Normal
-    };
-    match config.panel.value_font.as_deref() {
-        Some(name) => Font {
-            weight,
-            ..Font::with_name(family_name_static(name))
-        },
-        None => panel_font(config),
-    }
-}
 
 fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> {
     // Side windows render their own trees; only bar calls feed BAR_ID.
@@ -2513,16 +2167,6 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
 
 // ── positioning helpers ─────────────────────────────────────────────
 
-/// Panel thickness on the cross axis, in pixels: `panel.thickness` from the
-/// config (default 32px, minimum 1px). Single source of truth for the surface
-/// size and for the exclusive zone hyprland reserves.
-pub(crate) fn panel_thickness(config: &config::Config) -> u32 {
-    config
-        .panel
-        .thickness
-        .unwrap_or(config::DEFAULT_HEIGHT)
-        .max(1)
-}
 
 /// Recompute `tray::icon_target` from the built sections (every tick and on
 /// every reload): the smallest fit across all tray sensors wins, so one icon
@@ -2594,73 +2238,6 @@ fn refresh_tray_and_notif(panel: &mut Panel) {
     }
 }
 
-/// Panel size (as the LayerSurface requests it).
-///
-/// The surface matches the screen on the axis *perpendicular* to the panel
-/// orientation, and matches the panel's own thickness on the axis it
-/// extends along:
-///
-/// * horizontal panel -> `screen_width  x thickness`
-/// * vertical panel   -> `thickness x screen_height`
-///
-/// `thickness` comes from `panel.thickness` in the config (default 32px).
-pub(crate) fn panel_size(config: &config::Config, screen_width: u32, screen_height: u32) -> iced_exwlshell::settings::LayerSize {
-    let layout = config
-        .panel
-        .section_layout
-        .as_ref()
-        .map(|s| s.as_str())
-        .unwrap_or("horizontal");
-    let vertical = layout == "vertical";
-    let thickness = panel_thickness(config);
-
-    let (width, height) = if vertical {
-        (iced_exwlshell::settings::Extent::px(thickness), iced_exwlshell::settings::Extent::px(screen_height))
-    } else {
-        (iced_exwlshell::settings::Extent::px(screen_width), iced_exwlshell::settings::Extent::px(thickness))
-    };
-
-    iced_exwlshell::settings::LayerSize { width, height }
-}
-
-/// Anchor set for the surface.
-///
-/// The surface is pinned to the screen edge on the axis it extends along.
-/// `align` is handled inside the surface by iced (the inner panel is aligned
-/// to left/center/right or top/center/bottom), so the anchor only needs the
-/// single edge that sticks the panel to the screen border, which comes from
-/// `panel.anchor`:
-///
-/// * horizontal, top    -> `Top`
-/// * horizontal, bottom -> `Bottom`
-/// * vertical,   left   -> `Left`
-/// * vertical,   right  -> `Right`
-pub(crate) fn panel_anchor(config: &config::Config) -> Anchor {
-    let vertical = config
-        .panel
-        .section_layout
-        .as_ref()
-        .map(|s| s.as_str())
-        .unwrap_or("horizontal") == "vertical";
-
-    // Edge from `anchor` (default: top for horizontal, left for vertical);
-    // `align` positions the panel INSIDE the surface, it does not pick the
-    // edge — reading it here ignored `panel.anchor` completely.
-    let anchor = config.panel.anchor.as_deref().unwrap_or(if vertical { "left" } else { "top" });
-
-    if vertical {
-        match anchor {
-            "bottom" => Anchor::Bottom,
-            "right" => Anchor::Right,
-            _ => Anchor::Left,
-        }
-    } else {
-        match anchor {
-            "bottom" => Anchor::Bottom,
-            _ => Anchor::Top,
-        }
-    }
-}
 
 
 
@@ -2668,56 +2245,8 @@ pub(crate) fn panel_anchor(config: &config::Config) -> Anchor {
 
 
 
-/// Which sides `[top, right, bottom, left]` of the section at `idx` sit
-/// flush on a screen edge (roadmap M3): the bar's anchored side touches for
-/// every section (the sections span the full thickness and the surface has
-/// no root padding); on the length axis the flush ends follow `align` —
-/// `fill` keeps the first/last section at the panel ends (both flush when a
-/// single section fills the row), `left`/`top` parks only the first one
-/// there, `right`/`bottom` only the last, `center` none.
-pub(crate) fn section_touch(config: &config::Config, idx: usize, count: usize) -> [bool; 4] {
-    let vertical = config.panel.section_layout.as_deref() == Some("vertical");
-    let anchor = panel_anchor(config);
-    let mut touch = [
-        anchor.contains(Anchor::Top),
-        anchor.contains(Anchor::Right),
-        anchor.contains(Anchor::Bottom),
-        anchor.contains(Anchor::Left),
-    ];
-    let align = config.panel.align.as_deref().unwrap_or("center");
-    let at_start = if vertical { align == "top" } else { align == "left" };
-    let at_end = if vertical { align == "bottom" } else { align == "right" };
-    let (start, end) = if align == "fill" {
-        (idx == 0, idx + 1 == count)
-    } else if at_start {
-        (idx == 0, false)
-    } else if at_end {
-        (false, idx + 1 == count)
-    } else {
-        (false, false)
-    };
-    if vertical {
-        touch[0] |= start;
-        touch[2] |= end;
-    } else {
-        touch[3] |= start;
-        touch[1] |= end;
-    }
-    touch
-}
 
-/// Border radius per corner for roadmap M3: `touch = [top, right, bottom,
-/// left]`; a corner renders square when **either** of its two sides is flush
-/// with a screen edge, rounded to `radius` otherwise.
-pub(crate) fn corner_radius(touch: [bool; 4], radius: f32) -> iced::border::Radius {
-    let corner = |flush: bool| if flush { 0.0 } else { radius };
-    iced::border::Radius {
-        top_left: corner(touch[0] || touch[3]),
-        top_right: corner(touch[0] || touch[1]),
-        bottom_right: corner(touch[2] || touch[1]),
-        bottom_left: corner(touch[2] || touch[3]),
-    }
-}
+
 
 // ── popup window (F3) ───────────────────────────────────────────────
 
@@ -2969,23 +2498,6 @@ fn hover_sync(panel: &mut Panel, section: usize, sensor: usize, hovered: bool) -
 
 
 
-/// Output-space rect `(x0, y0, x1, y1)` of a surface placed by
-/// `menu_placement`: the anchored side starts at its margin, the
-/// flipped side's margin pins the far edge to the output.
-pub(crate) fn placement_rect(anchor: Anchor, margin: &Margin, w: u32, h: u32, sw: i32, sh: i32) -> (i32, i32, i32, i32) {
-    let (w, h) = (w as i32, h as i32);
-    let (x0, x1) = if anchor.contains(Anchor::Left) {
-        (margin.left, margin.left + w)
-    } else {
-        (sw - margin.right - w, sw - margin.right)
-    };
-    let (y0, y1) = if anchor.contains(Anchor::Top) {
-        (margin.top, margin.top + h)
-    } else {
-        (sh - margin.bottom - h, sh - margin.bottom)
-    };
-    (x0, y0, x1, y1)
-}
 
 
 
@@ -3247,8 +2759,8 @@ fn parse_config_arg() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        config, corner_radius, focused_output_in, icons_theme, monitor_names_json, palette,
-        panel_background, popup_card_h, popup_style, section_touch, PopupStyle,
+        config, focused_output_in, icons_theme, monitor_names_json, palette, popup_card_h,
+        popup_style, PopupStyle,
     };
 
     /// The default popup style must keep the F3 geometry exactly (84px
@@ -3268,43 +2780,7 @@ mod tests {
 
 
 
-    /// Touching sides `[top, right, bottom, left]` (roadmap M3): the bar's
-    /// anchored side always touches; on the length axis `fill` flushes the
-    /// first/last section (a single one on both ends), `center` none, and a
-    /// vertical bar parked at the top gives its first section the top side.
-    #[test]
-    fn section_touch_follows_anchor_and_align() {
-        let mut cfg = crate::config::default_config(); // horizontal, top, center
-        assert_eq!(section_touch(&cfg, 0, 3), [true, false, false, false]);
-        assert_eq!(section_touch(&cfg, 2, 3), [true, false, false, false]);
 
-        cfg.panel.align = Some("fill".to_string());
-        assert_eq!(section_touch(&cfg, 0, 2), [true, false, false, true]);
-        assert_eq!(section_touch(&cfg, 1, 2), [true, true, false, false]);
-        assert_eq!(section_touch(&cfg, 0, 1), [true, true, false, true]);
-
-        cfg.panel.section_layout = Some("vertical".to_string());
-        cfg.panel.align = Some("top".to_string());
-        assert_eq!(section_touch(&cfg, 0, 2), [true, false, false, true]);
-        assert_eq!(section_touch(&cfg, 1, 2), [false, false, false, true]);
-    }
-
-    /// A corner squares when either of its sides touches (roadmap M3): a
-    /// top-anchored row's first section keeps only the bottom-right rounding,
-    /// and a section touching nothing keeps the pre-M3 look on all corners.
-    #[test]
-    fn corner_radius_squares_only_corners_by_touching_sides() {
-        let r = corner_radius([true, false, false, true], 12.0);
-        assert_eq!(r.top_left, 0.0); // top AND left touch
-        assert_eq!(r.top_right, 0.0); // top touches (right does not)
-        assert_eq!(r.bottom_left, 0.0); // left touches (bottom does not)
-        assert_eq!(r.bottom_right, 12.0); // neither side touches
-        let none = corner_radius([false; 4], 12.0);
-        assert_eq!(
-            (none.top_left, none.top_right, none.bottom_right, none.bottom_left),
-            (12.0, 12.0, 12.0, 12.0)
-        );
-    }
 
     /// Roadmap N1 gate: no declared icon = no theme, even with
     /// `panel.icon_theme` set — the icon machinery stays dormant. One
@@ -3407,40 +2883,5 @@ mod tests {
         assert_eq!(styled.text, config::parse_color("#d2d2e0").unwrap());
     }
 
-    /// The panel background follows the active palette's base tone,
-    /// keeping the configured colour's transparency — and the configured
-    /// colour itself when no palette is active.
-    #[test]
-    fn panel_background_follows_the_palette() {
-        let opaque: config::Config = serde_json::from_str(
-            r##"{"panel":{"sections":[],"default_bg_color":"#000000ff"}}"##,
-        )
-        .unwrap();
-        let pal = palette::Palette {
-            bg: "#481919".to_string(),
-            card: "#481919".to_string(),
-            card_hover: "#8a3a3a".to_string(),
-            text: "#e0d2d2".to_string(),
-            text_hover: "#f6f4f4".to_string(),
-        };
-        assert_eq!(
-            panel_background(&opaque, Some(&pal)),
-            config::parse_color("#481919").unwrap(),
-            "an opaque configured bar renders the palette's hue opaque"
-        );
-        assert_eq!(
-            panel_background(&opaque, None),
-            config::parse_color("#000000ff").unwrap()
-        );
-        let clear: config::Config = serde_json::from_str(
-            r##"{"panel":{"sections":[],"default_bg_color":"#00000000"}}"##,
-        )
-        .unwrap();
-        assert_eq!(
-            panel_background(&clear, Some(&pal)),
-            config::parse_color("#48191900").unwrap(),
-            "a transparent configured bar stays see-through in the hue"
-        );
-    }
 
 }
