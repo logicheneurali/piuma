@@ -56,23 +56,23 @@ use icons::SECTION_CONTENT_PAD;
 /// Startup config, handed to the first window factory call and to any
 /// later surface: written once before the threads start, read from any
 /// thread afterwards (`OnceLock` keeps that sound without `unsafe`).
-static CONFIG: std::sync::OnceLock<config::Config> = std::sync::OnceLock::new();
+pub(crate) static CONFIG: std::sync::OnceLock<config::Config> = std::sync::OnceLock::new();
 /// The config file watched for hot reloads (string for the log lines);
 /// also written once at startup.
-static CONFIG_PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-static mut PANEL_SHOULD_CLOSE: bool = false;
-static mut SCREEN_WIDTH: u32 = 1920;
-static mut SCREEN_HEIGHT: u32 = 1080;
+pub(crate) static CONFIG_PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+pub(crate) static mut PANEL_SHOULD_CLOSE: bool = false;
+pub(crate) static mut SCREEN_WIDTH: u32 = 1920;
+pub(crate) static mut SCREEN_HEIGHT: u32 = 1080;
 
 // ── colours / defaults ────────────────────────────────────────────
 
-const DEFAULT_FONT: &str = "Noto Sans";
-const DEFAULT_FONT_SIZE: u32 = 14;
-const DEFAULT_BG_COLOR: Color = Color::from_rgba(0.06, 0.06, 0.08, 0.85);
-const DEFAULT_TEXT_COLOR: Color = Color::from_rgb(0.88, 0.88, 0.94);
+pub(crate) const DEFAULT_FONT: &str = "Noto Sans";
+pub(crate) const DEFAULT_FONT_SIZE: u32 = 14;
+pub(crate) const DEFAULT_BG_COLOR: Color = Color::from_rgba(0.06, 0.06, 0.08, 0.85);
+pub(crate) const DEFAULT_TEXT_COLOR: Color = Color::from_rgb(0.88, 0.88, 0.94);
 
 /// Internal action identifiers.
-const ACTION_CLOSE_PANEL: &str = "close_panel";
+pub(crate) const ACTION_CLOSE_PANEL: &str = "close_panel";
 
 // ── popup card geometry (F3) ────────────────────────────────────────
 // The popup surface is sized to the stack exactly (cards × height +
@@ -80,142 +80,142 @@ const ACTION_CLOSE_PANEL: &str = "close_panel";
 // there reach the window underneath with no input-region handling.
 // The card height is style-derived (`popup_card_h`); with the default
 // style (12px font, 12px padding) it is exactly 84px.
-const POPUP_MAX_CARDS: usize = 5;
-const POPUP_WIDTH: u32 = 360;
-const POPUP_CARD_GAP: u32 = 8;
+pub(crate) const POPUP_MAX_CARDS: usize = 5;
+pub(crate) const POPUP_WIDTH: u32 = 360;
+pub(crate) const POPUP_CARD_GAP: u32 = 8;
 /// Gap between the screen edges and the popup corner.
-const POPUP_MARGIN: i32 = 8;
+pub(crate) const POPUP_MARGIN: i32 = 8;
 
 // ── sensor graph popup geometry (roadmap2 #11) ──────────────────────
 // One popup at a time, on the sensor under the cursor: fixed size, the
 // surface ends where the box ends (no input-region games — the layout
 // below knows nothing of it, the popup is its own window).
-const GRAPH_POPUP_W: u32 = 260;
-const GRAPH_POPUP_H: u32 = 140;
+pub(crate) const GRAPH_POPUP_W: u32 = 260;
+pub(crate) const GRAPH_POPUP_H: u32 = 140;
 /// Padding around the connector's bounding box: its surface is the
 /// box plus this on every side (the end dots must not clip).
-const GRAPH_LINK_PAD: i32 = 4;
+pub(crate) const GRAPH_LINK_PAD: i32 = 4;
 /// Content geometry inside the popup: a fixed header box and gap, so
 /// the average label and the canvas share one exact coordinate system
 /// (the label sits on the guide line the draw pass computes).
-const GRAPH_HEADER_H: u32 = 20;
-const GRAPH_SPACING: u32 = 6;
+pub(crate) const GRAPH_HEADER_H: u32 = 20;
+pub(crate) const GRAPH_SPACING: u32 = 6;
 /// Grace ticks an open graph popup gets once its sensor and its
 /// surface both lost the cursor (≈2 s at the 1 Hz tick): the sensor's
 /// leave can act on stale coordinates and the widget's exit can be
 /// missed, so the reap is the backstop that cannot hang.
-const GRAPH_ABANDON_GRACE: u8 = 2;
+pub(crate) const GRAPH_ABANDON_GRACE: u8 = 2;
 /// Alpha of the tinted plate behind the average label: opaque enough
 /// to hold the text where it crosses the trend line, translucent
 /// enough to keep the guide visible through it.
-const LABEL_BG_ALPHA: f32 = 0.7;
+pub(crate) const LABEL_BG_ALPHA: f32 = 0.7;
 /// The plate's padding around the average label (v, h).
-const LABEL_PAD_V: f32 = 1.0;
-const LABEL_PAD_H: f32 = 4.0;
+pub(crate) const LABEL_PAD_V: f32 = 1.0;
+pub(crate) const LABEL_PAD_H: f32 = 4.0;
 
 // ── calendar popup geometry (the `calendar` sensor) ────────────────
 /// Grace ticks the calendar popup gets after the cursor has left both
 /// its sensor and its surface (1 tick = 1 s at the 1 Hz tick): the
 /// spec asks for three seconds before it disappears.
-const CALENDAR_ABANDON_GRACE: u8 = 3;
+pub(crate) const CALENDAR_ABANDON_GRACE: u8 = 3;
 /// Horizontal padding inside one day/label cell, either side.
-const CALENDAR_CELL_PAD: u32 = 6;
+pub(crate) const CALENDAR_CELL_PAD: u32 = 6;
 
 // ── tray menu geometry ──────────────────────────────────────────────
 // One row per entry, sized exactly (`menu_row_h` × count + 2× pad, see
 // `menu_size`): like the popup, the surface ends where the list ends,
 // so a stray click below it reaches the window underneath.
 /// Padding around the entry list (all four sides).
-const MENU_PAD: u32 = 6;
+pub(crate) const MENU_PAD: u32 = 6;
 /// Distance between a tooltip and the widget it describes (icons and
 /// tray items): enough to read it as attached, never on the widget.
-const TOOLTIP_GAP: f32 = 8.0;
+pub(crate) const TOOLTIP_GAP: f32 = 8.0;
 /// Indent per submenu level (rows and the width estimate agree on it).
-const MENU_INDENT: u32 = 14;
+pub(crate) const MENU_INDENT: u32 = 14;
 /// Width bounds: a one-item menu stays grabbable, a long label does
 /// not take half the screen (it gets clipped instead).
-const MENU_MIN_W: u32 = 120;
-const MENU_MAX_W: u32 = 420;
+pub(crate) const MENU_MIN_W: u32 = 120;
+pub(crate) const MENU_MAX_W: u32 = 420;
 
 /// The notification list popup (the sensor's click): entries in the
 /// snapshot, rows shown at once (the wheel scrolls the rest) and the
 /// width cap for the measured rows.
-const NOTIF_LIST_MAX: usize = 30;
-const NOTIF_LIST_ROWS: usize = 8;
-const NOTIF_LIST_W_MAX: u32 = 460;
+pub(crate) const NOTIF_LIST_MAX: usize = 30;
+pub(crate) const NOTIF_LIST_ROWS: usize = 8;
+pub(crate) const NOTIF_LIST_W_MAX: u32 = 460;
 
 // ── model ───────────────────────────────────────────────────────────
 
 #[derive(Clone)]
-struct SensorValue {
-    name: String,
-    description: String,
-    value: String,
-    text_color: Option<iced::Color>,
+pub(crate) struct SensorValue {
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) value: String,
+    pub(crate) text_color: Option<iced::Color>,
     /// Threshold colour rules (config `color_rules`) parsed to colours
     /// and sorted ascending by `min`: the view tints the value with
     /// the highest rule the displayed reading reaches.
-    color_rules: Vec<(f32, Color)>,
-    bg_color: Option<Color>,
-    text_color_hover: Option<iced::Color>,
-    bg_color_hover: Option<Color>,
-    border_color: Option<Color>,
-    border_width: u16,
-    border_radius: u16,
+    pub(crate) color_rules: Vec<(f32, Color)>,
+    pub(crate) bg_color: Option<Color>,
+    pub(crate) text_color_hover: Option<iced::Color>,
+    pub(crate) bg_color_hover: Option<Color>,
+    pub(crate) border_color: Option<Color>,
+    pub(crate) border_width: u16,
+    pub(crate) border_radius: u16,
     /// Border drawing style: `full`, `corners`, `underline`, `upperline`,
     /// `left` or `right`.
-    border_type: String,
-    padding: u16,
-    action: Option<String>,
+    pub(crate) border_type: String,
+    pub(crate) padding: u16,
+    pub(crate) action: Option<String>,
     /// Tray icons when the source is a `tray` sensor (`None` otherwise);
     /// the icons themselves live in `tray.rs`.
-    tray: Option<Vec<tray::TrayIcon>>,
+    pub(crate) tray: Option<Vec<tray::TrayIcon>>,
     /// Workspace buttons when the source is a `workspace` sensor (`None`
     /// otherwise), built by `workspace::buttons()` (roadmap2 #4).
-    workspaces: Option<Vec<workspace::WorkspaceButton>>,
+    pub(crate) workspaces: Option<Vec<workspace::WorkspaceButton>>,
     /// Taskbar slots when the source is a `taskbar` sensor (`None`
     /// otherwise), one per open window, built per tick by
     /// `windows::task_icons()`.
-    taskbar: Option<Vec<windows::TaskIcon>>,
+    pub(crate) taskbar: Option<Vec<windows::TaskIcon>>,
     /// Whether this sensor shows the notification feed: its text
     /// refreshes from the shared state alone when a notification
     /// changes (`refresh_tray_and_notif`), without re-reading every
     /// other sensor.
-    is_notifications: bool,
+    pub(crate) is_notifications: bool,
     /// Pinned pixel width of the value text (roadmap M5): net rate sensors
     /// keep a stable box while the value moves inside its unit, and the pin
     /// follows the value across ×1024 unit crossings (same tick), so it is
     /// never narrower than the content.
-    fixed_width: Option<u16>,
+    pub(crate) fixed_width: Option<u16>,
     /// Resolved theme file for the sensor's `icon` name (roadmap N1);
     /// `None` = no icon configured or the theme has no such icon.
-    icon: Option<PathBuf>,
+    pub(crate) icon: Option<PathBuf>,
     /// Edge (px) of `icon`: the sensor row's real height
     /// (`icons::row_icon_target`), so the icon fills its box like the
     /// tray's do. The resolve caches by this size and the widget draws
     /// at it — both must stay the same number.
-    icon_size: u16,
+    pub(crate) icon_size: u16,
 }
 
 /// Rendered section data.
 #[derive(Clone)]
-struct SectionData {
-    name: String,
-    layout: String,       // "horizontal" or "vertical"
-    bg_color: Color,
-    text_color: Color,
-    title_color: Color,
+pub(crate) struct SectionData {
+    pub(crate) name: String,
+    pub(crate) layout: String,       // "horizontal" or "vertical"
+    pub(crate) bg_color: Color,
+    pub(crate) text_color: Color,
+    pub(crate) title_color: Color,
     /// Resolved border (section > section_defaults): drawn by `styled_box`
     /// with the same rule as the sensors (color + positive width).
-    border_color: Option<Color>,
-    border_width: u16,
-    border_radius: u16,
-    border_type: String,
+    pub(crate) border_color: Option<Color>,
+    pub(crate) border_width: u16,
+    pub(crate) border_radius: u16,
+    pub(crate) border_type: String,
     /// Which sides `[top, right, bottom, left]` sit flush on a screen edge
     /// with `section_defaults.respect_screen_edges` active (roadmap M3):
     /// those sides render square instead of rounded.
-    touch: [bool; 4],
-    sensors: Vec<SensorValue>,
+    pub(crate) touch: [bool; 4],
+    pub(crate) sensors: Vec<SensorValue>,
 }
 
 /// A sensor's resolved style: every colour and shape field the view
@@ -223,176 +223,176 @@ struct SectionData {
 /// wallpaper palette > defaults) resolved once per config load or
 /// palette change instead of once per sensor per second.
 #[derive(Clone)]
-struct SensorStyle {
+pub(crate) struct SensorStyle {
     /// Display name — empty for the sensors that never show it
     /// (`static_text`, tray, workspace buttons).
-    name: String,
-    description: String,
-    action: Option<String>,
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) action: Option<String>,
     /// `true` for the notification feed sensor: its text refreshes
     /// from the shared state alone (`refresh_tray_and_notif`).
-    is_notifications: bool,
-    padding: u16,
-    text_color: Color,
-    bg_color: Option<Color>,
-    text_color_hover: Option<Color>,
-    bg_color_hover: Option<Color>,
-    border_color: Option<Color>,
-    border_width: u16,
-    border_radius: u16,
+    pub(crate) is_notifications: bool,
+    pub(crate) padding: u16,
+    pub(crate) text_color: Color,
+    pub(crate) bg_color: Option<Color>,
+    pub(crate) text_color_hover: Option<Color>,
+    pub(crate) bg_color_hover: Option<Color>,
+    pub(crate) border_color: Option<Color>,
+    pub(crate) border_width: u16,
+    pub(crate) border_radius: u16,
     /// `full`, `corners`, `underline`, `upperline`, `left` or `right`.
-    border_type: String,
+    pub(crate) border_type: String,
     /// Threshold colours sorted ascending: the view picks the highest
     /// rule the reading reaches.
-    color_rules: Vec<(f32, Color)>,
+    pub(crate) color_rules: Vec<(f32, Color)>,
     /// Theme file for the sensor's icon (`None` = none configured).
-    icon: Option<PathBuf>,
-    icon_size: u16,
+    pub(crate) icon: Option<PathBuf>,
+    pub(crate) icon_size: u16,
 }
 
 /// A section's resolved style (same chain as [`SensorStyle`]): the
 /// box fields of `SectionData` plus the per-sensor styles — all of it
 /// config-driven, so the tick only pairs readings with it.
 #[derive(Clone)]
-struct SectionStyle {
-    name: String,
-    layout: String,
-    bg_color: Color,
-    text_color: Color,
-    title_color: Color,
-    border_color: Option<Color>,
-    border_width: u16,
-    border_radius: u16,
-    border_type: String,
-    touch: [bool; 4],
-    sensors: Vec<SensorStyle>,
+pub(crate) struct SectionStyle {
+    pub(crate) name: String,
+    pub(crate) layout: String,
+    pub(crate) bg_color: Color,
+    pub(crate) text_color: Color,
+    pub(crate) title_color: Color,
+    pub(crate) border_color: Option<Color>,
+    pub(crate) border_width: u16,
+    pub(crate) border_radius: u16,
+    pub(crate) border_type: String,
+    pub(crate) touch: [bool; 4],
+    pub(crate) sensors: Vec<SensorStyle>,
 }
 
 #[derive(Clone)]
-struct Panel {
-    config: config::Config,
-    sections: Vec<SectionData>,
+pub(crate) struct Panel {
+    pub(crate) config: config::Config,
+    pub(crate) sections: Vec<SectionData>,
     /// Every section's and sensor's resolved style (`resolve_styles`),
     /// rebuilt on config reload and on wallpaper-palette change — the
     /// tick pairs readings with it instead of re-resolving colours.
-    styles: Vec<SectionStyle>,
+    pub(crate) styles: Vec<SectionStyle>,
     /// True while the tick's data pass runs on a worker thread: one
     /// read at a time, so replies can never arrive out of order.
-    read_pending: bool,
+    pub(crate) read_pending: bool,
     /// Bumped on every config reload: a reply built against an older
     /// config no longer lines up with the sensor list and is dropped.
-    cfg_gen: u64,
+    pub(crate) cfg_gen: u64,
     /// Set when geometry or config moved in the tick that spawned the
     /// current read; consumed with the fresh sections, so the popup
     /// re-anchors on them (`apply_read` → `sync_popup`).
-    popup_resync: bool,
+    pub(crate) popup_resync: bool,
     /// Index into `sections[s]` and `sections[s].sensors[sensor]` under the cursor.
-    hovered: Option<(usize, usize)>,
+    pub(crate) hovered: Option<(usize, usize)>,
     /// State (mtime, len) of the last config read attempt: unchanged files
     /// are skipped on the next tick instead of being re-read and parsed.
-    last_reload: Option<(SystemTime, u64)>,
+    pub(crate) last_reload: Option<(SystemTime, u64)>,
     /// Geometry currently applied to the layer surface; compared after a
     /// reload to decide whether a runtime `LayoutChange` is needed.
-    last_size: LayerSize,
-    last_anchor: Anchor,
+    pub(crate) last_size: LayerSize,
+    pub(crate) last_anchor: Anchor,
     /// Exclusive zone currently applied (equals the panel thickness, the
     /// space hyprland subtracts for windows); re-sent when it changes.
-    last_exclusive_zone: i32,
+    pub(crate) last_exclusive_zone: i32,
     /// Last known cursor position, window-relative: feeds the screen-coordinate
     /// hints of tray activation (see `tray::hint_point`).
-    last_cursor: Option<(f32, f32)>,
+    pub(crate) last_cursor: Option<(f32, f32)>,
     /// Popup stack window (F3): its id while open, `None` while hidden.
-    popup: Option<iced::window::Id>,
+    pub(crate) popup: Option<iced::window::Id>,
     /// Card count the popup surface is currently sized for.
-    popup_cards: usize,
+    pub(crate) popup_cards: usize,
     /// Card under the cursor (`hover_*` style fields), `None` outside.
-    popup_hover: Option<u32>,
+    pub(crate) popup_hover: Option<u32>,
     /// Open tray DBusMenu window: id + the menu it renders, `None`
     /// while hidden (see `dbusmenu`).
-    tray_menu: Option<(iced::window::Id, TrayMenu)>,
+    pub(crate) tray_menu: Option<(iced::window::Id, TrayMenu)>,
     /// Menu row under the cursor (`TrayMenuEnter`/`TrayMenuLeave`),
     /// `None` outside every row.
-    tray_menu_hover: Option<i32>,
+    pub(crate) tray_menu_hover: Option<i32>,
     /// Bumped by every tray press: a `TrayMenuLoaded` carrying an older
     /// generation belongs to a superseded press and must not open.
-    tray_menu_gen: u64,
+    pub(crate) tray_menu_gen: u64,
     /// The notification history list popup (the notifications sensor's
     /// click): window id + the wheel scroll state.
-    notif_list: Option<(iced::window::Id, NotifList)>,
+    pub(crate) notif_list: Option<(iced::window::Id, NotifList)>,
     /// The taskbar's right-click menu: window id + the window it acts
     /// on.
-    taskbar_menu: Option<(iced::window::Id, TaskbarMenu)>,
+    pub(crate) taskbar_menu: Option<(iced::window::Id, TaskbarMenu)>,
     /// Workspace row under the cursor in the taskbar menu
     /// (`TaskbarMenuHover`), `None` outside every row.
-    taskbar_menu_hover: Option<u32>,
+    pub(crate) taskbar_menu_hover: Option<u32>,
     /// Address of the taskbar icon under the cursor (`None` = none):
     /// the row's hover fill.
-    taskbar_hover: Option<String>,
+    pub(crate) taskbar_hover: Option<String>,
     /// The tooltip window (taskbar or tray hover): window id + source
     /// and fitted text.
-    bar_tooltip: Option<(iced::window::Id, BarTooltip)>,
+    pub(crate) bar_tooltip: Option<(iced::window::Id, BarTooltip)>,
     /// Trend history for the `draw_graph` sensors' hover popup: one
     /// dense ring of samples per config, rebuilt on reload (see
     /// `graphs`).
-    graphs: graphs::History,
+    pub(crate) graphs: graphs::History,
     /// Open graph popup: its surface id, the sensor it draws and the
     /// output-space rect the hover guards compare the cursor with,
     /// `None` while hidden.
-    graph_popup: Option<GraphPopup>,
+    pub(crate) graph_popup: Option<GraphPopup>,
     /// The connector surface joining the graph popup to its sensor (see
     /// `sync_graph_link`): its id and the id of the popup it draws —
     /// `None` while hidden.
-    graph_link: Option<(iced::window::Id, iced::window::Id)>,
+    pub(crate) graph_link: Option<(iced::window::Id, iced::window::Id)>,
     /// Open calendar popup of a hovered `calendar` sensor: surface id,
     /// the sensor it belongs to, the shown month and its pointer/grace
     /// state, `None` while hidden.
-    calendar: Option<CalendarPopup>,
+    pub(crate) calendar: Option<CalendarPopup>,
     /// Wallpaper windows (roadmap2 #1): one background surface per
     /// active output, keyed by the compositor's output name; empty
     /// while the wallpaper is off.
-    wallpaper: Vec<(String, iced::window::Id)>,
+    pub(crate) wallpaper: Vec<(String, iced::window::Id)>,
     /// Colours derived from the wallpaper (`panel.wallpaper_palette`):
     /// applied over the configured defaults while present, dropped when
     /// the option or the wallpaper turns off. Runtime-only — never
     /// written back to the config file.
-    palette: Option<palette::Palette>,
+    pub(crate) palette: Option<palette::Palette>,
     /// The wallpaper file (path + mtime) the current palette was
     /// extracted from: the extraction re-runs only when this changes.
-    palette_key: Option<(String, SystemTime)>,
+    pub(crate) palette_key: Option<(String, SystemTime)>,
 }
 
 /// One open tray menu: which item it belongs to (the item's bus + path
 /// tell us when it dies), the menu object path events go to, and the
 /// flattened rows the view renders.
 #[derive(Clone)]
-struct TrayMenu {
-    bus: String,
-    path: String,
-    menu_path: String,
-    entries: Vec<dbusmenu::MenuEntry>,
+pub(crate) struct TrayMenu {
+    pub(crate) bus: String,
+    pub(crate) path: String,
+    pub(crate) menu_path: String,
+    pub(crate) entries: Vec<dbusmenu::MenuEntry>,
 }
 
 /// The open notification list popup (the notifications sensor's click):
 /// its window and the wheel scroll offset (whole rows from the newest).
 #[derive(Clone, Debug)]
-struct NotifList {
-    offset: u32,
+pub(crate) struct NotifList {
+    pub(crate) offset: u32,
 }
 
 /// The taskbar's right-click menu: which window the workspace rows
 /// move (the address, never an index — a tick may rebuild the icons
 /// while the menu is open).
 #[derive(Clone, Debug)]
-struct TaskbarMenu {
-    address: String,
+pub(crate) struct TaskbarMenu {
+    pub(crate) address: String,
 }
 
 /// The open bar tooltip window: its source (so a stale leave knows
 /// whether it still owns the surface) and the fitted text shown.
 #[derive(Clone, Debug)]
-struct BarTooltip {
-    id: String,
-    text: String,
+pub(crate) struct BarTooltip {
+    pub(crate) id: String,
+    pub(crate) text: String,
 }
 
 /// The open sensor-graph popup: which sensor's trend it draws and the
@@ -400,46 +400,46 @@ struct BarTooltip {
 /// moment, for the hover guards). `pointer_on_popup`/`missed` feed the
 /// tick's abandonment reap (see `popup_missed_tick`).
 #[derive(Clone)]
-struct GraphPopup {
-    id: iced::window::Id,
-    section: usize,
-    sensor: usize,
-    rect: (i32, i32, i32, i32),
+pub(crate) struct GraphPopup {
+    pub(crate) id: iced::window::Id,
+    pub(crate) section: usize,
+    pub(crate) sensor: usize,
+    pub(crate) rect: (i32, i32, i32, i32),
     /// Which output edge the popup anchors to: an anchored surface sits
     /// past the bar's reserved strip, so the real surface rect derives
     /// from `rect` + the anchor (see `popup_surface_rect`).
-    anchor: Anchor,
+    pub(crate) anchor: Anchor,
     /// The sensor box's on-screen rect in output space, as answered by
     /// `FindSensorRect`: the connector window is pinned to it.
-    sensor_rect: Option<(i32, i32, i32, i32)>,
+    pub(crate) sensor_rect: Option<(i32, i32, i32, i32)>,
     /// The cursor is on the popup's surface — set and cleared by the
     /// surface's own cursor events (position-checked both ways, plus
     /// the window's `CursorLeft`) and by the widget's exit. Never
     /// one-way: a single "seen" setter with only the widget's exit as
     /// a reset pins the popup open forever when that exit never fires
     /// (the very bug `31771e1` fixed on the calendar popup).
-    pointer_on_popup: bool,
+    pub(crate) pointer_on_popup: bool,
     /// Grace ticks spent without sensor and without pointer.
-    missed: u8,
+    pub(crate) missed: u8,
 }
 
 /// The calendar popup: which sensor's hover opened it, the month
 /// paging offset and the localized data fetched at open — plus the
 /// pointer/grace bookkeeping that decides when it disappears.
 #[derive(Clone)]
-struct CalendarPopup {
-    id: iced::window::Id,
-    section: usize,
-    sensor: usize,
+pub(crate) struct CalendarPopup {
+    pub(crate) id: iced::window::Id,
+    pub(crate) section: usize,
+    pub(crate) sensor: usize,
     /// Whole months between today's month and the shown one: the
     /// arrows page it, a close drops it (a reopen starts at today).
-    offset: i32,
+    pub(crate) offset: i32,
     /// Today (local): the highlight and the month the offset starts at.
-    today: (u16, u8, u8),
+    pub(crate) today: (u16, u8, u8),
     /// Monday-first weekday labels, fetched once at open.
-    weekdays: [String; 7],
+    pub(crate) weekdays: [String; 7],
     /// The header's "month year", re-fetched on every page change.
-    month_label: String,
+    pub(crate) month_label: String,
     /// The cursor is on the popup's surface — set and cleared by the
     /// surface's own cursor events (position-checked both ways, plus
     /// the window's `CursorLeft`) and by the open-time test against
@@ -447,22 +447,22 @@ struct CalendarPopup {
     /// widget's exit as a reset pins the popup open forever when that
     /// exit never fires (its enter can be missed: the surface maps
     /// under an already-moving cursor before the widget state exists).
-    pointer_on_popup: bool,
+    pub(crate) pointer_on_popup: bool,
     /// The surface's real output-space rect (the placement shifted by
     /// the anchors, `shifted_surface_rect`): the pointer checks compare
     /// against where the surface really is — a top bar pushes it down
     /// by the exclusive zone, so the intended rect contains the cursor
     /// while the surface does not.
-    rect: (i32, i32, i32, i32),
+    pub(crate) rect: (i32, i32, i32, i32),
     /// Grace ticks spent without sensor and without pointer.
-    missed: u8,
+    pub(crate) missed: u8,
 }
 
 // ── messages ────────────────────────────────────────────────────────
 
 #[to_layer_message(multi)]
 #[derive(Debug, Clone)]
-enum Message {
+pub(crate) enum Message {
     /// Marks a second edge: the tick handler reloads, polls and advances.
     Tick,
     /// The tick's data pass finished on a worker thread: the config
@@ -2062,13 +2062,13 @@ fn subscription(panel: &Panel) -> Subscription<Message> {
 /// in which the surfaces come up). `LayoutChange` and
 /// `ExclusiveZoneChange` carry it to keep targeting the bar once other
 /// surfaces are registered — the multi-surface runtime keys actions by id.
-static BAR_ID: std::sync::OnceLock<iced::window::Id> = std::sync::OnceLock::new();
+pub(crate) static BAR_ID: std::sync::OnceLock<iced::window::Id> = std::sync::OnceLock::new();
 
 /// Configured family names kept alive for [`Font::Name`]'s `'static`
 /// bound: a name is leaked the first time it is used and the same
 /// pointer is reused after, so reloads — even alternating between two
 /// fonts — never leak a fresh copy per change.
-static FONT_NAMES: std::sync::Mutex<Vec<(&'static str, String)>> =
+pub(crate) static FONT_NAMES: std::sync::Mutex<Vec<(&'static str, String)>> =
     std::sync::Mutex::new(Vec::new());
 
 /// The `'static` family name of `name` (roadmap M2): one leak per
@@ -3166,19 +3166,19 @@ fn corner_radius(touch: [bool; 4], radius: f32) -> iced::border::Radius {
 /// popup defaults for absent/invalid keys — white text on black, grey
 /// border (the bar's own colors are not inherited here).
 #[derive(Debug, PartialEq)]
-struct PopupStyle {
+pub(crate) struct PopupStyle {
     /// Base text size (body); the summary is +3 bold, the ✕ +2.
-    font_size: u32,
-    text: Color,
-    text_hover: Color,
-    bg: Color,
-    bg_hover: Color,
-    border: Color,
-    border_hover: Color,
-    border_width: u32,
-    border_radius: u32,
-    border_type: String,
-    padding: u32,
+    pub(crate) font_size: u32,
+    pub(crate) text: Color,
+    pub(crate) text_hover: Color,
+    pub(crate) bg: Color,
+    pub(crate) bg_hover: Color,
+    pub(crate) border: Color,
+    pub(crate) border_hover: Color,
+    pub(crate) border_width: u32,
+    pub(crate) border_radius: u32,
+    pub(crate) border_type: String,
+    pub(crate) padding: u32,
 }
 
 impl Default for PopupStyle {
@@ -3366,12 +3366,12 @@ fn sync_palette(panel: &mut Panel) -> Command<Message> {
 /// Last monitor list with its timestamp: outputs change rarely (hotplug),
 /// so the wallpaper sync — which asks every tick — gets a cached answer
 /// for `MONITORS_TTL` instead of spawning and parsing `hyprctl` at 1 Hz.
-static MONITORS: std::sync::Mutex<Option<(Instant, Vec<String>)>> = std::sync::Mutex::new(None);
+pub(crate) static MONITORS: std::sync::Mutex<Option<(Instant, Vec<String>)>> = std::sync::Mutex::new(None);
 
 /// Freshness window of [`MONITORS`]: long enough to make the per-tick
 /// spawn rare, short enough that a hotplugged output gets its wallpaper
 /// surface within seconds.
-const MONITORS_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+pub(crate) const MONITORS_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Names of the currently active outputs, from `hyprctl monitors -j` —
 /// best-effort, the same source the bar's geometry helpers use (cached,
