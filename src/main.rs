@@ -1900,6 +1900,9 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
             // Name and value side by side, separated by a small gap (the
             // colon separator was removed on request); an empty name (e.g.
             // static_text sensors) renders the value alone, with no gap.
+            // A vertical panel stacks the value UNDER the name instead:
+            // its width is there to spend, and one long line would leave
+            // the value stranded at the far right of a thick side panel.
             // Tray sensors skip the text row: `tray::row` builds their
             // icon row with clicks, wheel and tooltip included. The style
             // passed here drives the tooltip, which mirrors the sensor box;
@@ -1959,10 +1962,20 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
                 if let Some(path) = &s.icon {
                     row = row.push(icons::widget(path, s.icon_size as f32));
                 }
-                if !s.name.is_empty() {
-                    row = row.push(text(&s.name).color(text_color).size(font_size).font(font_obj));
+                if s.name.is_empty() {
+                    row = row.push(value_widget);
+                } else {
+                    let name_text = text(&s.name)
+                        .color(text_color)
+                        .size(font_size)
+                        .font(font_obj);
+                    if vertical {
+                        row = row.push(Column::new().push(name_text).push(value_widget).spacing(2));
+                    } else {
+                        row = row.push(name_text).push(value_widget);
+                    }
                 }
-                row.push(value_widget).into()
+                row.into()
             };
 
             let desc_str: String = s.description.clone();
