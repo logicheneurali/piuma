@@ -74,7 +74,20 @@ pub fn resolve(theme: &str, name: &str, size: u16) -> Option<PathBuf> {
     let found = freedesktop_icons::lookup(name)
         .with_size(size)
         .with_theme(theme)
-        .find();
+        // The crate does not walk the theme's `Inherits=` chain: hicolor
+        // is the spec's global fallback (and where app-specific icons
+        // like `vivaldi` live), so a miss retries there.
+        .find()
+        .or_else(|| {
+            (theme != "hicolor")
+                .then(|| {
+                    freedesktop_icons::lookup(name)
+                        .with_size(size)
+                        .with_theme("hicolor")
+                        .find()
+                })
+                .flatten()
+        });
     let mut cache = cache();
     let by_size = cache.entry(theme.to_string()).or_default();
     by_size.retain(|s, _| *s == size);

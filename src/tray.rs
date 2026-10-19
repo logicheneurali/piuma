@@ -30,8 +30,8 @@ use iced::futures::channel::mpsc::Sender;
 use iced::futures::channel::oneshot;
 use iced::futures::stream::StreamExt;
 use iced::widget::container::Style as ContainerStyle;
-use iced::widget::{container, image, text, MouseArea, Row};
-use iced::{Element, Length, Subscription};
+use iced::widget::{container, image, MouseArea, Row, text};
+use iced::{Alignment, Element, Length, Subscription};
 use iced_exwlshell::reexport::Anchor;
 use zbus::fdo::RequestNameFlags;
 use zbus::message::Header;
@@ -1094,7 +1094,9 @@ pub fn scroll_units(delta: iced::mouse::ScrollDelta) -> Option<(i32, bool)> {
 /// text counts the hidden rest); icons are vertically centred so art of
 /// different aspects sits on one mid-line.
 pub fn row<'a>(icons: &'a [TrayIcon], max: u16, font_size: u32) -> Element<'a, Message> {
-    let mut row = Row::new().spacing(f32::from(ROW_GAP));
+    let mut row = Row::new()
+        .spacing(f32::from(ROW_GAP))
+        .align_y(Alignment::Center);
     let mut shown = 0usize;
     for icon in icons.iter().take(usize::from(max)) {
         shown += 1;
