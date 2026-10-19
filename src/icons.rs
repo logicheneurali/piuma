@@ -162,15 +162,26 @@ pub fn row_icon_target(thickness: u32, title_extra: u32, padding: u32) -> u16 {
     thickness.saturating_sub(chrome).clamp(4, 48) as u16
 }
 
-/// How many icon slots of `slot` px fit in `available` px: the cap the
-/// taskbar and tray rows use, so their content can never paint over the
-/// neighbouring sensors (iced does not clip a Row that outgrows its
-/// box). At least one slot, so even a hairline bar shows the first icon.
-pub fn icon_capacity(available: u32, slot: u32) -> u16 {
+/// Icon edge (px) taken from the PANEL FONT as the reference — the text
+/// line the bar already draws (`font + 2`), clamped to a sane range:
+/// at least 18 for legibility, at most 48 so a huge font cannot take the
+/// row over. The sensor's cross-axis room (`row_icon_target`) stays a
+/// separate ceiling: tray and taskbar take the smaller of the two, so
+/// both rows show the same size wherever physics allows.
+pub fn font_icon_edge(font: u32) -> u16 {
+    (font + 2).clamp(18, 48) as u16
+}
+
+/// How many icon slots of `slot` px with `gap` px between them fit on
+/// one line of `available` px: the wrap width the tray and taskbar rows
+/// chunk on, so their flow turns to the next line inside the box (iced
+/// does not clip a Row that outgrows it). At least one slot — even a
+/// hairline box shows the first icon.
+pub fn icons_per_line(available: u32, slot: u32, gap: u32) -> u16 {
     if slot == 0 {
         return 1;
     }
-    (available / slot).clamp(1, u32::from(u16::MAX)) as u16
+    (available.saturating_add(gap) / slot).clamp(1, u32::from(u16::MAX)) as u16
 }
 
 #[cfg(test)]
@@ -230,14 +241,23 @@ mod tests {
         assert_eq!(stacked_title_extra("vertical", "Side", 14), 24);
     }
 
-    /// Whole slots only, never zero, saturated at `u16` — a bar too
-    /// narrow still shows the first icon.
+    /// Whole slots with their gaps, never zero, saturated at `u16`.
     #[test]
-    fn icon_capacity_fits_whole_slots() {
-        assert_eq!(icon_capacity(100, 52), 1);
-        assert_eq!(icon_capacity(104, 52), 2);
-        assert_eq!(icon_capacity(0, 52), 1);
-        assert_eq!(icon_capacity(100, 0), 1);
-        assert_eq!(icon_capacity(u32::MAX, 1), u16::MAX);
+    fn icons_per_line_fits_whole_slots() {
+        assert_eq!(icons_per_line(100, 52, 4), 2); // 2 slots + 1 gap = 100
+        assert_eq!(icons_per_line(99, 52, 4), 1); // 2 slots + gap would be 100
+        assert_eq!(icons_per_line(0, 52, 4), 1);
+        assert_eq!(icons_per_line(100, 0, 4), 1);
+        assert_eq!(icons_per_line(u32::MAX, 1, 0), u16::MAX);
+    }
+
+    /// The font's line height is the size reference, clamped to sane
+    /// bounds: small fonts take the legibility floor, big fonts the cap.
+    #[test]
+    fn font_icon_edge_follows_the_font() {
+        assert_eq!(font_icon_edge(12), 18);
+        assert_eq!(font_icon_edge(16), 18);
+        assert_eq!(font_icon_edge(24), 26);
+        assert_eq!(font_icon_edge(200), 48);
     }
 }

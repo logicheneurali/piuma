@@ -30,7 +30,7 @@ use iced::futures::channel::mpsc::Sender;
 use iced::futures::channel::oneshot;
 use iced::futures::stream::StreamExt;
 use iced::widget::container::Style as ContainerStyle;
-use iced::widget::{container, image, MouseArea, Row, text};
+use iced::widget::{Column, container, image, MouseArea, Row};
 use iced::{Alignment, Element, Length, Subscription};
 use iced_exwlshell::reexport::Anchor;
 use zbus::fdo::RequestNameFlags;
@@ -84,7 +84,7 @@ pub fn set_icon_target(size: u16) {
 }
 
 /// Gap the row puts between two icons — part of one slot's width.
-const ROW_GAP: u16 = 4;
+pub const ROW_GAP: u16 = 4;
 
 /// One icon's total width in the row: the icon plus the gap after it —
 /// the number `main` needs to cap the row to the sensor's room.
@@ -1090,85 +1090,88 @@ pub fn scroll_units(delta: iced::mouse::ScrollDelta) -> Option<(i32, bool)> {
 /// never an index that could go stale before the click lands.
 /// `style` is the sensor's own look; the tooltip reuses it via
 /// `crate::styled_box` (the 5px tooltip wrapper gap stays outside it).
-/// `max` caps the visible icons to what the sensor box holds (a "+N"
-/// text counts the hidden rest); icons are vertically centred so art of
-/// different aspects sits on one mid-line.
-pub fn row<'a>(icons: &'a [TrayIcon], max: u16, font_size: u32) -> Element<'a, Message> {
-    let mut row = Row::new()
-        .spacing(f32::from(ROW_GAP))
-        .align_y(Alignment::Center);
-    let mut shown = 0usize;
-    for icon in icons.iter().take(usize::from(max)) {
-        shown += 1;
-        let size = Length::Fixed(f32::from(icon_target()));
-        let art: Element<'a, Message> = match &icon.image {
-            TrayImage::File(p) if icon.image.is_svg() => {
-                iced::widget::svg(iced::widget::svg::Handle::from_path(p.clone()))
+/// `per_line` is the wrap width in icons (`icons::icons_per_line` over
+/// the box's room): the items flow horizontally and turn to the next
+/// line — every one visible and clickable, none capped away. Icons are
+/// vertically centred on their line so art of different aspects sits
+/// on one mid-line.
+pub fn row<'a>(icons: &'a [TrayIcon], per_line: u16) -> Element<'a, Message> {
+    let mut col = Column::new().spacing(f32::from(ROW_GAP));
+    for chunk in icons.chunks(usize::from(per_line)) {
+        let mut row = Row::new()
+            .spacing(f32::from(ROW_GAP))
+            .align_y(Alignment::Center);
+        for icon in chunk {
+            let size = Length::Fixed(f32::from(icon_target()));
+            let art: Element<'a, Message> = match &icon.image {
+                TrayImage::File(p) if icon.image.is_svg() => {
+                    iced::widget::svg(iced::widget::svg::Handle::from_path(p.clone()))
+                        .width(size)
+                        .height(size)
+                        .into()
+                }
+                TrayImage::File(p) => iced::widget::image(image::Handle::from_path(p.clone()))
                     .width(size)
                     .height(size)
+                    .into(),
+                TrayImage::Rgba(h) => {
+                    iced::widget::image(h.clone()).width(size).height(size).into()
+                }
+            };
+            // Spec: items in `NeedsAttention` must be emphasized — framed.
+            let framed: Element<'a, Message> = if icon.attention {
+                container(art)
+                    .padding(1)
+                    .style(move |_theme: &iced::Theme| {
+                        let mut style = ContainerStyle::default();
+                        style.border.color = ATTENTION_COLOR;
+                        style.border.width = 1.0;
+                        style.border.radius = 2.0.into();
+                        style
+                    })
                     .into()
-            }
-            TrayImage::File(p) => iced::widget::image(image::Handle::from_path(p.clone()))
-                .width(size)
-                .height(size)
-                .into(),
-            TrayImage::Rgba(h) => iced::widget::image(h.clone()).width(size).height(size).into(),
-        };
-        // Spec: items in `NeedsAttention` must be emphasized — framed.
-        let framed: Element<'a, Message> = if icon.attention {
-            container(art)
-                .padding(1)
-                .style(move |_theme: &iced::Theme| {
-                    let mut style = ContainerStyle::default();
-                    style.border.color = ATTENTION_COLOR;
-                    style.border.width = 1.0;
-                    style.border.radius = 2.0.into();
-                    style
+            } else {
+                art
+            };
+
+            let (bus, path) = (icon.bus.clone(), icon.path.clone());
+            // Hover opens the tooltip as its own window (like the
+            // taskbar's): the bar surface is one `thickness` tall, an
+            // in-widget overlay would only land on the bar itself. The id
+            // rides both messages, so a stale leave cannot close the next
+            // item's tooltip; an empty text is ignored on the open side.
+            let tip_id = format!("{bus}:{path}");
+            let interactive = MouseArea::new(framed)
+                .on_press(Message::TrayIconPressed(
+                    bus.clone(),
+                    path.clone(),
+                    TrayButton::Left,
+                ))
+                .on_middle_press(Message::TrayIconPressed(
+                    bus.clone(),
+                    path.clone(),
+                    TrayButton::Middle,
+                ))
+                .on_right_press(Message::TrayIconPressed(
+                    bus.clone(),
+                    path.clone(),
+                    TrayButton::Right,
+                ))
+                .on_scroll(move |delta| {
+                    Message::TrayIconScrolled(bus.clone(), path.clone(), scroll_units(delta))
                 })
-                .into()
-        } else {
-            art
-        };
+                .on_enter(Message::TooltipShow {
+                    id: tip_id.clone(),
+                    text: icon.tooltip.clone(),
+                })
+                .on_exit(Message::TooltipHide { id: tip_id })
+                .interaction(iced::mouse::Interaction::Pointer);
 
-        let (bus, path) = (icon.bus.clone(), icon.path.clone());
-        // Hover opens the tooltip as its own window (like the
-        // taskbar's): the bar surface is one `thickness` tall, an
-        // in-widget overlay would only land on the bar itself. The id
-        // rides both messages, so a stale leave cannot close the next
-        // item's tooltip; an empty text is ignored on the open side.
-        let tip_id = format!("{bus}:{path}");
-        let interactive = MouseArea::new(framed)
-            .on_press(Message::TrayIconPressed(
-                bus.clone(),
-                path.clone(),
-                TrayButton::Left,
-            ))
-            .on_middle_press(Message::TrayIconPressed(
-                bus.clone(),
-                path.clone(),
-                TrayButton::Middle,
-            ))
-            .on_right_press(Message::TrayIconPressed(
-                bus.clone(),
-                path.clone(),
-                TrayButton::Right,
-            ))
-            .on_scroll(move |delta| {
-                Message::TrayIconScrolled(bus.clone(), path.clone(), scroll_units(delta))
-            })
-            .on_enter(Message::TooltipShow {
-                id: tip_id.clone(),
-                text: icon.tooltip.clone(),
-            })
-            .on_exit(Message::TooltipHide { id: tip_id })
-            .interaction(iced::mouse::Interaction::Pointer);
-
-        row = row.push(interactive);
+            row = row.push(interactive);
+        }
+        col = col.push(row);
     }
-    if let Some(rest) = icons.len().checked_sub(shown).filter(|n| *n > 0) {
-        row = row.push(text(format!("+{rest}")).size(font_size as f32));
-    }
-    row.into()
+    col.into()
 }
 
 /// The cursor point for cursor-anchored surfaces (tray menu, sensor

@@ -19,7 +19,7 @@ const ICON_SIZE: u16 = 16;
 /// whole slot); main subtracts it from the row height as well.
 pub const SLOT_PAD: u16 = 2;
 /// Gap the row puts between two slots — part of one slot's width.
-const ROW_GAP: u16 = 4;
+pub const ROW_GAP: u16 = 4;
 
 /// One slot's total width in the row: the icon, its padding both sides
 /// and the gap after it — the number `main` needs to cap the row to the
@@ -338,67 +338,67 @@ fn parse_desktop(content: &str) -> (Option<String>, Option<String>) {
 /// The address rides the message — never an index a tick could shift
 /// under a queued press. The active window's slot keeps the sensor's
 /// fill (hover wins over it) and a non-empty title rides a tooltip,
-/// styled like the tray's. `max` caps the visible icons to what the
-/// sensor box holds (a "+N" text counts the hidden rest).
+/// styled like the tray's. `per_line` is the wrap width in icons
+/// (`icons::icons_per_line` over the box's room): the slots flow
+/// horizontally and turn to the next line — every window visible and
+/// clickable, none capped away.
 pub fn row<'a>(
     items: &'a [TaskIcon],
     hover: Option<&str>,
     style: &RowStyle,
-    max: u16,
-    font_size: u32,
+    per_line: u16,
 ) -> iced::Element<'a, crate::Message> {
-    use iced::widget::{MouseArea, Row, container, text};
+    use iced::widget::{Column, MouseArea, Row, container};
     let radius = f32::from(style.radius);
-    let mut row = Row::new().spacing(f32::from(ROW_GAP));
-    let mut shown = 0usize;
-    let mut hidden = 0usize;
-    for item in items {
-        let Some(path) = &item.icon else { continue };
-        if shown == usize::from(max) {
-            hidden += 1;
-            continue;
-        }
-        shown += 1;
-        let address = item.address.clone();
-        // Hover wins over active: the slot under the cursor is the one
-        // being acted on.
-        let fill = if hover == Some(address.as_str()) {
-            style.hover_bg
-        } else if item.focused {
-            style.active_bg
-        } else {
-            None
-        };
-        let slot = container(icons::widget(path, f32::from(icon_target())))
-            .padding(SLOT_PAD)
-            .style(move |_theme| iced::widget::container::Style {
-                background: fill.map(iced::Background::Color),
-                border: iced::Border {
-                    radius: radius.into(),
+    let mut col = Column::new().spacing(f32::from(ROW_GAP));
+    // Windows without an icon never rendered a slot: they are filtered
+    // before chunking so the lines count real icons only.
+    let visible: Vec<_> = items
+        .iter()
+        .filter_map(|item| item.icon.as_deref().map(|path| (item, path)))
+        .collect();
+    for chunk in visible.chunks(usize::from(per_line)) {
+        let mut row = Row::new().spacing(f32::from(ROW_GAP));
+        for &(item, path) in chunk {
+            let address = item.address.clone();
+            // Hover wins over active: the slot under the cursor is the one
+            // being acted on.
+            let fill = if hover == Some(address.as_str()) {
+                style.hover_bg
+            } else if item.focused {
+                style.active_bg
+            } else {
+                None
+            };
+            let slot = container(icons::widget(path, f32::from(icon_target())))
+                .padding(SLOT_PAD)
+                .style(move |_theme| iced::widget::container::Style {
+                    background: fill.map(iced::Background::Color),
+                    border: iced::Border {
+                        radius: radius.into(),
+                        ..Default::default()
+                    },
                     ..Default::default()
-                },
-                ..Default::default()
-            });
-        let interactive = MouseArea::new(slot)
-            .on_press(crate::Message::TaskbarLeft(address.clone()))
-            .on_middle_press(crate::Message::TaskbarMiddle(address.clone()))
-            .on_right_press(crate::Message::TaskbarRight(address.clone()))
-            // Enter fills the slot and opens the title tooltip (empty
-            // title → no window); the leave clears only its own
-            // address — a stale exit must not drop the next icon's
-            // hover or tooltip (see `TaskbarIconLeave`).
-            .on_enter(crate::Message::TaskbarIconEnter {
-                address: address.clone(),
-                title: item.title.clone(),
-            })
-            .on_exit(crate::Message::TaskbarIconLeave { address })
-            .interaction(iced::mouse::Interaction::Pointer);
-        row = row.push(interactive);
+                });
+            let interactive = MouseArea::new(slot)
+                .on_press(crate::Message::TaskbarLeft(address.clone()))
+                .on_middle_press(crate::Message::TaskbarMiddle(address.clone()))
+                .on_right_press(crate::Message::TaskbarRight(address.clone()))
+                // Enter fills the slot and opens the title tooltip (empty
+                // title → no window); the leave clears only its own
+                // address — a stale exit must not drop the next icon's
+                // hover or tooltip (see `TaskbarIconLeave`).
+                .on_enter(crate::Message::TaskbarIconEnter {
+                    address: address.clone(),
+                    title: item.title.clone(),
+                })
+                .on_exit(crate::Message::TaskbarIconLeave { address })
+                .interaction(iced::mouse::Interaction::Pointer);
+            row = row.push(interactive);
+        }
+        col = col.push(row);
     }
-    if hidden > 0 {
-        row = row.push(text(format!("+{hidden}")).size(font_size as f32));
-    }
-    row.into()
+    col.into()
 }
 
 #[cfg(test)]

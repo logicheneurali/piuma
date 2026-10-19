@@ -985,10 +985,9 @@ fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<Command<Mess
     // One ring advance per pass: columns repeat their last value
     // when a reading was missing (time stays uniform).
     panel.graphs.record(&graph_samples);
-    // Icons size to the space their sensor box really has; both the
-    // view and the icon resolution read tray::icon_target.
-    update_tray_icon_target(panel);
-    update_taskbar_icon_target(panel);
+    // Icons size to the space their sensor box really has, capped by the
+    // font; both the view and the icon resolution read the targets.
+    update_icon_targets(panel);
 
     let mut cmds: Vec<Command<Message>> = Vec::new();
     // A popup that lost both its sensor and its pointer gets
@@ -1920,20 +1919,22 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
             // passed here drives the tooltip, which mirrors the sensor box;
             // a transparent sensor shows the section behind it on the bar,
             // so the tooltip borrows that colour to stay legible anywhere.
-            // Icon rows (tray, taskbar) never outgrow their sensor box: iced
-            // does not clip a Row, an overflow would paint over the
-            // neighbouring sensors. Only a vertical panel bounds the row's
-            // axis (its box fills the section's thickness width); anywhere
-            // else the box wraps the row itself and there is nothing to cap.
-            let icon_room = if vertical {
+            // Icon rows (tray, taskbar) flow inside their sensor box and
+            // turn to the next line instead of growing past it: iced does
+            // not clip a Row, an overflow would paint over the neighbours.
+            // The room is the box's width — the thickness in a vertical
+            // panel, the screen along a horizontal bar's main axis (the
+            // bar spans it).
+            let icon_room = (if vertical {
                 panel_thickness(&panel.config)
-                    .saturating_sub(2 * (u32::from(SECTION_CONTENT_PAD) + u32::from(s.padding)))
             } else {
-                u32::MAX
-            };
+                unsafe { SCREEN_WIDTH }
+            })
+            .saturating_sub(2 * (u32::from(SECTION_CONTENT_PAD) + u32::from(s.padding)));
             let main: Element<'a, Message> = if let Some(icons) = &s.tray {
-                let cap = icons::icon_capacity(icon_room, tray::slot_width());
-                tray::row(icons, cap, font_size)
+                let per_line =
+                    icons::icons_per_line(icon_room, tray::slot_width(), u32::from(tray::ROW_GAP));
+                tray::row(icons, per_line)
             } else if let Some(buttons) = &s.workspaces {
                 // One button per available workspace (roadmap2 #4): the
                 // names shown, the active one inverted, click focuses —
@@ -1973,15 +1974,12 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
                     hover_bg: s.bg_color_hover.or(active_bg),
                     active_bg,
                 };
-                let cap = icons::icon_capacity(icon_room, windows::slot_width());
-                windows::row(
-                    slots,
-                    panel.taskbar_hover.as_deref(),
-                    &row_style,
-                    cap,
-                    font_size,
-                )
-                .into()
+                let per_line = icons::icons_per_line(
+                    icon_room,
+                    windows::slot_width(),
+                    u32::from(windows::ROW_GAP),
+                );
+                windows::row(slots, panel.taskbar_hover.as_deref(), &row_style, per_line).into()
             } else {
                 // Icon first when the sensor declares one (roadmap N1), then
                 // the optional name, then the value: an empty name still
@@ -2250,57 +2248,35 @@ fn title_fit_name<'a>(panel: &'a Panel, section: &'a SectionData) -> &'a str {
     }
 }
 
-/// Recompute `tray::icon_target` from the built sections (every tick and on
-/// every reload): the smallest fit across all tray sensors wins, so one icon
-/// size serves the whole bar and no tray sensor overflows. The stacked-title
-/// term applies only to vertically laid out sections, where the title shares
-/// the thickness axis; with no tray sensor at all the target is left alone.
-fn update_tray_icon_target(panel: &Panel) {
+/// Recompute the icon edge SHARED by both icon rows from the built
+/// sections (every tick and on every reload): the panel font's line
+/// height (`font_icon_edge`) capped by what a sensor row physically fits
+/// on the cross axis (`row_icon_target`). One number — the smallest fit
+/// across every tray and taskbar sensor — is written to both rows, so
+/// tray and taskbar icons are always the same size in both orientations:
+/// the taskbar's pill spends the sensor's padding budget, never the
+/// icon's. With no such sensor at all the target is left alone.
+fn update_icon_targets(panel: &Panel) {
     let thickness = panel_thickness(&panel.config);
     let font = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
-    let mut smallest: Option<u16> = None;
+    let font_edge = icons::font_icon_edge(font);
+    let mut shared: Option<u16> = None;
     for section in &panel.sections {
         // Title height as the view draws it, shared with the sensor icon
         // fit: text in a box padded SECTION_CONTENT_PAD on both sides.
         let title_extra =
             icons::stacked_title_extra(&section.layout, title_fit_name(panel, section), font);
         for sensor in &section.sensors {
-            if sensor.tray.is_some() {
-                let target =
-                    icons::row_icon_target(thickness, title_extra, u32::from(sensor.padding));
-                smallest = Some(smallest.map_or(target, |m| m.min(target)));
+            if sensor.tray.is_some() || sensor.taskbar.is_some() {
+                let fit = icons::row_icon_target(thickness, title_extra, u32::from(sensor.padding));
+                let edge = font_edge.min(fit);
+                shared = Some(shared.map_or(edge, |m| m.min(edge)));
             }
         }
     }
-    if let Some(target) = smallest {
-        tray::set_icon_target(target);
-    }
-}
-
-/// The taskbar slots' icon edge: the row height the taskbar sensor
-/// really has (`row_icon_target`), minus the slot padding around each
-/// icon — the same fit the tray icons and the sensor icons use, so the
-/// slots fill the bar instead of sitting at a fixed 16 px.
-fn update_taskbar_icon_target(panel: &Panel) {
-    let thickness = panel_thickness(&panel.config);
-    let font = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
-    let mut smallest: Option<u16> = None;
-    for section in &panel.sections {
-        let title_extra =
-            icons::stacked_title_extra(&section.layout, title_fit_name(panel, section), font);
-        for sensor in &section.sensors {
-            if sensor.taskbar.is_some() {
-                let target = icons::row_icon_target(
-                    thickness,
-                    title_extra,
-                    u32::from(sensor.padding) + u32::from(windows::SLOT_PAD),
-                );
-                smallest = Some(smallest.map_or(target, |m| m.min(target)));
-            }
-        }
-    }
-    if let Some(target) = smallest {
-        windows::set_icon_target(target);
+    if let Some(edge) = shared {
+        tray::set_icon_target(edge);
+        windows::set_icon_target(edge);
     }
 }
 
