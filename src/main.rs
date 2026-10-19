@@ -1894,7 +1894,9 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
 
             // The value text of net rates pins its box width (roadmap M5):
             // the container carries the fixed width so the text itself never
-            // wraps, whatever the content.
+            // wraps, whatever the content; the text is centred inside it so
+            // the value lands like every other sensor's value (no leading
+            // padding shifts it off the line).
             let value_text = text(&s.value)
                 .color(text_color)
                 .size(font_size)
@@ -1902,6 +1904,7 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
             let value_widget: Element<'a, Message> = match s.fixed_width {
                 Some(width) => container(value_text)
                     .width(Length::Fixed(f32::from(width)))
+                    .align_x(Alignment::Center)
                     .into(),
                 None => value_text.into(),
             };

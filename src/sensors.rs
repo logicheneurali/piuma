@@ -730,15 +730,6 @@ fn net_rate(interface: &str, up: bool) -> Option<f64> {
     Some((cur - prev) as f64 / dt)
 }
 
-/// Figure space (U+2007): by Unicode definition as wide as one digit of the
-/// font — padding the integer part with it keeps every formatted rate at the
-/// same pixel width whatever figures the configured font uses (roadmap M5).
-const FIGURE_SPACE: char = '\u{2007}';
-
-/// Integer-part slots of a formatted rate: wide enough for the largest value
-/// any tier can show (`1023.9`).
-const RATE_INT_SLOTS: usize = 4;
-
 /// Rate labels, one per order of magnitude: the bare tier letter (the
 /// row is a rate at a glance — `1.9 K` — and every tier keeps the same
 /// one-glyph width, so the pinned box barely moves with the unit).
@@ -765,24 +756,19 @@ pub(crate) fn rate_label(bytes_per_sec: f64) -> String {
     format!("{value:.1} {}/s", RATE_UNITS[tier])
 }
 
-/// Format a byte rate with a FIXED composition (roadmap M5): a
-/// [`RATE_INT_SLOTS`]-slot integer part padded with figure spaces, one
-/// decimal digit, a space and the tier unit. The string's pixel width can't
-/// change with the value, so the sensor box never resizes ("dances") while
-/// the rate changes.
+/// Format a byte rate in its tier: one decimal digit, a space and the
+/// tier unit (`1.4 K`, `1.9 M`). The sensor box's width is pinned by the
+/// view's fixed container, so the string itself carries no padding and
+/// the value aligns with every other sensor's value.
 fn fmt_rate(bytes_per_sec: f64) -> String {
     let (value, unit) = rate_tier(bytes_per_sec);
-    let shaped = format!("{value:.1}");
-    let (int, dec) = shaped.split_once('.').unwrap_or((shaped.as_str(), "0"));
-    let pad = std::iter::repeat_n(FIGURE_SPACE, RATE_INT_SLOTS.saturating_sub(int.len()))
-        .collect::<String>();
-    format!("{pad}{int}.{dec} {}", RATE_UNITS[unit])
+    format!("{value:.1} {}", RATE_UNITS[unit])
 }
 
 /// Formatting samples covering the narrow and wide shapes of the ONE tier
 /// a displayed value belongs to (roadmap M5): the view pins the net
 /// sensor's width to the widest of them, so inside a tier the box is exact
-/// and constant (figure spaces keep every shape the same width). The pin
+/// and constant. The pin
 /// is derived from the same tick's string as the value, so when a rate
 /// crosses a ×1024 boundary both move together — the box can never
 /// undershoot what it holds, and it only ever resizes on that crossing.
@@ -863,11 +849,12 @@ mod tests {
         assert_eq!(volume_device(" Speaker "), "Speaker");
     }
 
-    /// Every formatted sample keeps the fixed composition (four-slot integer
-    /// part of digits/figure spaces, dot, one decimal digit): the shape that
-    /// makes the pixel width independent of the value. Spot checks included.
+    /// Every formatted sample is the tier's plain composition (digits, one
+    /// decimal digit, space, unit): the value's pixel width is pinned by the
+    /// view's fixed box, so the string itself carries no padding. Spot
+    /// checks included.
     #[test]
-    fn net_rate_format_is_fixed_composition() {
+    fn net_rate_format_is_the_plain_tier_shape() {
         let mut samples: Vec<String> = Vec::new();
         for tier in 0..RATE_UNITS.len() {
             let shown = fmt_rate(1023.9 * 1024f64.powi(tier as i32));
@@ -880,18 +867,13 @@ mod tests {
             let (int, rest) = sample
                 .split_once('.')
                 .unwrap_or_else(|| panic!("missing decimal dot in {sample}"));
-            assert_eq!(int.chars().count(), RATE_INT_SLOTS, "{sample}");
-            assert!(
-                int.chars().all(|c| c.is_ascii_digit() || c == FIGURE_SPACE),
-                "{sample}"
-            );
+            assert!(!int.is_empty() && int.chars().all(|c| c.is_ascii_digit()), "{sample}");
             assert!(rest.starts_with(|c: char| c.is_ascii_digit()), "{sample}");
         }
-        let f = FIGURE_SPACE;
-        assert_eq!(fmt_rate(0.0), format!("{f}{f}{f}0.0 B"));
+        assert_eq!(fmt_rate(0.0), "0.0 B");
         assert_eq!(fmt_rate(1023.9), "1023.9 B");
-        assert_eq!(fmt_rate(1024.0), format!("{f}{f}{f}1.0 K"));
-        assert_eq!(fmt_rate(2_000_000.0), format!("{f}{f}{f}1.9 M"));
+        assert_eq!(fmt_rate(1024.0), "1.0 K");
+        assert_eq!(fmt_rate(2_000_000.0), "1.9 M");
     }
 
     /// The unpadded tier label adapts per value: bytes below a KiB, the
@@ -906,11 +888,9 @@ mod tests {
         assert_eq!(rate_label(1024f64.powi(6)), "1048576.0 T/s");
     }
 
-    /// The pin is exactly the displayed value's width: same tier ⇒ equal
-    /// measured pixels (no headroom) and never below it (no wrap), for
-    /// every shape of every tier — the extremes (three figure spaces and
-    /// the bare `1023.9`) cover any digit/figure-space width ratio.
-    /// `"N/A"` pins to the base tier and still fits.
+    /// The pin is the widest same-tier shape: never below the displayed
+    /// value's width (no wrap) and exactly the widest sample's (no room
+    /// beyond it). `"N/A"` pins to the base tier and still fits.
     #[test]
     fn net_rate_pin_is_exact_for_its_tier() {
         let font = iced::font::Font {
@@ -919,12 +899,15 @@ mod tests {
         };
         for tier in 0..RATE_UNITS.len() {
             let scale = 1024f64.powi(tier as i32);
+            let widest_shape = fmt_rate(1023.9 * scale);
+            let pin = crate::text_width::widest(&font, 12, &net_rate_samples(&widest_shape));
             for v in [0.0, 1.0, 12.3, 134.6, 777.7, 1023.9] {
                 let shown = fmt_rate(v * scale);
-                let pin = crate::text_width::widest(&font, 12, &net_rate_samples(&shown));
                 let width = crate::text_width::widest(&font, 12, std::slice::from_ref(&shown));
-                assert_eq!(pin, width, "{shown}");
+                assert!(pin >= width, "{shown} ({width}px) must fit its pin ({pin}px)");
             }
+            let width = crate::text_width::widest(&font, 12, std::slice::from_ref(&widest_shape));
+            assert_eq!(pin, width, "the widest shape pins exactly");
         }
         let shown = "N/A".to_string();
         let pin = crate::text_width::widest(&font, 12, &net_rate_samples(&shown));
