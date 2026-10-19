@@ -6,8 +6,11 @@
 //! the sensor box stays bare.
 
 use crate::Message;
-use iced::widget::{text, MouseArea};
-use iced::{Color, Element, Font, Length};
+use iced::widget::{text, Column, MouseArea, Row};
+use iced::{Alignment, Color, Element, Font, Length};
+
+/// Gap between buttons and between wrapped lines (mirrors the tray's).
+pub const ROW_GAP: u16 = 4;
 
 /// One available workspace as the bar shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,42 +69,66 @@ pub fn focus(name: &str) {
     });
 }
 
-/// The button row: every button is the sensor's own box (same palette,
+/// Estimated width of the widest button — buttons are text-shaped, so
+/// the width follows the longest name: its characters at ~0.6em each (a
+/// deliberate overestimate for typical UI fonts — the wrapped lines
+/// then never overflow the sensor box) plus the padding on both sides.
+pub fn slot_width(buttons: &[WorkspaceButton], font_size: u32, padding: u16) -> u32 {
+    let chars = buttons
+        .iter()
+        .map(|ws| ws.name.chars().count())
+        .max()
+        .unwrap_or(1)
+        .max(1) as u32;
+    2 * u32::from(padding) + (chars * font_size * 6).div_ceil(10)
+}
+
+/// The button lines: every button is the sensor's own box (same palette,
 /// border and padding) with the active one inverted — the background
 /// takes the text colour — and its own press to focus that workspace.
+/// The buttons wrap into as many lines as needed (`per_line`, from the
+/// widest name estimate in [`slot_width`]), mirroring the tray row, so
+/// they never spill out of the sensor box.
 pub fn row<'a>(
     buttons: &'a [WorkspaceButton],
     font_size: u32,
     font: Font,
     style: &Style,
+    per_line: u16,
 ) -> Element<'a, Message> {
-    let mut row = iced::widget::Row::new().spacing(4);
-    for ws in buttons {
-        let (bg, fg) = if ws.active {
-            (Some(style.text_color), style.bg_color)
-        } else {
-            (Some(style.bg_color), style.text_color)
-        };
-        let label = crate::styled_box(
-            text(&ws.name).color(fg).size(font_size).font(font).into(),
-            bg,
-            style.border_color,
-            style.border_width,
-            style.border_radius,
-            &style.border_type,
-            // Sensors sit inside sections: never on a screen edge.
-            [false, false, false, false],
-            style.padding,
-            Length::Shrink,
-            Length::Shrink,
-        );
-        row = row.push(
-            MouseArea::new(label)
-                .on_press(Message::WorkspaceClicked(ws.name.clone()))
-                .interaction(iced::mouse::Interaction::Pointer),
-        );
+    let mut col = Column::new().spacing(f32::from(ROW_GAP));
+    for chunk in buttons.chunks(usize::from(per_line.max(1))) {
+        let mut row = Row::new()
+            .spacing(f32::from(ROW_GAP))
+            .align_y(Alignment::Center);
+        for ws in chunk {
+            let (bg, fg) = if ws.active {
+                (Some(style.text_color), style.bg_color)
+            } else {
+                (Some(style.bg_color), style.text_color)
+            };
+            let label = crate::styled_box(
+                text(&ws.name).color(fg).size(font_size).font(font).into(),
+                bg,
+                style.border_color,
+                style.border_width,
+                style.border_radius,
+                &style.border_type,
+                // Sensors sit inside sections: never on a screen edge.
+                [false, false, false, false],
+                style.padding,
+                Length::Shrink,
+                Length::Shrink,
+            );
+            row = row.push(
+                MouseArea::new(label)
+                    .on_press(Message::WorkspaceClicked(ws.name.clone()))
+                    .interaction(iced::mouse::Interaction::Pointer),
+            );
+        }
+        col = col.push(row);
     }
-    row.into()
+    col.into()
 }
 
 // The row itself is a widget composition (covered by the bar's E2E);
@@ -133,5 +160,28 @@ mod tests {
         assert!(made[0].active, "the active workspace is flagged");
         assert!(!made[1].active);
         assert!(buttons(None).is_empty());
+    }
+
+    /// The estimated slot is padding plus the widest name's characters
+    /// (~0.6em each, rounded up): a longer name widens it — the wrap
+    /// maths in `icons_per_line` then packs fewer buttons per line.
+    #[test]
+    fn slot_width_follows_the_widest_name_and_padding() {
+        let short = [WorkspaceButton {
+            name: "1".into(),
+            active: false,
+        }];
+        let long = [
+            WorkspaceButton {
+                name: "1".into(),
+                active: false,
+            },
+            WorkspaceButton {
+                name: "10".into(),
+                active: false,
+            },
+        ];
+        assert_eq!(crate::workspace::slot_width(&short, 12, 4), 16);
+        assert_eq!(crate::workspace::slot_width(&long, 12, 4), 23);
     }
 }

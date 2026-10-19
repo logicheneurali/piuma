@@ -1938,10 +1938,17 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
             } else if let Some(buttons) = &s.workspaces {
                 // One button per available workspace (roadmap2 #4): the
                 // names shown, the active one inverted, click focuses —
-                // the buttons own their mouse handling like tray icons.
-                // The sensor's own icon still leads the row (its config
+                // the buttons own their mouse handling like tray icons
+                // and wrap into as many lines as needed (like the tray
+                // row), from the widest name's estimated width. The
+                // sensor's own icon still leads the row (its config
                 // predates the buttons), centred like every other sensor
                 // row so it never rides above the baseline.
+                let per_line = icons::icons_per_line(
+                    icon_room,
+                    workspace::slot_width(buttons, font_size, s.padding),
+                    u32::from(workspace::ROW_GAP),
+                );
                 let ws_row = workspace::row(
                     buttons,
                     font_size,
@@ -1955,6 +1962,7 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
                         border_type: s.border_type.clone(),
                         padding: s.padding,
                     },
+                    per_line,
                 );
                 let mut row = Row::new().spacing(6).align_y(Alignment::Center);
                 if let Some(path) = &s.icon {
