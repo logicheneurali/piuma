@@ -2251,11 +2251,13 @@ fn title_fit_name<'a>(panel: &'a Panel, section: &'a SectionData) -> &'a str {
 /// Recompute the icon edge SHARED by both icon rows from the built
 /// sections (every tick and on every reload): the panel font's line
 /// height (`font_icon_edge`) capped by what a sensor row physically fits
-/// on the cross axis (`row_icon_target`). One number — the smallest fit
-/// across every tray and taskbar sensor — is written to both rows, so
-/// tray and taskbar icons are always the same size in both orientations:
-/// the taskbar's pill spends the sensor's padding budget, never the
-/// icon's. With no such sensor at all the target is left alone.
+/// on the cross axis (`row_icon_target` with zero padding — taskbar and
+/// tray icons fill the whole row: the sensor's own padding only breathes
+/// between pill and box border, it never shrinks the icon, compensating
+/// for the margins baked into the artwork files). One number — the
+/// smallest fit across every tray and taskbar sensor — is written to both
+/// rows, so tray and taskbar icons are always the same size in both
+/// orientations. With no such sensor at all the target is left alone.
 fn update_icon_targets(panel: &Panel) {
     let thickness = panel_thickness(&panel.config);
     let font = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
@@ -2266,12 +2268,14 @@ fn update_icon_targets(panel: &Panel) {
         // fit: text in a box padded SECTION_CONTENT_PAD on both sides.
         let title_extra =
             icons::stacked_title_extra(&section.layout, title_fit_name(panel, section), font);
-        for sensor in &section.sensors {
-            if sensor.tray.is_some() || sensor.taskbar.is_some() {
-                let fit = icons::row_icon_target(thickness, title_extra, u32::from(sensor.padding));
-                let edge = font_edge.min(fit);
-                shared = Some(shared.map_or(edge, |m| m.min(edge)));
-            }
+        let has_icons = section
+            .sensors
+            .iter()
+            .any(|sensor| sensor.tray.is_some() || sensor.taskbar.is_some());
+        if has_icons {
+            // Padding zero on purpose: the icon takes the whole row height.
+            let edge = font_edge.min(icons::row_icon_target(thickness, title_extra, 0));
+            shared = Some(shared.map_or(edge, |m| m.min(edge)));
         }
     }
     if let Some(edge) = shared {
