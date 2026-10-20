@@ -15,11 +15,17 @@ use std::sync::atomic::{AtomicU16, Ordering};
 /// Icon edge in px before the first tick computes the real one.
 const ICON_SIZE: u16 = 16;
 
-/// The slot's own padding around the icon (the hover fill covers the
-/// whole slot); main subtracts it from the row height as well.
-pub const SLOT_PAD: u16 = 2;
-/// Gap the row puts between two slots — part of one slot's width.
-pub const ROW_GAP: u16 = 4;
+/// The slot's own padding around the icon, kept on the row's main axis
+/// only: the hover/active fill covers the whole slot, so this is the
+/// margin the fill draws around the icon sideways. The thickness axis
+/// stays flush — the icon fills the pill's height there, and a vertical
+/// pad would make iced clamp it below `icon_target` (the same rule the
+/// pill inset follows in `main`).
+pub const SLOT_PAD: u16 = 1;
+/// Gap the row puts between two slots — part of one slot's width. With
+/// `SLOT_PAD` on both neighbours it is all the visible space between two
+/// icons (the artwork keeps its own transparent margin on top of it).
+pub const ROW_GAP: u16 = 2;
 
 /// One slot's total width in the row: the icon, its padding both sides
 /// and the gap after it — the number `main` needs to cap the row to the
@@ -371,7 +377,7 @@ pub fn row<'a>(
                 None
             };
             let slot = container(icons::widget(path, f32::from(icon_target())))
-                .padding(SLOT_PAD)
+                .padding(iced::Padding::new(0.0).horizontal(f32::from(SLOT_PAD)))
                 .style(move |_theme| iced::widget::container::Style {
                     background: fill.map(iced::Background::Color),
                     border: iced::Border {
