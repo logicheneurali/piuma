@@ -498,6 +498,9 @@ pub enum Modal {
     /// Threshold colour-rules editor: target sensor and the draft rows
     /// (parsed into `Sensor::color_rules` when the modal is confirmed).
     ColorRules { section_index: usize, sensor_index: usize, rules: Vec<RuleDraft> },
+    /// Save refused: one human-readable line per invalid value (the
+    /// fields they belong to are highlighted in red behind the modal).
+    InvalidFields { errors: Vec<String> },
 }
 
 /// Default config file: the one the running piuma reads.
@@ -607,6 +610,10 @@ pub struct PiumaSetup {
     snapshot: String,
     /// Modal dialog stacked over the view, when one is open.
     modal: Option<Modal>,
+    /// Values piuma would ignore or clamp (`config::validate_config` on
+    /// what Save would write): recomputed after every message, so the
+    /// red fields, the section frames and the save guard stay live.
+    validation: Vec<config::ConfigError>,
     /// Images found under the freedesktop wallpaper folders (roadmap2 #1),
     /// scanned once at startup for the Wallpaper tab's list.
     wallpaper_files: Vec<PathBuf>,
@@ -634,6 +641,7 @@ impl PiumaSetup {
             current_file: DEFAULT_FILE.to_string(),
             snapshot: String::new(),
             modal: None,
+            validation: Vec::new(),
             wallpaper_files: scan_wallpaper_dirs(&wallpaper_dirs()),
             autostart_apps: Vec::new(),
         };
@@ -645,6 +653,22 @@ impl PiumaSetup {
                     // just ask for confirmation and report any real error.
                     state.snapshot = state.serialize().unwrap_or_default();
                     state.set_status(format!("Loaded {}", state.current_file), false);
+                    // Values piuma would ignore (a hand-edited file): named
+                    // here and highlighted in red — the save stays blocked
+                    // until they are fixed.
+                    state.refresh_validation();
+                    if !state.validation.is_empty() {
+                        let n = state.validation.len();
+                        state.set_status(
+                            format!(
+                                "Loaded {}: {} invalid value{} — highlighted; fix them before saving",
+                                state.current_file,
+                                n,
+                                if n == 1 { "" } else { "s" }
+                            ),
+                            true,
+                        );
+                    }
                 }
                 // Parse errors leave `snapshot` empty, so the first save always
                 // asks for confirmation instead of silently overwriting.
@@ -664,6 +688,117 @@ impl PiumaSetup {
     fn set_status(&mut self, msg: String, is_error: bool) {
         self.status_message = Some(msg);
         self.status_is_error = is_error;
+    }
+
+    /// Recomputes the invalid-value list from the config as edited right
+    /// now: serialized, parsed with piuma's real schema, walked by the
+    /// same `config::validate_config` the bar logs at load. A schema-
+    /// broken config leaves the list empty — the schema check on save
+    /// reports that separately.
+    fn refresh_validation(&mut self) {
+        self.validation = self
+            .serialize()
+            .ok()
+            .and_then(|json| serde_json::from_str::<config::Config>(&json).ok())
+            .map(|cfg| config::validate_config(&cfg))
+            .unwrap_or_default();
+    }
+
+    /// Reason why the value at `path` is invalid, if any: the path strings
+    /// match `config::validate_config` (`panel.sections[0].bg_color` …).
+    fn field_err(&self, path: &str) -> Option<&str> {
+        self.validation
+            .iter()
+            .find(|e| e.path == path)
+            .map(|e| e.message.as_str())
+    }
+
+    /// Number of invalid values inside section `index` (and its sensors):
+    /// what frames the section card red in the Sections tab.
+    fn section_err_count(&self, index: usize) -> usize {
+        let prefix = format!("panel.sections[{index}].");
+        self.validation.iter().filter(|e| e.path.starts_with(&prefix)).count()
+    }
+
+    /// Human label of a validated path for the refusal modal: section and
+    /// sensor names instead of indices ("Section «Stats» › perc_cpu ›
+    /// Border: …"), field names mapped to their editor labels.
+    fn human_error(&self, error: &config::ConfigError) -> String {
+        /// UI label of a field's last path segment.
+        fn label(field: &str) -> &str {
+            match field {
+                "text_color" => "Text",
+                "text_color_hover" => "Hover text",
+                "bg_color" => "BG",
+                "bg_color_hover" => "Hover BG",
+                "border_color" => "Border",
+                "border_color_hover" => "Hover border",
+                "border_width" => "Border width",
+                "border_width_hover" => "Hover border width",
+                "border_radius" => "Border radius",
+                "border_type" => "Border type",
+                "padding" => "Padding",
+                "weight" => "Weight",
+                "layout" => "Layout",
+                "anchor" => "Anchor",
+                "align" => "Align",
+                "section_layout" => "Section layout",
+                "thickness" => "Thickness",
+                "font_size" => "Font size",
+                "default_bg_color" => "Default BG",
+                "default_text_color" => "Default text",
+                "default_section_weight" => "Default section weight",
+                "default_timeout_ms" => "Default timeout",
+                "history_size" => "History size",
+                "popup_margin_h" => "Popup margin H",
+                "popup_margin_v" => "Popup margin V",
+                other => other,
+            }
+        }
+        let rest = error.path.strip_prefix("panel.").unwrap_or(&error.path);
+        // Sections carry their names: "panel.sections[i](.sensors[j])?.rest".
+        let Some(tail) = rest.strip_prefix("sections[") else {
+            let field = rest.rsplit('.').next().unwrap_or(rest);
+            let group = rest[..rest.len() - field.len()].trim_end_matches('.');
+            let group = match group {
+                "" => "Panel",
+                "sensor_defaults" => "Sensor defaults",
+                "section_defaults" => "Section defaults",
+                "notifications" => "Notifications",
+                other => other,
+            };
+            return format!("{group} › {}: {}", label(field), error.message);
+        };
+        let (idx, tail) = tail.split_once(']').unwrap_or((tail, ""));
+        let i: usize = idx.parse().unwrap_or(0);
+        let section = self.config.sections.get(i);
+        let mut head = format!(
+            "Section «{}»",
+            section
+                .and_then(|s| s.name.clone())
+                .unwrap_or_else(|| format!("{}", i + 1))
+        );
+        let field = if let Some(tail) = tail.strip_prefix(".sensors[") {
+            let (jdx, tail) = tail.split_once(']').unwrap_or((tail, ""));
+            let j: usize = jdx.parse().unwrap_or(0);
+            let sensor = section.and_then(|s| s.sensors.get(j));
+            head.push_str(&format!(
+                " › {}",
+                sensor
+                    .and_then(|s| s.name.clone().or_else(|| s.description.clone()))
+                    .unwrap_or_else(|| format!("sensor {}", j + 1))
+            ));
+            tail.strip_prefix('.').unwrap_or(tail)
+        } else {
+            tail.strip_prefix('.').unwrap_or(tail)
+        };
+        // Threshold colours: "color_rules[k].color" → "Colour rule k+1".
+        if let Some(rules) = field.strip_prefix("color_rules[") {
+            let (k, _) = rules.split_once(']').unwrap_or((rules, ""));
+            let n: usize = k.parse().unwrap_or(0) + 1;
+            return format!("{head} › Colour rule {n}: {}", error.message);
+        }
+        format!("{head} › {}: {}", label(field), error.message)
     }
 
     fn config_to_json(&self) -> JsonValue {
@@ -1012,8 +1147,20 @@ impl PiumaSetup {
         // Validate against piuma's real schema before touching the file: a
         // config piuma would reject (e.g. a static_text sensor without its
         // text) must fail loudly here, not load as broken later.
-        serde_json::from_str::<config::Config>(&json)
+        let parsed: config::Config = serde_json::from_str(&json)
             .map_err(|e| format!("Save rejected, piuma would refuse this config: {}", e))?;
+        // Then the values themselves (same list the bar logs at load): a
+        // colour or range piuma would silently ignore must not reach the
+        // file — the fields are highlighted and the modal lists them.
+        let errors = config::validate_config(&parsed);
+        self.validation = errors.clone();
+        if !errors.is_empty() {
+            return Err(format!(
+                "Save blocked: {} invalid value{} (highlighted in the editor)",
+                errors.len(),
+                if errors.len() == 1 { "" } else { "s" }
+            ));
+        }
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir).map_err(|e| format!("Error creating directory: {}", e))?;
         }
@@ -1038,6 +1185,9 @@ impl PiumaSetup {
         // The newly loaded file carries its own selection: refresh the
         // tab so its switches show it (scanned fresh, like at startup).
         self.autostart_apps = autostart::editor::apps(&self.config.autostart_disabled);
+        // The newly loaded file may carry values piuma ignores: refresh
+        // the list so they show highlighted right away.
+        self.refresh_validation();
         Ok(())
     }
 
@@ -1047,7 +1197,19 @@ impl PiumaSetup {
         let outcome = self.save_config(name);
         match &outcome {
             Ok(()) => self.set_status(format!("Configuration saved to {:?}", file_path(name)), false),
-            Err(e) => self.set_status(e.clone(), true),
+            Err(e) => {
+                self.set_status(e.clone(), true);
+                // Invalid values: the list modal names every field to fix,
+                // replacing any confirmation dialog still open.
+                if !self.validation.is_empty() {
+                    let errors = self
+                        .validation
+                        .iter()
+                        .map(|error| self.human_error(error))
+                        .collect();
+                    self.modal = Some(Modal::InvalidFields { errors });
+                }
+            }
         }
         outcome
     }
@@ -1056,7 +1218,23 @@ impl PiumaSetup {
     fn load_reporting(&mut self, name: &str) -> Result<(), String> {
         let outcome = self.load_config(name);
         match &outcome {
-            Ok(()) => self.set_status(format!("Loaded {}", name), false),
+            Ok(()) => {
+                self.set_status(format!("Loaded {}", name), false);
+                // Loaded values piuma would ignore: named here, red in the
+                // editor, blocking the save until fixed (see new()).
+                if !self.validation.is_empty() {
+                    let n = self.validation.len();
+                    self.set_status(
+                        format!(
+                            "Loaded {}: {} invalid value{} — highlighted; fix them before saving",
+                            name,
+                            n,
+                            if n == 1 { "" } else { "s" }
+                        ),
+                        true,
+                    );
+                }
+            }
             Err(e) => self.set_status(e.clone(), true),
         }
         outcome
@@ -1455,7 +1633,16 @@ impl PiumaSetup {
     }
 }
 
+/// Applies one message, then recomputes the invalid-value list so the
+/// red fields, the section frames and the save guard follow every edit
+/// without needing a save attempt to appear.
 fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
+    let task = update_inner(state, message);
+    state.refresh_validation();
+    task
+}
+
+fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
     match message {
         Message::FontChanged(value) => state.config.font = if value.is_empty() { None } else { Some(value) },
         Message::FontSizeChanged(value) => state.config.font_size = value,
@@ -2032,9 +2219,14 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
             }
         }
         Message::ModalConfirm => match state.modal.take() {
+            // The error list has no confirm action: only "Close" dismisses it.
+            Some(modal @ Modal::InvalidFields { .. }) => state.modal = Some(modal),
             Some(Modal::ConfirmSave) => {
                 let name = state.current_file.clone();
-                if state.save_reporting(&name).is_err() {
+                // Invalid values replace the confirmation with the error
+                // list (set by save_reporting); only other failures —
+                // e.g. filesystem errors — keep the dialog open.
+                if state.save_reporting(&name).is_err() && state.validation.is_empty() {
                     state.modal = Some(Modal::ConfirmSave);
                 }
             }
@@ -2877,36 +3069,95 @@ fn form_grid<'a>(fields: Vec<(&'a str, Element<'a, Message>)>) -> Element<'a, Me
     rows.into()
 }
 
-/// Color input filling its cell: text field plus a live 16x16 preview swatch.
-fn color_control<'a>(value: &'a str, on_input: impl Fn(String) -> Message + 'a) -> Element<'a, Message> {
+/// Stacks the red reason under a field whose config value is invalid.
+fn invalid_under<'a>(field: Element<'a, Message>, reason: Option<&'a str>) -> Element<'a, Message> {
+    match reason {
+        None => field,
+        Some(msg) => Column::new()
+            .push(field)
+            .push(
+                text(msg)
+                    .size(10)
+                    .style(|_t: &Theme| TextStyle {
+                        color: Some(Color::from_rgb(0.9, 0.3, 0.3)),
+                        ..TextStyle::default()
+                    }),
+            )
+            .spacing(2)
+            .width(Length::Fill)
+            .into(),
+    }
+}
+
+/// Colour input filling its cell: text field plus a live 16x16 preview
+/// swatch. An invalid value (`config::validate_config`'s reason) turns
+/// the field and swatch red and shows the reason under them.
+fn color_control<'a>(
+    value: &'a str,
+    invalid: Option<&'a str>,
+    on_input: impl Fn(String) -> Message + 'a,
+) -> Element<'a, Message> {
+    let error_color = Color::from_rgb(0.9, 0.3, 0.3);
     let swatch_color = hex_color(value);
     let swatch = container(text(""))
         .width(16)
         .height(16)
         .style(move |_t: &Theme| container::Style {
             background: Some(Background::Color(swatch_color)),
-            border: Border { width: 1.0, color: Color::from_rgb(0.45, 0.45, 0.45), radius: 3.0.into() },
+            border: Border {
+                width: 1.0,
+                color: if invalid.is_some() { error_color } else { Color::from_rgb(0.45, 0.45, 0.45) },
+                radius: 3.0.into(),
+            },
             ..container::Style::default()
         });
-    Row::new()
-        .push(input("#rrggbb", value, on_input).width(Length::Fill))
-        .push(swatch)
-        .spacing(6)
-        .align_y(Alignment::Center)
+    let field = input("#rrggbb", value, on_input)
         .width(Length::Fill)
-        .into()
+        .style(move |t: &Theme, status| {
+            let mut style = iced::widget::text_input::default(t, status);
+            if invalid.is_some() {
+                style.border = Border { width: 1.0, color: error_color, radius: 3.0.into() };
+            }
+            style
+        });
+    invalid_under(
+        Row::new()
+            .push(field)
+            .push(swatch)
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .width(Length::Fill)
+            .into(),
+        invalid,
+    )
 }
 
 /// Slider control filling its cell: slider takes the space, value on the
-/// right (style numbers: -1 = disabled, 0..=N = enabled).
-fn slider_control<'a>(range: RangeInclusive<i32>, value: i32, on_input: impl Fn(i32) -> Message + 'a) -> Element<'a, Message> {
-    Row::new()
-        .push(Slider::new(range, value, on_input).width(Length::Fill))
-        .push(text(value.to_string()).size(BODY).width(40))
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .width(Length::Fill)
-        .into()
+/// right (style numbers: -1 = disabled, 0..=N = enabled). An invalid
+/// loaded value turns the number red with the reason under the row.
+fn slider_control<'a>(
+    range: RangeInclusive<i32>,
+    value: i32,
+    invalid: Option<&'a str>,
+    on_input: impl Fn(i32) -> Message + 'a,
+) -> Element<'a, Message> {
+    let value_text = text(value.to_string())
+        .size(BODY)
+        .width(40)
+        .style(move |_t: &Theme| TextStyle {
+            color: invalid.map(|_| Color::from_rgb(0.9, 0.3, 0.3)),
+            ..TextStyle::default()
+        });
+    invalid_under(
+        Row::new()
+            .push(Slider::new(range, value, on_input).width(Length::Fill))
+            .push(value_text)
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .width(Length::Fill)
+            .into(),
+        invalid,
+    )
 }
 
 /// Collapsible header: chevron + title + summary; pressing toggles the block.
@@ -3346,7 +3597,17 @@ fn modal_card(state: &PiumaSetup) -> Element<'_, Message> {
                     Row::new()
                         .push(input("min", &rule.min, move |value| Message::ColorRuleMinChanged(i, value))
                             .width(Length::Fixed(90.0)))
-                        .push(color_control(&rule.color, move |value| Message::ColorRuleColorChanged(i, value)))
+                        .push(color_control(
+                            &rule.color,
+                            // Draft rows are not in the config yet: the same
+                            // parser names the bad value live in the popup.
+                            if config::parse_color(&rule.color).is_err() {
+                                Some("not a valid colour (#rgb, #rrggbb, #rrggbbaa)")
+                            } else {
+                                None
+                            },
+                            move |value| Message::ColorRuleColorChanged(i, value),
+                        ))
                         .push(
                             button(text("✕").size(BODY))
                                 .on_press(Message::ColorRuleRemove(i))
@@ -3376,6 +3637,35 @@ fn modal_card(state: &PiumaSetup) -> Element<'_, Message> {
                 body.into(),
                 error,
                 dialog_actions(pal, Message::ModalConfirm, "Apply"),
+            )
+        }
+        Some(Modal::InvalidFields { errors }) => {
+            // One red line per invalid value, scrollable when a hand-edited
+            // file made many fields wrong: this list is the refusal reason.
+            let mut list = column![].spacing(4).width(Length::Fill);
+            for line in errors {
+                list = list.push(
+                    text(line.clone())
+                        .size(BODY)
+                        .style(|_t: &Theme| TextStyle {
+                            color: Some(Color::from_rgb(0.9, 0.3, 0.3)),
+                            ..TextStyle::default()
+                        }),
+                );
+            }
+            dialog_frame(
+                pal,
+                "Save blocked: invalid values",
+                container(scrollable(list))
+                    .max_height(280.0)
+                    .into(),
+                None,
+                Row::new().push(
+                    button(text("Close").size(BODY))
+                        .on_press(Message::ModalCancel)
+                        .padding(8)
+                        .style(move |t, s| btn_secondary(pal, t, s)),
+                ),
             )
         }
         None => text("").into(),
@@ -3696,12 +3986,15 @@ fn panel_settings(state: &PiumaSetup) -> Element<'_, Message> {
         ("Font", input("Font name", state.config.font.as_deref().unwrap_or(""), Message::FontChanged)
             .width(Length::Fill)
             .into()),
-        ("Font Size", Row::new()
-            .push(Slider::new(8..=32, font_size, Message::FontSizeChanged).width(Length::Fill))
-            .push(text(format!("{}pt", font_size)).size(BODY).width(40))
-            .spacing(8)
-            .width(Length::Fill)
-            .into()),
+        ("Font Size", invalid_under(
+            Row::new()
+                .push(Slider::new(8..=32, font_size, Message::FontSizeChanged).width(Length::Fill))
+                .push(text(format!("{}pt", font_size)).size(BODY).width(40))
+                .spacing(8)
+                .width(Length::Fill)
+                .into(),
+            state.field_err("panel.font_size"),
+        )),
         ("Bold", toggler(state.config.bold.unwrap_or(false))
             .label("Bold text")
             .on_toggle(Message::BoldChanged)
@@ -3712,34 +4005,60 @@ fn panel_settings(state: &PiumaSetup) -> Element<'_, Message> {
             .label("Generate GTK theme bridge")
             .on_toggle(Message::AppThemeChanged)
             .into()),
-        ("Thickness", Row::new()
-            .push(Slider::new(8..=200, thickness, Message::ThicknessChanged).width(Length::Fill))
-            .push(text(format!("{}px", thickness)).size(BODY).width(48))
-            .spacing(8)
+        ("Thickness", invalid_under(
+            Row::new()
+                .push(Slider::new(8..=200, thickness, Message::ThicknessChanged).width(Length::Fill))
+                .push(text(format!("{}px", thickness)).size(BODY).width(48))
+                .spacing(8)
+                .width(Length::Fill)
+                .into(),
+            state.field_err("panel.thickness"),
+        )),
+        ("Section Layout", invalid_under(
+            picklist(
+                vec!["horizontal".to_string(), "vertical".to_string()],
+                Some(state.config.section_layout.clone()),
+                Message::SectionLayoutChanged,
+            )
             .width(Length::Fill)
-            .into()),
-        ("Section Layout", picklist(
-            vec!["horizontal".to_string(), "vertical".to_string()],
-            Some(state.config.section_layout.clone()),
-            Message::SectionLayoutChanged,
-        ).width(Length::Fill).into()),
+            .into(),
+            state.field_err("panel.section_layout"),
+        )),
         ("Section Title", toggler(state.config.section_title.unwrap_or(true))
             .label("Show section titles")
             .on_toggle(Message::SectionTitleChanged)
             .into()),
-        ("Default BG", color_control(state.config.default_bg_color.as_deref().unwrap_or(""), Message::DefaultBgColorChanged)),
-        ("Default Text", color_control(state.config.default_text_color.as_deref().unwrap_or(""), Message::DefaultTextColorChanged)),
-        ("Anchor", picklist(
-            vec!["top".to_string(), "bottom".to_string(), "left".to_string(), "right".to_string(),
-                 "top-left".to_string(), "top-right".to_string(), "bottom-left".to_string(), "bottom-right".to_string()],
-            Some(anchor),
-            Message::AnchorChanged,
-        ).width(Length::Fill).into()),
-        ("Align", picklist(
-            vec!["left".to_string(), "center".to_string(), "right".to_string(), "fill".to_string()],
-            Some(align),
-            Message::AlignChanged,
-        ).width(Length::Fill).into()),
+        ("Default BG", color_control(
+            state.config.default_bg_color.as_deref().unwrap_or(""),
+            state.field_err("panel.default_bg_color"),
+            Message::DefaultBgColorChanged,
+        )),
+        ("Default Text", color_control(
+            state.config.default_text_color.as_deref().unwrap_or(""),
+            state.field_err("panel.default_text_color"),
+            Message::DefaultTextColorChanged,
+        )),
+        ("Anchor", invalid_under(
+            picklist(
+                vec!["top".to_string(), "bottom".to_string(), "left".to_string(), "right".to_string(),
+                     "top-left".to_string(), "top-right".to_string(), "bottom-left".to_string(), "bottom-right".to_string()],
+                Some(anchor),
+                Message::AnchorChanged,
+            )
+            .width(Length::Fill)
+            .into(),
+            state.field_err("panel.anchor"),
+        )),
+        ("Align", invalid_under(
+            picklist(
+                vec!["left".to_string(), "center".to_string(), "right".to_string(), "fill".to_string()],
+                Some(align),
+                Message::AlignChanged,
+            )
+            .width(Length::Fill)
+            .into(),
+            state.field_err("panel.align"),
+        )),
     ];
 
     card(
@@ -3811,8 +4130,8 @@ fn notifications_settings<'a>(state: &'a PiumaSetup) -> Element<'a, Message> {
                     Some(n.popup_position.clone()),
                     |value| Message::NotifPositionChanged(value),
                 ).width(Length::Fill).into()),
-                ("Margin H", slider_control(0..=100, n.popup_margin_h, |value| Message::NotifNumberChanged("popup_margin_h".to_string(), value))),
-                ("Margin V", slider_control(0..=100, n.popup_margin_v, |value| Message::NotifNumberChanged("popup_margin_v".to_string(), value))),
+                ("Margin H", slider_control(0..=100, n.popup_margin_h, state.field_err("panel.notifications.popup_margin_h"), |value| Message::NotifNumberChanged("popup_margin_h".to_string(), value))),
+                ("Margin V", slider_control(0..=100, n.popup_margin_v, state.field_err("panel.notifications.popup_margin_v"), |value| Message::NotifNumberChanged("popup_margin_v".to_string(), value))),
             ]));
 
         // Popup style: the same controls as Sensor Defaults (colors, border,
@@ -3826,28 +4145,33 @@ fn notifications_settings<'a>(state: &'a PiumaSetup) -> Element<'a, Message> {
                     .style(muted_text(pal)),
             )
             .push(form_grid(vec![
-                ("Font Size", slider_control(8..=32, n.font_size as i32, |value| Message::NotifNumberChanged("font_size".to_string(), value))),
-                ("Text", color_control(&n.text_color, |value| Message::NotifStyleChanged("text_color".to_string(), value))),
-                ("Hover Text", color_control(&n.text_color_hover, |value| Message::NotifStyleChanged("text_color_hover".to_string(), value))),
-                ("BG", color_control(&n.bg_color, |value| Message::NotifStyleChanged("bg_color".to_string(), value))),
-                ("Hover BG", color_control(&n.bg_color_hover, |value| Message::NotifStyleChanged("bg_color_hover".to_string(), value))),
-                ("Border", color_control(&n.border_color, |value| Message::NotifStyleChanged("border_color".to_string(), value))),
-                ("Border Hover", color_control(&n.border_color_hover, |value| Message::NotifStyleChanged("border_color_hover".to_string(), value))),
-                ("Border Width", slider_control(0..=10, n.border_width, |value| Message::NotifNumberChanged("border_width".to_string(), value))),
-                ("Border Radius", slider_control(0..=20, n.border_radius, |value| Message::NotifNumberChanged("border_radius".to_string(), value))),
-                ("Padding", slider_control(0..=24, n.padding, |value| Message::NotifNumberChanged("padding".to_string(), value))),
-                ("Border Type", picklist(
-                    vec![
-                        "full".to_string(),
-                        "corners".to_string(),
-                        "underline".to_string(),
-                        "upperline".to_string(),
-                        "left".to_string(),
-                        "right".to_string(),
-                    ],
-                    Some(n.border_type.clone()),
-                    |value| Message::NotifStyleChanged("border_type".to_string(), value),
-                ).width(Length::Fill).into()),
+                ("Font Size", slider_control(8..=32, n.font_size as i32, state.field_err("panel.notifications.font_size"), |value| Message::NotifNumberChanged("font_size".to_string(), value))),
+                ("Text", color_control(&n.text_color, state.field_err("panel.notifications.text_color"), |value| Message::NotifStyleChanged("text_color".to_string(), value))),
+                ("Hover Text", color_control(&n.text_color_hover, state.field_err("panel.notifications.text_color_hover"), |value| Message::NotifStyleChanged("text_color_hover".to_string(), value))),
+                ("BG", color_control(&n.bg_color, state.field_err("panel.notifications.bg_color"), |value| Message::NotifStyleChanged("bg_color".to_string(), value))),
+                ("Hover BG", color_control(&n.bg_color_hover, state.field_err("panel.notifications.bg_color_hover"), |value| Message::NotifStyleChanged("bg_color_hover".to_string(), value))),
+                ("Border", color_control(&n.border_color, state.field_err("panel.notifications.border_color"), |value| Message::NotifStyleChanged("border_color".to_string(), value))),
+                ("Border Hover", color_control(&n.border_color_hover, state.field_err("panel.notifications.border_color_hover"), |value| Message::NotifStyleChanged("border_color_hover".to_string(), value))),
+                ("Border Width", slider_control(0..=10, n.border_width, state.field_err("panel.notifications.border_width"), |value| Message::NotifNumberChanged("border_width".to_string(), value))),
+                ("Border Radius", slider_control(0..=20, n.border_radius, state.field_err("panel.notifications.border_radius"), |value| Message::NotifNumberChanged("border_radius".to_string(), value))),
+                ("Padding", slider_control(0..=24, n.padding, state.field_err("panel.notifications.padding"), |value| Message::NotifNumberChanged("padding".to_string(), value))),
+                ("Border Type", invalid_under(
+                    picklist(
+                        vec![
+                            "full".to_string(),
+                            "corners".to_string(),
+                            "underline".to_string(),
+                            "upperline".to_string(),
+                            "left".to_string(),
+                            "right".to_string(),
+                        ],
+                        Some(n.border_type.clone()),
+                        |value| Message::NotifStyleChanged("border_type".to_string(), value),
+                    )
+                    .width(Length::Fill)
+                    .into(),
+                    state.field_err("panel.notifications.border_type"),
+                )),
             ]));
     }
 
@@ -3898,6 +4222,7 @@ fn section_view<'a>(
     let layout = section.layout.as_deref().unwrap_or(&state.config.section_layout);
     let count = section.sensors.len();
     let summary = format!("{} · {} sensor{}", layout, count, if count == 1 { "" } else { "s" });
+    let err_count = state.section_err_count(index);
     let header = Row::new()
         .push(collapsible_header(
             pal,
@@ -3905,7 +4230,20 @@ fn section_view<'a>(
             summary,
             !collapsed,
             Message::ToggleSection(index),
-        ))
+        ));
+    let badge: Element<'_, Message> = if err_count == 0 {
+        text("").size(10).into()
+    } else {
+        // Badge visible even when the section is collapsed.
+        text(format!("⚠ {err_count}"))
+            .size(10)
+            .style(|_t: &Theme| TextStyle {
+                color: Some(Color::from_rgb(0.9, 0.3, 0.3)),
+                ..TextStyle::default()
+            })
+            .into()
+    };
+    let header = header.push(badge)
         .push(move_btn(pal, "▲", index > 0, Message::SectionMoveUp(index)))
         .push(move_btn(
             pal,
@@ -3951,35 +4289,45 @@ fn section_view<'a>(
         .into(),
     );
     let settings = form_grid(vec![
-        ("Layout", picklist(
-            vec!["horizontal".to_string(), "vertical".to_string()],
-            section.layout.as_ref(),
-            move |value| Message::SectionLayoutChangedIndex(index, value),
-        ).width(Length::Fill).into()),
-        ("BG", color_control(section.bg_color.as_deref().unwrap_or(""), move |value| Message::SectionBgColorChanged(index, value))),
-        ("Text", color_control(section.text_color.as_deref().unwrap_or(""), move |value| Message::SectionTextColorChanged(index, value))),
-        ("Border", color_control(section.border_color.as_deref().unwrap_or(""), move |value| Message::SectionStyleChanged(index, "border_color".to_string(), value))),
-        ("Border Width", slider_control(-1i32..=10, section.border_width.unwrap_or(-1), move |value| Message::SectionNumberChanged(index, "border_width".to_string(), value))),
-        ("Border Radius", slider_control(-1i32..=20, section.border_radius.unwrap_or(-1), move |value| Message::SectionNumberChanged(index, "border_radius".to_string(), value))),
-        ("Border Type", picklist(
-            vec![
-                "full".to_string(),
-                "corners".to_string(),
-                "underline".to_string(),
-                "upperline".to_string(),
-                "left".to_string(),
-                "right".to_string(),
-            ],
-            Some(section.border_type.clone().unwrap_or_else(|| "full".to_string())),
-            move |value| Message::SectionStyleChanged(index, "border_type".to_string(), value),
-        ).width(Length::Fill).into()),
+        ("Layout", invalid_under(
+            picklist(
+                vec!["horizontal".to_string(), "vertical".to_string()],
+                section.layout.as_ref(),
+                move |value| Message::SectionLayoutChangedIndex(index, value),
+            )
+            .width(Length::Fill)
+            .into(),
+            state.field_err(&format!("panel.sections[{index}].layout")),
+        )),
+        ("BG", color_control(section.bg_color.as_deref().unwrap_or(""), state.field_err(&format!("panel.sections[{index}].bg_color")), move |value| Message::SectionBgColorChanged(index, value))),
+        ("Text", color_control(section.text_color.as_deref().unwrap_or(""), state.field_err(&format!("panel.sections[{index}].text_color")), move |value| Message::SectionTextColorChanged(index, value))),
+        ("Border", color_control(section.border_color.as_deref().unwrap_or(""), state.field_err(&format!("panel.sections[{index}].border_color")), move |value| Message::SectionStyleChanged(index, "border_color".to_string(), value))),
+        ("Border Width", slider_control(-1i32..=10, section.border_width.unwrap_or(-1), state.field_err(&format!("panel.sections[{index}].border_width")), move |value| Message::SectionNumberChanged(index, "border_width".to_string(), value))),
+        ("Border Radius", slider_control(-1i32..=20, section.border_radius.unwrap_or(-1), state.field_err(&format!("panel.sections[{index}].border_radius")), move |value| Message::SectionNumberChanged(index, "border_radius".to_string(), value))),
+        ("Border Type", invalid_under(
+            picklist(
+                vec![
+                    "full".to_string(),
+                    "corners".to_string(),
+                    "underline".to_string(),
+                    "upperline".to_string(),
+                    "left".to_string(),
+                    "right".to_string(),
+                ],
+                Some(section.border_type.clone().unwrap_or_else(|| "full".to_string())),
+                move |value| Message::SectionStyleChanged(index, "border_type".to_string(), value),
+            )
+            .width(Length::Fill)
+            .into(),
+            state.field_err(&format!("panel.sections[{index}].border_type")),
+        )),
     ]);
 
     let mut sensor_list = Column::new().spacing(8).width(Length::Fill);
     for (j, sensor) in section.sensors.iter().enumerate() {
         sensor_list = sensor_list.push(sensor_view(
             pal,
-            &state.config,
+            state,
             sensor_icon_size(&state.config, section, sensor),
             index,
             j,
@@ -4000,13 +4348,28 @@ fn section_view<'a>(
         .width(Length::Fill)
         .style(inset_style(pal));
 
-    card(
+    let body = card(
         pal,
         column![header, name_row, settings, sensors]
             .spacing(10)
             .width(Length::Fill),
-    )
-    .into()
+    );
+    if err_count == 0 {
+        body.into()
+    } else {
+        // Red frame: the section holding invalid values reads at a glance
+        // in the Sections tab, with the fields themselves highlighted.
+        container(body)
+            .style(move |_t: &Theme| container::Style {
+                border: Border {
+                    width: 2.0,
+                    color: Color::from_rgb(0.9, 0.3, 0.3),
+                    radius: pal.radius.into(),
+                },
+                ..container::Style::default()
+            })
+            .into()
+    }
 }
 
 /// Legacy PascalCase source type → canonical prefixed/lowercase name, so
@@ -4169,7 +4532,7 @@ fn sensor_summary(sensor: &Sensor) -> String {
 /// section "Move to" picklist (its number prefix is the 1-based index).
 fn sensor_view<'a>(
     pal: Palette,
-    cfg: &'a PiumaConfig,
+    state: &'a PiumaSetup,
     icon_size: u16,
     section_index: usize,
     sensor_index: usize,
@@ -4185,7 +4548,7 @@ fn sensor_view<'a>(
         .unwrap_or_else(|| source_label(canonical_type(&sensor.source_type)).to_string());
     let mut header = Row::new();
     // The sensor's own icon leads the row, at the bar's row-height size.
-    if let Some(icon) = resolved_icon(cfg, icon_size, sensor.icon.as_deref()) {
+    if let Some(icon) = resolved_icon(&state.config, icon_size, sensor.icon.as_deref()) {
         header = header.push(icon);
     }
     let header = header
@@ -4296,7 +4659,7 @@ fn sensor_view<'a>(
             .on_press(Message::BrowseIconsPressed(section_index, sensor_index))
             .padding(5)
             .style(move |t, s| btn_secondary(pal, t, s)))
-        .push(icon_preview(cfg, icon_size, sensor.icon.as_deref()))
+        .push(icon_preview(&state.config, icon_size, sensor.icon.as_deref()))
         .spacing(8)
         .align_y(Alignment::Center)
         .width(Length::Fill)
@@ -4364,11 +4727,13 @@ fn sensor_view<'a>(
 
     // Style numbers: -1 = disabled (the defaults apply), 0..=N = enabled.
     if style_open {
+        let spath =
+            |field: &str| format!("panel.sections[{section_index}].sensors[{sensor_index}].{field}");
         let fields = vec![
             // Text colour with the threshold-rules editor right after it:
             // the "…" opens the popup where colours and thresholds live.
             ("Text", Row::new()
-                .push(color_control(sensor.text_color.as_deref().unwrap_or(""), move |value| Message::SensorTextColorChanged(section_index, sensor_index, value)))
+                .push(color_control(sensor.text_color.as_deref().unwrap_or(""), state.field_err(&spath("text_color")), move |value| Message::SensorTextColorChanged(section_index, sensor_index, value)))
                 .push(
                     button(text("…").size(BODY))
                         .on_press(Message::ColorRulesPressed(section_index, sensor_index))
@@ -4379,26 +4744,31 @@ fn sensor_view<'a>(
                 .align_y(Alignment::Center)
                 .width(Length::Fill)
                 .into()),
-            ("Hover Text", color_control(sensor.text_color_hover.as_deref().unwrap_or(""), move |value| Message::SensorTextColorHoverChanged(section_index, sensor_index, value))),
-            ("BG", color_control(sensor.bg_color.as_deref().unwrap_or(""), move |value| Message::SensorBgColorChanged(section_index, sensor_index, value))),
-            ("Hover BG", color_control(sensor.bg_color_hover.as_deref().unwrap_or(""), move |value| Message::SensorBgColorHoverChanged(section_index, sensor_index, value))),
-            ("Border", color_control(sensor.border_color.as_deref().unwrap_or(""), move |value| Message::SensorBorderColorChanged(section_index, sensor_index, value))),
-            ("Border Hover", color_control(sensor.border_color_hover.as_deref().unwrap_or(""), move |value| Message::SensorBorderColorHoverChanged(section_index, sensor_index, value))),
-            ("Border Width", slider_control(-1i32..=10, sensor.border_width.unwrap_or(-1), move |value| Message::SensorBorderWidthChanged(section_index, sensor_index, value))),
-            ("Border Radius", slider_control(-1i32..=20, sensor.border_radius.unwrap_or(-1), move |value| Message::SensorBorderRadiusChanged(section_index, sensor_index, value))),
-            ("Padding", slider_control(-1i32..=20, sensor.padding.unwrap_or(-1), move |value| Message::SensorPaddingChanged(section_index, sensor_index, value))),
-            ("Border Type", picklist(
-                vec![
-                    "full".to_string(),
-                    "corners".to_string(),
-                    "underline".to_string(),
-                    "upperline".to_string(),
-                    "left".to_string(),
-                    "right".to_string(),
-                ],
-                Some(sensor.border_type.clone().unwrap_or_else(|| "full".to_string())),
-                move |value| Message::SensorBorderTypeChanged(section_index, sensor_index, value),
-            ).width(Length::Fill).into()),
+            ("Hover Text", color_control(sensor.text_color_hover.as_deref().unwrap_or(""), state.field_err(&spath("text_color_hover")), move |value| Message::SensorTextColorHoverChanged(section_index, sensor_index, value))),
+            ("BG", color_control(sensor.bg_color.as_deref().unwrap_or(""), state.field_err(&spath("bg_color")), move |value| Message::SensorBgColorChanged(section_index, sensor_index, value))),
+            ("Hover BG", color_control(sensor.bg_color_hover.as_deref().unwrap_or(""), state.field_err(&spath("bg_color_hover")), move |value| Message::SensorBgColorHoverChanged(section_index, sensor_index, value))),
+            ("Border", color_control(sensor.border_color.as_deref().unwrap_or(""), state.field_err(&spath("border_color")), move |value| Message::SensorBorderColorChanged(section_index, sensor_index, value))),
+            ("Border Hover", color_control(sensor.border_color_hover.as_deref().unwrap_or(""), state.field_err(&spath("border_color_hover")), move |value| Message::SensorBorderColorHoverChanged(section_index, sensor_index, value))),
+            ("Border Width", slider_control(-1i32..=10, sensor.border_width.unwrap_or(-1), state.field_err(&spath("border_width")), move |value| Message::SensorBorderWidthChanged(section_index, sensor_index, value))),
+            ("Border Radius", slider_control(-1i32..=20, sensor.border_radius.unwrap_or(-1), state.field_err(&spath("border_radius")), move |value| Message::SensorBorderRadiusChanged(section_index, sensor_index, value))),
+            ("Padding", slider_control(-1i32..=20, sensor.padding.unwrap_or(-1), state.field_err(&spath("padding")), move |value| Message::SensorPaddingChanged(section_index, sensor_index, value))),
+            ("Border Type", invalid_under(
+                picklist(
+                    vec![
+                        "full".to_string(),
+                        "corners".to_string(),
+                        "underline".to_string(),
+                        "upperline".to_string(),
+                        "left".to_string(),
+                        "right".to_string(),
+                    ],
+                    Some(sensor.border_type.clone().unwrap_or_else(|| "full".to_string())),
+                    move |value| Message::SensorBorderTypeChanged(section_index, sensor_index, value),
+                )
+                .width(Length::Fill)
+                .into(),
+                state.field_err(&spath("border_type")),
+            )),
         ];
         root = root.push(
             container(form_grid(fields))
@@ -4446,27 +4816,32 @@ fn sensor_defaults_view(state: &PiumaSetup) -> Element<'_, Message> {
 
         // Style numbers: -1 = disabled (the defaults apply), 0..=N = enabled.
         let fields = vec![
-            ("Text", color_control(d.text_color.as_deref().unwrap_or(""), |value| Message::DefaultsStyleChanged("text_color".to_string(), value))),
-            ("Hover Text", color_control(d.text_color_hover.as_deref().unwrap_or(""), |value| Message::DefaultsStyleChanged("text_color_hover".to_string(), value))),
-            ("BG", color_control(d.bg_color.as_deref().unwrap_or(""), |value| Message::DefaultsStyleChanged("bg_color".to_string(), value))),
-            ("Hover BG", color_control(d.bg_color_hover.as_deref().unwrap_or(""), |value| Message::DefaultsStyleChanged("bg_color_hover".to_string(), value))),
-            ("Border", color_control(d.border_color.as_deref().unwrap_or(""), |value| Message::DefaultsStyleChanged("border_color".to_string(), value))),
-            ("Border Hover", color_control(d.border_color_hover.as_deref().unwrap_or(""), |value| Message::DefaultsStyleChanged("border_color_hover".to_string(), value))),
-            ("Border Width", slider_control(-1i32..=10, d.border_width.unwrap_or(-1), |value| Message::DefaultsNumberChanged("border_width".to_string(), value))),
-            ("Border Radius", slider_control(-1i32..=20, d.border_radius.unwrap_or(-1), |value| Message::DefaultsNumberChanged("border_radius".to_string(), value))),
-            ("Padding", slider_control(-1i32..=20, d.padding.unwrap_or(-1), |value| Message::DefaultsNumberChanged("padding".to_string(), value))),
-            ("Border Type", picklist(
-                vec![
-                    "full".to_string(),
-                    "corners".to_string(),
-                    "underline".to_string(),
-                    "upperline".to_string(),
-                    "left".to_string(),
-                    "right".to_string(),
-                ],
-                Some(d.border_type.clone().unwrap_or_else(|| "full".to_string())),
-                |value| Message::DefaultsStyleChanged("border_type".to_string(), value),
-            ).width(Length::Fill).into()),
+            ("Text", color_control(d.text_color.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.text_color"), |value| Message::DefaultsStyleChanged("text_color".to_string(), value))),
+            ("Hover Text", color_control(d.text_color_hover.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.text_color_hover"), |value| Message::DefaultsStyleChanged("text_color_hover".to_string(), value))),
+            ("BG", color_control(d.bg_color.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.bg_color"), |value| Message::DefaultsStyleChanged("bg_color".to_string(), value))),
+            ("Hover BG", color_control(d.bg_color_hover.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.bg_color_hover"), |value| Message::DefaultsStyleChanged("bg_color_hover".to_string(), value))),
+            ("Border", color_control(d.border_color.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.border_color"), |value| Message::DefaultsStyleChanged("border_color".to_string(), value))),
+            ("Border Hover", color_control(d.border_color_hover.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.border_color_hover"), |value| Message::DefaultsStyleChanged("border_color_hover".to_string(), value))),
+            ("Border Width", slider_control(-1i32..=10, d.border_width.unwrap_or(-1), state.field_err("panel.sensor_defaults.border_width"), |value| Message::DefaultsNumberChanged("border_width".to_string(), value))),
+            ("Border Radius", slider_control(-1i32..=20, d.border_radius.unwrap_or(-1), state.field_err("panel.sensor_defaults.border_radius"), |value| Message::DefaultsNumberChanged("border_radius".to_string(), value))),
+            ("Padding", slider_control(-1i32..=20, d.padding.unwrap_or(-1), state.field_err("panel.sensor_defaults.padding"), |value| Message::DefaultsNumberChanged("padding".to_string(), value))),
+            ("Border Type", invalid_under(
+                picklist(
+                    vec![
+                        "full".to_string(),
+                        "corners".to_string(),
+                        "underline".to_string(),
+                        "upperline".to_string(),
+                        "left".to_string(),
+                        "right".to_string(),
+                    ],
+                    Some(d.border_type.clone().unwrap_or_else(|| "full".to_string())),
+                    |value| Message::DefaultsStyleChanged("border_type".to_string(), value),
+                )
+                .width(Length::Fill)
+                .into(),
+                state.field_err("panel.sensor_defaults.border_type"),
+            )),
         ];
         root = root.push(form_grid(fields));
     }
@@ -4505,23 +4880,28 @@ fn section_defaults_view(state: &PiumaSetup) -> Element<'_, Message> {
 
         // Style numbers: -1 = disabled (built-in fallback), 0..=N = enabled.
         let fields = vec![
-            ("BG", color_control(d.bg_color.as_deref().unwrap_or(""), |value| Message::SecDefaultsStyleChanged("bg_color".to_string(), value))),
-            ("Text", color_control(d.text_color.as_deref().unwrap_or(""), |value| Message::SecDefaultsStyleChanged("text_color".to_string(), value))),
-            ("Border", color_control(d.border_color.as_deref().unwrap_or(""), |value| Message::SecDefaultsStyleChanged("border_color".to_string(), value))),
-            ("Border Width", slider_control(-1i32..=10, d.border_width.unwrap_or(-1), |value| Message::SecDefaultsNumberChanged("border_width".to_string(), value))),
-            ("Border Radius", slider_control(-1i32..=20, d.border_radius.unwrap_or(-1), |value| Message::SecDefaultsNumberChanged("border_radius".to_string(), value))),
-            ("Border Type", picklist(
-                vec![
-                    "full".to_string(),
-                    "corners".to_string(),
-                    "underline".to_string(),
-                    "upperline".to_string(),
-                    "left".to_string(),
-                    "right".to_string(),
-                ],
-                Some(d.border_type.clone().unwrap_or_else(|| "full".to_string())),
-                |value| Message::SecDefaultsStyleChanged("border_type".to_string(), value),
-            ).width(Length::Fill).into()),
+            ("BG", color_control(d.bg_color.as_deref().unwrap_or(""), state.field_err("panel.section_defaults.bg_color"), |value| Message::SecDefaultsStyleChanged("bg_color".to_string(), value))),
+            ("Text", color_control(d.text_color.as_deref().unwrap_or(""), state.field_err("panel.section_defaults.text_color"), |value| Message::SecDefaultsStyleChanged("text_color".to_string(), value))),
+            ("Border", color_control(d.border_color.as_deref().unwrap_or(""), state.field_err("panel.section_defaults.border_color"), |value| Message::SecDefaultsStyleChanged("border_color".to_string(), value))),
+            ("Border Width", slider_control(-1i32..=10, d.border_width.unwrap_or(-1), state.field_err("panel.section_defaults.border_width"), |value| Message::SecDefaultsNumberChanged("border_width".to_string(), value))),
+            ("Border Radius", slider_control(-1i32..=20, d.border_radius.unwrap_or(-1), state.field_err("panel.section_defaults.border_radius"), |value| Message::SecDefaultsNumberChanged("border_radius".to_string(), value))),
+            ("Border Type", invalid_under(
+                picklist(
+                    vec![
+                        "full".to_string(),
+                        "corners".to_string(),
+                        "underline".to_string(),
+                        "upperline".to_string(),
+                        "left".to_string(),
+                        "right".to_string(),
+                    ],
+                    Some(d.border_type.clone().unwrap_or_else(|| "full".to_string())),
+                    |value| Message::SecDefaultsStyleChanged("border_type".to_string(), value),
+                )
+                .width(Length::Fill)
+                .into(),
+                state.field_err("panel.section_defaults.border_type"),
+            )),
             // Roadmap M3: only sides NOT flush with a screen edge get the
             // rounded corners; the flag comes from these defaults alone.
             ("Screen Edges", toggler(d.respect_screen_edges.unwrap_or(false))
@@ -4721,6 +5101,7 @@ mod tests {
             current_file: "piuma.json".to_string(),
             snapshot: String::new(),
             modal: None,
+            validation: Vec::new(),
             wallpaper_files: Vec::new(),
             autostart_apps: Vec::new(),
         }
@@ -5631,5 +6012,87 @@ mod tests {
         let _ = update(&mut s, Message::ColorRuleRemove(0));
         let _ = update(&mut s, Message::ModalConfirm);
         assert!(s.config.sections[0].sensors[0].color_rules.is_none());
+    }
+
+    // ── value validation (invalid values block the save) ───────────
+
+    /// An invalid colour typed in the editor: the list has it at its path,
+    /// the save is refused (nothing written), the status names the block
+    /// and the modal lists the field in human words.
+    #[test]
+    fn invalid_value_blocks_the_save_and_is_listed() {
+        let mut s = fixture();
+        let _ = update(
+            &mut s,
+            Message::DefaultsStyleChanged("border_color".to_string(), "#zz0000".to_string()),
+        );
+        assert_eq!(
+            s.field_err("panel.sensor_defaults.border_color"),
+            Some("\"#zz0000\": expected hex digits after #"),
+            "the reason is available to the field"
+        );
+        let err = s.save_reporting("piuma.json").expect_err("must refuse");
+        assert!(err.contains("Save blocked"), "message: {err}");
+        assert!(s.status_is_error);
+        let Some(Modal::InvalidFields { errors }) = &s.modal else {
+            panic!("the error list modal must open");
+        };
+        assert_eq!(errors.len(), 1, "one line per invalid value: {errors:?}");
+        assert!(
+            errors[0].contains("Sensor defaults") && errors[0].contains("Border"),
+            "human path: {}",
+            errors[0]
+        );
+        // Fix the value: the list empties and the save goes through the
+        // normal confirmation flow again (no write in this test).
+        let _ = update(
+            &mut s,
+            Message::DefaultsStyleChanged("border_color".to_string(), "#dddddd00".to_string()),
+        );
+        assert!(s.validation.is_empty(), "fixed value clears the list");
+        assert!(s.field_err("panel.sensor_defaults.border_color").is_none());
+    }
+
+    /// Loaded invalid values are found without any edit, reported per
+    /// section with the section/sensor names and counted per section
+    /// (what frames the section card red).
+    #[test]
+    fn loaded_invalid_values_are_named_per_section() {
+        let mut s = test_state();
+        s.config.sections[0].sensors[0].name = Some("perc".to_string());
+        s.config.sections[0].sensors[0].border_color = Some("nope".to_string());
+        s.config.sections[1].bg_color = Some("#ff00zz".to_string());
+        s.refresh_validation();
+        assert_eq!(s.validation.len(), 2, "both bad values: {:?}", s.validation);
+        assert_eq!(s.section_err_count(0), 1);
+        assert_eq!(s.section_err_count(1), 1);
+        let line = s.human_error(&s.validation[0]);
+        assert!(
+            line.contains("Section «Left»") && line.contains("perc") && line.contains("Border"),
+            "human path: {line}"
+        );
+        assert!(
+            s.human_error(&s.validation[1]).contains("Section «Right»"),
+            "second section: {}",
+            s.human_error(&s.validation[1])
+        );
+    }
+
+    /// Every message recomputes the list, so a live edit turns the field
+    /// red and the next one clears it again.
+    #[test]
+    fn validation_follows_every_edit() {
+        let mut s = fixture();
+        assert!(s.validation.is_empty());
+        let _ = update(
+            &mut s,
+            Message::SecDefaultsStyleChanged("bg_color".to_string(), "#12".to_string()),
+        );
+        assert!(s.field_err("panel.section_defaults.bg_color").is_some());
+        let _ = update(
+            &mut s,
+            Message::SecDefaultsStyleChanged("bg_color".to_string(), "#112233".to_string()),
+        );
+        assert!(s.validation.is_empty());
     }
 }

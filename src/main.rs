@@ -825,6 +825,9 @@ fn maybe_reload(panel: &mut Panel) -> Option<(config::Config, String)> {
     match serde_json::from_str::<config::Config>(&contents) {
         Ok(cfg) => {
             eprintln!("[piuma] config reloaded: {}", path);
+            // Same value report as at startup: a reload can bring in an
+            // invalid value, and the log must name it.
+            config::report_invalid(&cfg);
             Some((cfg, path))
         }
         Err(e) => {

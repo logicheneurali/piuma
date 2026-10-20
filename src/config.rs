@@ -12,7 +12,10 @@ use std::path::PathBuf;
 
 /// Parse a float colour string like `"0.1 0.1 0.1 0.9"` or hex
 /// `"#abc"`, `"#ff0000"` / `"#ff0000ff"` (alpha last, as piuma-setup previews).
-pub fn parse_color(value: &str) -> Result<Color, ()> {
+/// A malformed value is an error naming the format — it must never parse
+/// into a *wrong* colour (a non-hex digit used to fall back to 0, which
+/// turned `#zz0000` into silent black).
+pub fn parse_color(value: &str) -> Result<Color, String> {
     let value = value.trim();
     // Hex format: #RGB, #RRGGBB or #RRGGBBAA
     if value.starts_with('#') {
@@ -20,44 +23,41 @@ pub fn parse_color(value: &str) -> Result<Color, ()> {
         // Slices below are byte based: reject non-ASCII instead of panicking
         // on a multi-byte boundary (same guard as piuma-setup's hex_color).
         if !hex.is_ascii() {
-            return Err(());
+            return Err(format!("{value:?}: non-ASCII colour"));
         }
-        let parse_hex = |s: &str, offset: usize| -> Option<u8> {
-            u8::from_str_radix(&s[offset..offset + 2], 16).ok()
+        // Every digit must be hex: a wrong one is an error, never a zero.
+        let nibble = |i: usize| -> Result<u8, String> {
+            u8::from_str_radix(&hex[i..i + 1], 16)
+                .map_err(|_| format!("{value:?}: expected hex digits after #"))
         };
-        match hex.len() {
-            3 => {
-                // Shorthand "#rgb": each digit is duplicated, alpha opaque.
-                let nibble = |i: usize| u8::from_str_radix(&hex[i..i + 1], 16).unwrap_or(0);
-                let (r, g, b) = (nibble(0) * 17, nibble(1) * 17, nibble(2) * 17);
-                Ok(Color::from_rgba(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0))
-            }
-            6 => {
-                let r = parse_hex(hex, 0).unwrap_or(0);
-                let g = parse_hex(hex, 2).unwrap_or(0);
-                let b = parse_hex(hex, 4).unwrap_or(0);
-                Ok(Color::from_rgba(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0))
-            }
-            8 => {
-                let r = parse_hex(hex, 0).unwrap_or(0);
-                let g = parse_hex(hex, 2).unwrap_or(0);
-                let b = parse_hex(hex, 4).unwrap_or(0);
-                let a = parse_hex(hex, 6).unwrap_or(255);
-                Ok(Color::from_rgba(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a as f32 / 255.0))
-            }
-            _ => Err(()),
-        }
+        // `byte(i)` reads the pair of digits at byte offset `i` (two
+        // nibbles: high digit × 16 + low digit).
+        let byte = |i: usize| -> Result<u8, String> { Ok(nibble(2 * i)? * 16 + nibble(2 * i + 1)?) };
+        let (r, g, b, a) = match hex.len() {
+            // Shorthand "#rgb": each digit is duplicated, alpha opaque.
+            3 => (nibble(0)? * 17, nibble(1)? * 17, nibble(2)? * 17, 255),
+            6 => (byte(0)?, byte(1)?, byte(2)?, 255),
+            8 => (byte(0)?, byte(1)?, byte(2)?, byte(3)?),
+            _ => return Err(format!("{value:?}: expected #rgb, #rrggbb or #rrggbbaa")),
+        };
+        Ok(Color::from_rgba(
+            r as f32 / 255.0,
+            g as f32 / 255.0,
+            b as f32 / 255.0,
+            a as f32 / 255.0,
+        ))
     } else {
-        // ARGB float string: "r g b a"
+        // Float string: "r g b a" — every component must be a number.
         let parts: Vec<&str> = value.split_whitespace().collect();
+        let component = |i: usize| -> Result<f32, String> {
+            parts[i]
+                .parse::<f32>()
+                .map_err(|_| format!("{value:?}: expected \"r g b a\" float components"))
+        };
         if parts.len() >= 4 {
-            let r: f32 = parts[0].parse().unwrap_or(0.0);
-            let g: f32 = parts[1].parse().unwrap_or(0.0);
-            let b: f32 = parts[2].parse().unwrap_or(0.0);
-            let a: f32 = parts[3].parse().unwrap_or(1.0);
-            Ok(Color::from_rgba(r, g, b, a))
+            Ok(Color::from_rgba(component(0)?, component(1)?, component(2)?, component(3)?))
         } else {
-            Err(())
+            Err(format!("{value:?}: expected \"r g b a\" float components"))
         }
     }
 }
@@ -458,6 +458,253 @@ fn default_config_path() -> PathBuf {
     default_path
 }
 
+// ── value validation ────────────────────────────────────────────────
+
+/// One invalid value inside a parsed config: the field's JSON path (as
+/// `panel.sections[0].sensors[1].border_color`) and why it is rejected.
+/// `validate_config` collects them, so the bar (logged at load) and
+/// piuma-setup (blocks the save and highlights the field) name exactly
+/// the same problems.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigError {
+    pub path: String,
+    pub message: String,
+}
+
+/// The `border_type` values the renderer understands (`styles.rs`).
+const BORDER_TYPES: [&str; 6] = ["full", "corners", "underline", "upperline", "left", "right"];
+
+/// The `err_*` helpers below each append one `ConfigError` (path +
+/// reason) when a present value does not parse or is out of range;
+/// absent fields (`None`) are always fine.
+
+fn err_color(errors: &mut Vec<ConfigError>, path: &str, value: Option<&str>) {
+    if let Some(v) = value {
+        if let Err(message) = parse_color(v) {
+            errors.push(ConfigError { path: path.to_string(), message });
+        }
+    }
+}
+
+fn err_one_of(errors: &mut Vec<ConfigError>, path: &str, value: Option<&str>, allowed: &[&str]) {
+    if let Some(v) = value {
+        if !allowed.contains(&v) {
+            errors.push(ConfigError {
+                path: path.to_string(),
+                message: format!("{v:?}: expected one of {}", allowed.join(", ")),
+            });
+        }
+    }
+}
+
+/// Signed style numbers keep the `-1 = disabled` sentinel valid (see
+/// `style_num`), so the ranges start at -1 where a sentinel exists.
+fn err_range(errors: &mut Vec<ConfigError>, path: &str, value: Option<i32>, min: i32, max: i32) {
+    if let Some(v) = value {
+        if !(min..=max).contains(&v) {
+            errors.push(ConfigError {
+                path: path.to_string(),
+                message: format!("{v}: expected {min}..={max}"),
+            });
+        }
+    }
+}
+
+fn err_range_u32(errors: &mut Vec<ConfigError>, path: &str, value: Option<u32>, min: u32, max: u32) {
+    if let Some(v) = value {
+        if !(min..=max).contains(&v) {
+            errors.push(ConfigError {
+                path: path.to_string(),
+                message: format!("{v}: expected {min}..={max}"),
+            });
+        }
+    }
+}
+
+/// The six-colour + border-type + style-numbers block, shared by
+/// `panel.sensor_defaults` and every sensor's style overrides.
+#[allow(clippy::too_many_arguments)]
+fn err_sensor_style(
+    errors: &mut Vec<ConfigError>,
+    path: &str,
+    text_color: Option<&str>,
+    text_color_hover: Option<&str>,
+    bg_color: Option<&str>,
+    bg_color_hover: Option<&str>,
+    border_color: Option<&str>,
+    border_color_hover: Option<&str>,
+    border_type: Option<&str>,
+    border_width: Option<i32>,
+    border_width_hover: Option<i32>,
+    border_radius: Option<i32>,
+    padding: Option<i32>,
+) {
+    for (name, value) in [
+        ("text_color", text_color),
+        ("text_color_hover", text_color_hover),
+        ("bg_color", bg_color),
+        ("bg_color_hover", bg_color_hover),
+        ("border_color", border_color),
+        ("border_color_hover", border_color_hover),
+    ] {
+        err_color(errors, &format!("{path}.{name}"), value);
+    }
+    err_one_of(errors, &format!("{path}.border_type"), border_type, &BORDER_TYPES);
+    err_range(errors, &format!("{path}.border_width"), border_width, -1, 64);
+    err_range(errors, &format!("{path}.border_width_hover"), border_width_hover, -1, 64);
+    err_range(errors, &format!("{path}.border_radius"), border_radius, -1, 64);
+    err_range(errors, &format!("{path}.padding"), padding, -1, 64);
+}
+
+/// Walks every typed field of the config — colours, the `border_type`
+/// enums, the numeric ranges — and collects each value piuma would
+/// silently ignore or clamp at render time. This is what turns a
+/// silently-dropped edit into a named, fixable error.
+pub fn validate_config(cfg: &Config) -> Vec<ConfigError> {
+    let mut errors: Vec<ConfigError> = Vec::new();
+    let p = &cfg.panel;
+
+    // Panel-level typed values.
+    err_color(&mut errors, "panel.default_bg_color", p.default_bg_color.as_deref());
+    err_color(&mut errors, "panel.default_text_color", p.default_text_color.as_deref());
+    err_one_of(
+        &mut errors,
+        "panel.anchor",
+        p.anchor.as_deref(),
+        // The setup picklist offers the four edges and four corners.
+        &["top", "bottom", "left", "right", "top-left", "top-right", "bottom-left", "bottom-right"],
+    );
+    err_one_of(
+        &mut errors,
+        "panel.align",
+        p.align.as_deref(),
+        // "top"/"bottom" position inside a vertical panel, "fill" stretches
+        // (geometry.rs reads all of them).
+        &["left", "center", "right", "fill", "top", "bottom"],
+    );
+    err_one_of(
+        &mut errors,
+        "panel.section_layout",
+        p.section_layout.as_deref(),
+        &["horizontal", "vertical"],
+    );
+    err_range_u32(&mut errors, "panel.thickness", p.thickness, 4, 256);
+    err_range_u32(&mut errors, "panel.font_size", p.font_size, 1, 256);
+    err_range_u32(&mut errors, "panel.default_section_weight", p.default_section_weight, 1, 1000);
+
+    if let Some(d) = &p.sensor_defaults {
+        err_sensor_style(
+            &mut errors,
+            "panel.sensor_defaults",
+            d.text_color.as_deref(),
+            d.text_color_hover.as_deref(),
+            d.bg_color.as_deref(),
+            d.bg_color_hover.as_deref(),
+            d.border_color.as_deref(),
+            d.border_color_hover.as_deref(),
+            d.border_type.as_deref(),
+            d.border_width,
+            d.border_width_hover,
+            d.border_radius,
+            d.padding,
+        );
+    }
+    if let Some(sd) = &p.section_defaults {
+        let path = "panel.section_defaults";
+        for (name, value) in [
+            ("bg_color", sd.bg_color.as_deref()),
+            ("text_color", sd.text_color.as_deref()),
+            ("border_color", sd.border_color.as_deref()),
+        ] {
+            err_color(&mut errors, &format!("{path}.{name}"), value);
+        }
+        err_one_of(&mut errors, &format!("{path}.border_type"), sd.border_type.as_deref(), &BORDER_TYPES);
+        err_range(&mut errors, &format!("{path}.border_width"), sd.border_width, -1, 64);
+        err_range(&mut errors, &format!("{path}.border_radius"), sd.border_radius, -1, 64);
+    }
+    if let Some(n) = &p.notifications {
+        let path = "panel.notifications";
+        for (name, value) in [
+            ("text_color", n.text_color.as_deref()),
+            ("text_color_hover", n.text_color_hover.as_deref()),
+            ("bg_color", n.bg_color.as_deref()),
+            ("bg_color_hover", n.bg_color_hover.as_deref()),
+            ("border_color", n.border_color.as_deref()),
+            ("border_color_hover", n.border_color_hover.as_deref()),
+        ] {
+            err_color(&mut errors, &format!("{path}.{name}"), value);
+        }
+        err_one_of(&mut errors, &format!("{path}.border_type"), n.border_type.as_deref(), &BORDER_TYPES);
+        err_range(&mut errors, &format!("{path}.border_width"), n.border_width, -1, 64);
+        err_range(&mut errors, &format!("{path}.border_radius"), n.border_radius, -1, 64);
+        err_range(&mut errors, &format!("{path}.padding"), n.padding, -1, 64);
+        err_range_u32(&mut errors, &format!("{path}.font_size"), n.font_size, 1, 256);
+        err_range_u32(&mut errors, &format!("{path}.history_size"), n.history_size, 1, 1000);
+        // A day of timeout at most; `popup_position` needs no check: any
+        // unknown value keeps the historic layout by design.
+        if let Some(t) = n.default_timeout_ms {
+            if t > 86_400_000 {
+                errors.push(ConfigError {
+                    path: format!("{path}.default_timeout_ms"),
+                    message: format!("{t}: expected 0..=86400000"),
+                });
+            }
+        }
+        err_range(&mut errors, &format!("{path}.popup_margin_h"), n.popup_margin_h, -1000, 1000);
+        err_range(&mut errors, &format!("{path}.popup_margin_v"), n.popup_margin_v, -1000, 1000);
+    }
+
+    for (i, s) in p.sections.iter().enumerate() {
+        let path = format!("panel.sections[{i}]");
+        err_one_of(&mut errors, &format!("{path}.layout"), s.layout.as_deref(), &["horizontal", "vertical"]);
+        err_range_u32(&mut errors, &format!("{path}.weight"), s.weight, 1, 1000);
+        for (name, value) in [
+            ("bg_color", s.bg_color.as_deref()),
+            ("text_color", s.text_color.as_deref()),
+            ("border_color", s.border_color.as_deref()),
+        ] {
+            err_color(&mut errors, &format!("{path}.{name}"), value);
+        }
+        err_one_of(&mut errors, &format!("{path}.border_type"), s.border_type.as_deref(), &BORDER_TYPES);
+        err_range(&mut errors, &format!("{path}.border_width"), s.border_width, -1, 64);
+        err_range(&mut errors, &format!("{path}.border_radius"), s.border_radius, -1, 64);
+        for (j, sensor) in s.sensors.iter().enumerate() {
+            let spath = format!("{path}.sensors[{j}]");
+            err_sensor_style(
+                &mut errors,
+                &spath,
+                sensor.text_color.as_deref(),
+                sensor.text_color_hover.as_deref(),
+                sensor.bg_color.as_deref(),
+                sensor.bg_color_hover.as_deref(),
+                sensor.border_color.as_deref(),
+                sensor.border_color_hover.as_deref(),
+                sensor.border_type.as_deref(),
+                sensor.border_width,
+                sensor.border_width_hover,
+                sensor.border_radius,
+                sensor.padding,
+            );
+            if let Some(rules) = &sensor.color_rules {
+                for (k, rule) in rules.iter().enumerate() {
+                    err_color(&mut errors, &format!("{spath}.color_rules[{k}].color"), Some(&rule.color));
+                }
+            }
+        }
+    }
+    errors
+}
+
+/// Log every invalid value of a freshly loaded config: render time falls
+/// back to the defaults silently, so the log — together with
+/// piuma-setup's highlighted fields — is where a hand-edited value
+/// gets named instead of vanishing.
+pub fn report_invalid(cfg: &Config) {
+    for error in validate_config(cfg) {
+        eprintln!("[piuma] config {}: {} — using the default", error.path, error.message);
+    }
+}
+
 /// Load configuration from an explicit path or the default location.
 ///
 /// Returns the config together with the path it was actually loaded from,
@@ -471,7 +718,11 @@ pub fn load_config(path: Option<String>) -> (Config, PathBuf) {
                 // part of the message: a broken config must be fixable, not
                 // mysterious (the hot reload prints it the same way).
                 Ok(contents) => match serde_json::from_str::<Config>(&contents) {
-                    Ok(config) => return (config, p),
+                    Ok(config) => {
+                        // Named once here: render time only falls back.
+                        report_invalid(&config);
+                        return (config, p);
+                    }
                     Err(e) => eprintln!("[piuma] Failed to parse config at {}: {}", p.display(), e),
                 },
                 Err(e) => eprintln!("[piuma] Cannot read config at {}: {}", p.display(), e),
@@ -486,7 +737,10 @@ pub fn load_config(path: Option<String>) -> (Config, PathBuf) {
     if default_path.exists() {
         match std::fs::read_to_string(&default_path) {
             Ok(contents) => match serde_json::from_str::<Config>(&contents) {
-                Ok(config) => return (config, default_path),
+                Ok(config) => {
+                    report_invalid(&config);
+                    return (config, default_path);
+                }
                 Err(e) => eprintln!("[piuma] Failed to parse config at {}: {}", default_path.display(), e),
             },
             Err(e) => eprintln!("[piuma] Cannot read config at {}: {}", default_path.display(), e),
@@ -775,5 +1029,84 @@ mod tests {
         let out = serde_json::to_string(&cfg).expect("config must serialize");
         assert!(out.contains(r#""taskbar""#), "got: {out}");
     }
+
+    // ── parse_color strictness ─────────────────────────────────────
+
+    /// Every accepted format still parses to the same colour.
+    #[test]
+    fn parse_color_keeps_the_valid_formats() {
+        let c = parse_color("#ff0000").expect("hex6");
+        assert_eq!((c.r, c.g, c.b, c.a), (1.0, 0.0, 0.0, 1.0));
+        let c = parse_color("#f00").expect("hex3");
+        assert_eq!((c.r, c.g, c.b, c.a), (1.0, 0.0, 0.0, 1.0));
+        let c = parse_color("#10203080").expect("hex8");
+        assert!((c.a - 128.0 / 255.0).abs() < 0.001);
+        let c = parse_color("0.25 0.5 0.75 1.0").expect("floats");
+        assert_eq!((c.r, c.g, c.b, c.a), (0.25, 0.5, 0.75, 1.0));
+    }
+
+    /// A malformed value is an error naming the format — it must never
+    /// become a *wrong* colour (a bad hex digit used to fall back to 0,
+    /// turning `#zz0000` into silent black).
+    #[test]
+    fn parse_color_rejects_malformed_values() {
+        let err = parse_color("#zz0000").expect_err("bad digit");
+        assert!(err.contains("hex"), "message: {err}");
+        assert!(parse_color("#ff00").is_err(), "bad length");
+        assert!(parse_color("").is_err(), "empty");
+        assert!(parse_color("0.5 x 0.1 1").is_err(), "bad float component");
+        assert!(parse_color("0.5 0.1").is_err(), "too few floats");
+    }
+
+    // ── validate_config ────────────────────────────────────────────
+
+    /// The built-in default config carries no invalid value.
+    #[test]
+    fn default_config_validates_clean() {
+        assert_eq!(validate_config(&default_config()), Vec::new());
+    }
+
+    /// An unparsable colour, an unknown `border_type` and an out-of-range
+    /// number are each reported at their JSON path.
+    #[test]
+    fn validate_config_names_bad_values_by_path() {
+        let cfg: Config = serde_json::from_str(
+            r##"{"panel":{
+              "anchor":"middle",
+              "sensor_defaults":{"border_color":"#zz0000","padding":-2},
+              "sections":[{"sensors":[{"name":"T","source":{"type":"taskbar"},
+                "border_type":"diagonal","color_rules":[{"min":50,"color":"nope"}]}]}]
+            }}"##,
+        )
+        .expect("config must parse");
+        let errors = validate_config(&cfg);
+        let paths: Vec<&str> = errors.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "panel.anchor",
+                "panel.sensor_defaults.border_color",
+                "panel.sensor_defaults.padding",
+                "panel.sections[0].sensors[0].border_type",
+                "panel.sections[0].sensors[0].color_rules[0].color",
+            ],
+            "every error at its path: {errors:?}"
+        );
+    }
+
+    /// The -1 = disabled sentinel and the setup picklist's own values
+    /// (corner anchors, "fill" align) must validate: the editor offers them.
+    #[test]
+    fn validate_config_accepts_sentinels_and_ui_values() {
+        let cfg: Config = serde_json::from_str(
+            r##"{"panel":{"anchor":"top-left","align":"fill",
+              "sections":[{"border_width":-1,"padding":-1,
+                "sensors":[{"name":"T","source":{"type":"taskbar"},
+                  "border_width":-1,"padding":-1}]}]}}"##,
+        )
+        .expect("config must parse");
+        assert_eq!(validate_config(&cfg), Vec::new());
+    }
 }
+
 

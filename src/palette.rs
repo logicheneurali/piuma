@@ -48,7 +48,9 @@ pub fn keep_config_alpha(tone: &str, configured: Option<&str>) -> String {
                 byte(c.a)
             )
         }
-        Err(()) => tone.to_string(),
+        // A tone that does not parse is left as the caller passed it (a
+        // load-time log names the value; rendering must not break).
+        Err(_) => tone.to_string(),
     }
 }
 
