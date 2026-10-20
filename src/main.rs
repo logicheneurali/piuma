@@ -665,7 +665,9 @@ pub(crate) fn styled_box<'a>(
     // Sides `[top, right, bottom, left]` flush with a screen edge: they
     // render square instead of rounded (roadmap M3; `[false; 4]` elsewhere).
     touch: [bool; 4],
-    padding: u16,
+    // One inset for all four sides unless the caller breaks the symmetry
+    // (the icon rows drop it on the thickness axis to fill the box).
+    padding: iced::Padding,
     width: Length,
     height: Length,
 ) -> Element<'a, Message> {
@@ -1924,13 +1926,34 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
             // not clip a Row, an overflow would paint over the neighbours.
             // The room is the box's width — the thickness in a vertical
             // panel, the screen along a horizontal bar's main axis (the
-            // bar spans it).
+            // bar spans it) — net of the box's horizontal inset only (the
+            // wrap runs along it).
+            // The pill inset, resolved once for both: workspace buttons,
+            // tray icons and taskbar slots are boxes themselves and fill
+            // the cross (thickness) axis — the icons take the whole row
+            // height there, the sensor padding would only squeeze them —
+            // so the box keeps that padding on the main axis alone, and
+            // the buttons drop it too (they carry it, roadmap2 #4).
+            // `vertical` swaps which axis is which; every other sensor
+            // keeps the padding on both axes. The dropped cross-axis part
+            // is what `icons::font_icon_edge` gives back to the icon.
+            let (pad_h, pad_v) = if s.workspaces.is_some() {
+                (0, 0)
+            } else if s.tray.is_some() || s.taskbar.is_some() {
+                if vertical {
+                    (0, s.padding)
+                } else {
+                    (s.padding, 0)
+                }
+            } else {
+                (s.padding, s.padding)
+            };
             let icon_room = (if vertical {
                 panel_thickness(&panel.config)
             } else {
                 unsafe { SCREEN_WIDTH }
             })
-            .saturating_sub(2 * (u32::from(SECTION_CONTENT_PAD) + u32::from(s.padding)));
+            .saturating_sub(2 * (u32::from(SECTION_CONTENT_PAD) + u32::from(pad_h)));
             let main: Element<'a, Message> = if let Some(icons) = &s.tray {
                 let per_line =
                     icons::icons_per_line(icon_room, tray::slot_width(), u32::from(tray::ROW_GAP));
@@ -2038,11 +2061,15 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
                 s.bg_color
             };
             let border_color = s.border_color;
-            // A workspace sensor's buttons carry the sensor's own
-            // padding (they are the boxes), so the outer box adds none:
-            // the pill keeps the height and inset of every other sensor
-            // instead of stacking the padding twice (roadmap2 #4).
-            let pad = if s.workspaces.is_some() { 0 } else { s.padding };
+            // The pill inset resolved above (`pad_h`/`pad_v`): the rows
+            // that own their boxes fill the thickness axis, so their
+            // padding survives on the main axis only.
+            let pad = iced::Padding {
+                left: pad_h as f32,
+                right: pad_h as f32,
+                top: pad_v as f32,
+                bottom: pad_v as f32,
+            };
 
             let styled_container = styled_box(
                 content,
@@ -2162,7 +2189,7 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
             section.border_radius,
             &section.border_type,
             section.touch,
-            0,
+            iced::Padding::ZERO,
             if vertical { Length::Fill } else { Length::Shrink },
             if vertical { Length::Shrink } else { Length::Fill },
         );
@@ -2258,31 +2285,31 @@ fn title_fit_name<'a>(panel: &'a Panel, section: &'a SectionData) -> &'a str {
 
 /// Recompute the icon edge SHARED by both icon rows from the built
 /// sections (every tick and on every reload): the panel font's line
-/// height (`font_icon_edge`) capped by what a sensor row physically fits
-/// on the cross axis (`row_icon_target` with zero padding — taskbar and
-/// tray icons fill the whole row: the sensor's own padding only breathes
-/// between pill and box border, it never shrinks the icon, compensating
-/// for the margins baked into the artwork files). One number — the
-/// smallest fit across every tray and taskbar sensor — is written to both
-/// rows, so tray and taskbar icons are always the same size in both
-/// orientations. With no such sensor at all the target is left alone.
+/// height plus the sensor's own padding on both sides (`font_icon_edge` —
+/// a tray/taskbar box drops that inset on the thickness axis so its row
+/// fills the height, and the icon spends it: font 12 + padding 4 → 22),
+/// capped by what a sensor row physically fits on the cross axis
+/// (`row_icon_target` with zero padding — taskbar and tray icons fill the
+/// whole row, the view draws these boxes without the cross-axis inset).
+/// One number — the smallest fit across every tray and taskbar sensor —
+/// is written to both rows, so tray and taskbar icons are always the same
+/// size in both orientations. With no such sensor at all the target is
+/// left alone.
 fn update_icon_targets(panel: &Panel) {
     let thickness = panel_thickness(&panel.config);
     let font = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
-    let font_edge = icons::font_icon_edge(font);
     let mut shared: Option<u16> = None;
     for section in &panel.sections {
         // Title height as the view draws it, shared with the sensor icon
         // fit: text in a box padded SECTION_CONTENT_PAD on both sides.
         let title_extra =
             icons::stacked_title_extra(&section.layout, title_fit_name(panel, section), font);
-        let has_icons = section
-            .sensors
-            .iter()
-            .any(|sensor| sensor.tray.is_some() || sensor.taskbar.is_some());
-        if has_icons {
-            // Padding zero on purpose: the icon takes the whole row height.
-            let edge = font_edge.min(icons::row_icon_target(thickness, title_extra, 0));
+        for sensor in &section.sensors {
+            if sensor.tray.is_none() && sensor.taskbar.is_none() {
+                continue;
+            }
+            let edge = icons::font_icon_edge(font, u32::from(sensor.padding))
+                .min(icons::row_icon_target(thickness, title_extra, 0));
             shared = Some(shared.map_or(edge, |m| m.min(edge)));
         }
     }

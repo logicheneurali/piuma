@@ -116,7 +116,7 @@ pub fn row<'a>(
                 &style.border_type,
                 // Sensors sit inside sections: never on a screen edge.
                 [false, false, false, false],
-                style.padding,
+                iced::Padding::from(style.padding),
                 Length::Shrink,
                 Length::Shrink,
             );

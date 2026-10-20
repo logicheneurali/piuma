@@ -163,13 +163,16 @@ pub fn row_icon_target(thickness: u32, title_extra: u32, padding: u32) -> u16 {
 }
 
 /// Icon edge (px) taken from the PANEL FONT as the reference — the text
-/// line the bar already draws (`font + 2`), clamped to a sane range:
+/// line the bar already draws (`font + 2`) plus the sensor's own padding
+/// on both sides (`2 × padding`): a tray/taskbar pill drops that inset on
+/// the thickness axis so its row fills the box, and the icon spends it
+/// instead (font 12 + padding 4 → 14 + 8 = 22). Clamped to a sane range:
 /// at least 18 for legibility, at most 48 so a huge font cannot take the
 /// row over. The sensor's cross-axis room (`row_icon_target`) stays a
 /// separate ceiling: tray and taskbar take the smaller of the two, so
 /// both rows show the same size wherever physics allows.
-pub fn font_icon_edge(font: u32) -> u16 {
-    (font + 2).clamp(18, 48) as u16
+pub fn font_icon_edge(font: u32, padding: u32) -> u16 {
+    (font + 2 + 2 * padding).clamp(18, 48) as u16
 }
 
 /// How many icon slots of `slot` px with `gap` px between them fit on
@@ -251,13 +254,15 @@ mod tests {
         assert_eq!(icons_per_line(u32::MAX, 1, 0), u16::MAX);
     }
 
-    /// The font's line height is the size reference, clamped to sane
-    /// bounds: small fonts take the legibility floor, big fonts the cap.
+    /// The font's line height plus the sensor padding (2×) is the size
+    /// reference, clamped to sane bounds: small fonts take the legibility
+    /// floor, big fonts the cap.
     #[test]
-    fn font_icon_edge_follows_the_font() {
-        assert_eq!(font_icon_edge(12), 18);
-        assert_eq!(font_icon_edge(16), 18);
-        assert_eq!(font_icon_edge(24), 26);
-        assert_eq!(font_icon_edge(200), 48);
+    fn font_icon_edge_follows_font_and_padding() {
+        assert_eq!(font_icon_edge(12, 4), 22); // 14 + 8
+        assert_eq!(font_icon_edge(16, 4), 26); // 18 + 8
+        assert_eq!(font_icon_edge(12, 0), 18); // floor, no padding
+        assert_eq!(font_icon_edge(24, 0), 26);
+        assert_eq!(font_icon_edge(200, 4), 48); // cap
     }
 }

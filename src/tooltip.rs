@@ -226,7 +226,7 @@ pub(crate) fn tooltip_window_view(panel: &Panel) -> Element<'_, Message> {
         st.border_radius.min(u16::MAX as u32) as u16,
         &st.border_type,
         [false, false, false, false],
-        0,
+        iced::Padding::ZERO,
         Length::Fill,
         Length::Fill,
     )

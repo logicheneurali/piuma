@@ -256,7 +256,7 @@ pub(crate) fn tray_menu_view(panel: &Panel) -> Element<'_, Message> {
         &st.border_type,
         [false, false, false, false],
         // The list carries the padding; the box only draws its border.
-        0,
+        iced::Padding::ZERO,
         Length::Fill,
         Length::Fill,
     );
@@ -353,7 +353,7 @@ pub(crate) fn taskbar_menu_view(panel: &Panel) -> Element<'_, Message> {
         &st.border_type,
         [false, false, false, false],
         // The list carries the padding; the box only draws its border.
-        0,
+        iced::Padding::ZERO,
         Length::Fill,
         Length::Fill,
     );

@@ -482,7 +482,7 @@ pub(crate) fn graph_popup_view<'a>(panel: &'a Panel, gp: &GraphPopup) -> Element
         &st.border_type,
         [false, false, false, false],
         // The content carries the padding; the box only draws its border.
-        0,
+        iced::Padding::ZERO,
         Length::Fill,
         Length::Fill,
     );

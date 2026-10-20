@@ -291,7 +291,7 @@ pub(crate) fn popup_view(panel: &Panel) -> Element<'_, Message> {
             st.border_radius.min(u16::MAX as u32) as u16,
             &st.border_type,
             [false, false, false, false],
-            st.padding.min(u16::MAX as u32) as u16,
+            iced::Padding::from(st.padding.min(u16::MAX as u32) as u16),
             Length::Fill,
             Length::Fixed(card_h as f32),
         );
@@ -448,7 +448,7 @@ pub(crate) fn notif_list_view(panel: &Panel) -> Element<'_, Message> {
         &st.border_type,
         [false, false, false, false],
         // The list carries the padding; the box only draws its border.
-        0,
+        iced::Padding::ZERO,
         Length::Fill,
         Length::Fill,
     );
