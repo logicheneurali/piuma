@@ -217,6 +217,10 @@ pub struct Sensor {
     pub padding: Option<i32>,
     pub action: Option<String>,
     pub draw_graph: bool,
+    /// Threshold colours for the displayed value (`color_rules`), the
+    /// highest `min` the reading reaches wins on the bar; `None` = the
+    /// sensor's plain `text_color` everywhere (mirrors src/config.rs).
+    pub color_rules: Option<Vec<config::ColorRule>>,
 }
 
 #[derive(Debug, Clone)]
@@ -295,6 +299,7 @@ impl Default for Sensor {
             padding: None,
             action: None,
             draw_graph: false,
+            color_rules: None,
         }
     }
 }
@@ -422,6 +427,17 @@ pub enum Message {
     SensorActionChanged(usize, usize, String),
     /// Graph toggle of one sensor (hover popup trend).
     SensorDrawGraphChanged(usize, usize, bool),
+    /// Opens the threshold colour-rules editor for one sensor (the "…"
+    /// right of the Text colour field).
+    ColorRulesPressed(usize, usize),
+    /// Appends an empty rule row to the open colour-rules editor.
+    ColorRuleAdd,
+    /// Removes one rule row (its index) of the open colour-rules editor.
+    ColorRuleRemove(usize),
+    /// `min` typed in one rule row of the open colour-rules editor.
+    ColorRuleMinChanged(usize, String),
+    /// Colour typed in one rule row of the open colour-rules editor.
+    ColorRuleColorChanged(usize, String),
     /// Toggles the collapsible "Sensor Defaults" card.
     ToggleDefaults,
     /// Toggles the collapsible "Section Defaults" card.
@@ -450,6 +466,14 @@ pub enum Message {
     Status(String),
 }
 
+/// One editable threshold rule inside the `ColorRules` modal: strings
+/// while typing (a keystroke never errors), parsed when Apply is pressed.
+#[derive(Debug, Clone)]
+pub struct RuleDraft {
+    pub min: String,
+    pub color: String,
+}
+
 /// Modal dialogs stacked over the main view (see `view`).
 #[derive(Debug, Clone)]
 pub enum Modal {
@@ -471,6 +495,9 @@ pub enum Modal {
     ConfirmRemoveSensor(usize, usize),
     /// Icon browser: target sensor and the query filtering theme names.
     BrowseIcons { section_index: usize, sensor_index: usize, query: String },
+    /// Threshold colour-rules editor: target sensor and the draft rows
+    /// (parsed into `Sensor::color_rules` when the modal is confirmed).
+    ColorRules { section_index: usize, sensor_index: usize, rules: Vec<RuleDraft> },
 }
 
 /// Default config file: the one the running piuma reads.
@@ -891,6 +918,26 @@ impl PiumaSetup {
         // means "no graph" forever (serde default).
         if sensor.draw_graph {
             map.insert("draw_graph".to_string(), JsonValue::Bool(true));
+        }
+
+        // Threshold colour rules, stored sorted by ascending `min` (the
+        // order the bar evaluates them); absent/empty = key omitted, like
+        // every other optional style field.
+        if let Some(rules) = &sensor.color_rules {
+            let array: Vec<JsonValue> = sorted_rules(rules.clone())
+                .into_iter()
+                .filter_map(|r| {
+                    let mut obj = Map::new();
+                    // from_f64 fails on NaN/inf, which no JSON file can
+                    // carry either — such a rule is dropped, never written.
+                    obj.insert("min".to_string(), JsonValue::Number(serde_json::Number::from_f64(r.min)?));
+                    obj.insert("color".to_string(), JsonValue::String(r.color));
+                    Some(JsonValue::Object(obj))
+                })
+                .collect();
+            if !array.is_empty() {
+                map.insert("color_rules".to_string(), JsonValue::Array(array));
+            }
         }
 
         for (key, opt) in [
@@ -1387,6 +1434,23 @@ impl PiumaSetup {
         // Graph toggle: absent = off (the config default).
         sensor.draw_graph = obj.get("draw_graph").and_then(|v| v.as_bool()).unwrap_or(false);
 
+        // Threshold colour rules: loaded like `action`, otherwise the next
+        // save would drop the key. Entries a rule cannot be made of (wrong
+        // types, missing fields) are skipped — piuma ignores them too, and
+        // the pre-save schema check still rejects a structurally broken file.
+        sensor.color_rules = obj.get("color_rules").and_then(|v| v.as_array()).map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let rule = item.as_object()?;
+                    Some(config::ColorRule {
+                        min: rule.get("min")?.as_f64()?,
+                        color: rule.get("color")?.as_str()?.to_string(),
+                    })
+                })
+                .collect()
+        });
+
         Some(sensor)
     }
 }
@@ -1878,6 +1942,50 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                 }
             }
         }
+        Message::ColorRulesPressed(section_index, sensor_index) => {
+            // The editor opens only for a sensor that exists (like the icon
+            // browser); its rows start sorted by `min`, the order the bar
+            // evaluates them, whatever order the loaded file had.
+            let existing = state
+                .config
+                .sections
+                .get(section_index)
+                .and_then(|sec| sec.sensors.get(sensor_index))
+                .map(|s| s.color_rules.clone().unwrap_or_default());
+            if let Some(rules) = existing {
+                let drafts = sorted_rules(rules)
+                    .into_iter()
+                    .map(|r| RuleDraft { min: r.min.to_string(), color: r.color })
+                    .collect();
+                state.modal = Some(Modal::ColorRules { section_index, sensor_index, rules: drafts });
+            }
+        }
+        Message::ColorRuleAdd => {
+            if let Some(Modal::ColorRules { rules, .. }) = state.modal.as_mut() {
+                rules.push(RuleDraft { min: String::new(), color: String::new() });
+            }
+        }
+        Message::ColorRuleRemove(index) => {
+            if let Some(Modal::ColorRules { rules, .. }) = state.modal.as_mut() {
+                if index < rules.len() {
+                    rules.remove(index);
+                }
+            }
+        }
+        Message::ColorRuleMinChanged(index, value) => {
+            if let Some(Modal::ColorRules { rules, .. }) = state.modal.as_mut() {
+                if let Some(rule) = rules.get_mut(index) {
+                    rule.min = value;
+                }
+            }
+        }
+        Message::ColorRuleColorChanged(index, value) => {
+            if let Some(Modal::ColorRules { rules, .. }) = state.modal.as_mut() {
+                if let Some(rule) = rules.get_mut(index) {
+                    rule.color = value;
+                }
+            }
+        }
         Message::SaveConfig => match state.serialize() {
             // Serialization errors surface in the status bar; otherwise the
             // dirty-check decides between straight save and confirmation.
@@ -2028,6 +2136,43 @@ fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                             Some((s, i))
                         }
                     });
+                }
+            }
+            Some(Modal::ColorRules { section_index, sensor_index, rules }) => {
+                // Apply: a row whose `min` is blank is one still being typed
+                // (or just added) and is dropped; a typed-but-wrong `min`,
+                // or a rule without a colour, is an error shown INSIDE the
+                // popup, which reopens with its rows so nothing is lost.
+                let mut parsed = Vec::new();
+                let mut invalid = None;
+                for (i, rule) in rules.iter().enumerate() {
+                    let raw = rule.min.trim();
+                    if raw.is_empty() {
+                        continue;
+                    }
+                    match raw.parse::<f64>() {
+                        Ok(min) if min.is_finite() => match rule.color.trim() {
+                            "" => invalid = Some(format!("Rule {}: missing colour", i + 1)),
+                            color => parsed.push(config::ColorRule { min, color: color.to_string() }),
+                        },
+                        _ => invalid = Some(format!("Rule {}: \"{}\" is not a number", i + 1, raw)),
+                    }
+                    if invalid.is_some() {
+                        break;
+                    }
+                }
+                if let Some(msg) = invalid {
+                    state.set_status(msg, true);
+                    state.modal = Some(Modal::ColorRules { section_index, sensor_index, rules });
+                } else if let Some(sensor) = state
+                    .config
+                    .sections
+                    .get_mut(section_index)
+                    .and_then(|sec| sec.sensors.get_mut(sensor_index))
+                {
+                    // No rule left = key absent, like every other style field.
+                    let sorted = sorted_rules(parsed);
+                    sensor.color_rules = (!sorted.is_empty()).then_some(sorted);
                 }
             }
             Some(m @ Modal::BrowseIcons { .. }) => {
@@ -2789,6 +2934,13 @@ fn collapsible_header<'a>(
     .into()
 }
 
+/// Threshold rules in evaluation order: ascending `min` — the order the
+/// bar reads them (styles.rs) and the order setup stores them.
+fn sorted_rules(mut rules: Vec<config::ColorRule>) -> Vec<config::ColorRule> {
+    rules.sort_by(|a, b| a.min.total_cmp(&b.min));
+    rules
+}
+
 /// One-line summary of the active style overrides for collapsed headers:
 /// colors by field name, numbers with value, "none" when all is inherited.
 fn style_summary(colors: &[(&str, &Option<String>)], numbers: &[(&str, &Option<i32>)]) -> String {
@@ -3175,6 +3327,55 @@ fn modal_card(state: &PiumaSetup) -> Element<'_, Message> {
                         .padding(8)
                         .style(move |t, s| btn_primary(pal, t, s)),
                 ),
+            )
+        }
+        Some(Modal::ColorRules { rules, .. }) => {
+            // One row per rule: threshold `min`, colour with its live
+            // swatch (same control as the Text field) and a remove button.
+            // The hint spells the bar's rule so the editor cannot mislead.
+            let mut rows = column![].spacing(8).width(Length::Fill);
+            if rules.is_empty() {
+                rows = rows.push(
+                    text("No rules yet: the value keeps the sensor text colour.")
+                        .size(10)
+                        .style(muted_text(pal)),
+                );
+            }
+            for (i, rule) in rules.iter().enumerate() {
+                rows = rows.push(
+                    Row::new()
+                        .push(input("min", &rule.min, move |value| Message::ColorRuleMinChanged(i, value))
+                            .width(Length::Fixed(90.0)))
+                        .push(color_control(&rule.color, move |value| Message::ColorRuleColorChanged(i, value)))
+                        .push(
+                            button(text("✕").size(BODY))
+                                .on_press(Message::ColorRuleRemove(i))
+                                .padding(5)
+                                .style(move |t, s| btn_secondary(pal, t, s)),
+                        )
+                        .spacing(8)
+                        .align_y(Alignment::Center)
+                        .width(Length::Fill),
+                );
+            }
+            let body = column![
+                text("While the value reaches `min` the text takes `color`: the highest rule wins, hover still overrides.")
+                    .size(10)
+                    .style(muted_text(pal)),
+                rows,
+                button(text("Add rule").size(BODY))
+                    .on_press(Message::ColorRuleAdd)
+                    .padding(8)
+                    .style(move |t, s| btn_secondary(pal, t, s)),
+            ]
+            .spacing(10)
+            .width(Length::Fill);
+            dialog_frame(
+                pal,
+                "Threshold colours",
+                body.into(),
+                error,
+                dialog_actions(pal, Message::ModalConfirm, "Apply"),
             )
         }
         None => text("").into(),
@@ -4164,7 +4365,20 @@ fn sensor_view<'a>(
     // Style numbers: -1 = disabled (the defaults apply), 0..=N = enabled.
     if style_open {
         let fields = vec![
-            ("Text", color_control(sensor.text_color.as_deref().unwrap_or(""), move |value| Message::SensorTextColorChanged(section_index, sensor_index, value))),
+            // Text colour with the threshold-rules editor right after it:
+            // the "…" opens the popup where colours and thresholds live.
+            ("Text", Row::new()
+                .push(color_control(sensor.text_color.as_deref().unwrap_or(""), move |value| Message::SensorTextColorChanged(section_index, sensor_index, value)))
+                .push(
+                    button(text("…").size(BODY))
+                        .on_press(Message::ColorRulesPressed(section_index, sensor_index))
+                        .padding(5)
+                        .style(move |t, s| btn_secondary(pal, t, s)),
+                )
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .width(Length::Fill)
+                .into()),
             ("Hover Text", color_control(sensor.text_color_hover.as_deref().unwrap_or(""), move |value| Message::SensorTextColorHoverChanged(section_index, sensor_index, value))),
             ("BG", color_control(sensor.bg_color.as_deref().unwrap_or(""), move |value| Message::SensorBgColorChanged(section_index, sensor_index, value))),
             ("Hover BG", color_control(sensor.bg_color_hover.as_deref().unwrap_or(""), move |value| Message::SensorBgColorHoverChanged(section_index, sensor_index, value))),
@@ -5312,5 +5526,110 @@ mod tests {
         let _ = update(&mut s, Message::IconPicked(0, 0, "firefox".to_string()));
         assert_eq!(s.config.sections[0].sensors[0].icon.as_deref(), Some("firefox"));
         assert!(s.modal.is_none());
+    }
+
+    /// `color_rules` survives load→save sorted by ascending `min` (the
+    /// order the bar evaluates them) and the pre-save schema check passes.
+    #[test]
+    fn color_rules_roundtrip_sorted_and_accepted() {
+        let json = r##"{
+  "panel": {
+    "align": "fill",
+    "anchor": "top",
+    "section_layout": "horizontal",
+    "sections": [
+      {
+        "layout": "horizontal",
+        "name": "sys",
+        "sensors": [ {
+          "name": "CPU",
+          "source": { "type": "perc_cpu" },
+          "color_rules": [
+            { "min": 80, "color": "#ff0000" },
+            { "min": 50, "color": "#ffff00" }
+          ]
+        } ]
+      }
+    ],
+    "thickness": 26
+  }
+}"##;
+        let mut state = fixture();
+        state.load_from_json(json).expect("config with rules must load");
+        let saved = state.serialize().expect("serialize must succeed");
+        let out: JsonValue = serde_json::from_str(&saved).expect("saved JSON must parse");
+        let rules = out["panel"]["sections"][0]["sensors"][0]["color_rules"]
+            .as_array()
+            .expect("the rules must be written back");
+        assert_eq!(rules.len(), 2, "no rule is dropped");
+        assert_eq!(rules[0]["min"].as_f64(), Some(50.0), "sorted ascending");
+        assert_eq!(rules[0]["color"].as_str(), Some("#ffff00"));
+        assert_eq!(rules[1]["min"].as_f64(), Some(80.0));
+        assert_eq!(rules[1]["color"].as_str(), Some("#ff0000"));
+        serde_json::from_str::<config::Config>(&saved)
+            .expect("piuma must accept the saved config (pre-save validation)");
+    }
+
+    /// The "…" opens the editor with the existing rows sorted by `min`,
+    /// edits land on the row they came from and Apply stores them sorted.
+    #[test]
+    fn color_rules_editor_opens_sorted_and_applies() {
+        let mut s = test_state();
+        // Stored in file order: the editor must show them evaluated order.
+        s.config.sections[0].sensors[0].color_rules = Some(vec![
+            config::ColorRule { min: 80.0, color: "#ff0000".to_string() },
+            config::ColorRule { min: 50.0, color: "#ffff00".to_string() },
+        ]);
+        let _ = update(&mut s, Message::ColorRulesPressed(0, 0));
+        match &s.modal {
+            Some(Modal::ColorRules { rules, .. }) => {
+                assert_eq!(rules.len(), 2);
+                assert_eq!(rules[0].min, "50");
+                assert_eq!(rules[1].min, "80");
+            }
+            other => panic!("the editor must open sorted, got {other:?}"),
+        }
+        let _ = update(&mut s, Message::ColorRuleAdd);
+        let _ = update(&mut s, Message::ColorRuleMinChanged(2, "120".to_string()));
+        let _ = update(&mut s, Message::ColorRuleColorChanged(2, "#00ff00".to_string()));
+        let _ = update(&mut s, Message::ModalConfirm);
+        assert!(s.modal.is_none(), "Apply closes the editor");
+        let rules = s.config.sections[0].sensors[0]
+            .color_rules
+            .clone()
+            .expect("Apply must store the rules");
+        let mins: Vec<f64> = rules.iter().map(|r| r.min).collect();
+        assert_eq!(mins, vec![50.0, 80.0, 120.0], "stored sorted by min");
+    }
+
+    /// A typed non-number `min` (or a rule without colour) is an error:
+    /// the popup reopens with its rows, nothing is written. Blank rows are
+    /// dropped, and an editor left empty clears the key.
+    #[test]
+    fn color_rules_editor_validates_and_clears() {
+        let mut s = test_state();
+        let _ = update(&mut s, Message::ColorRulesPressed(0, 0));
+        let _ = update(&mut s, Message::ColorRuleAdd);
+        let _ = update(&mut s, Message::ColorRuleMinChanged(0, "abc".to_string()));
+        let _ = update(&mut s, Message::ColorRuleColorChanged(0, "#ff0000".to_string()));
+        let _ = update(&mut s, Message::ModalConfirm);
+        assert!(matches!(s.modal, Some(Modal::ColorRules { .. })), "the popup stays open");
+        assert!(s.status_is_error, "the reason is shown as an error");
+        assert!(s.config.sections[0].sensors[0].color_rules.is_none(), "nothing written");
+        // Fix it: the valid row applies, the still-blank second row is dropped.
+        let _ = update(&mut s, Message::ColorRuleMinChanged(0, "30".to_string()));
+        let _ = update(&mut s, Message::ModalConfirm);
+        assert!(s.modal.is_none());
+        let stored = s.config.sections[0].sensors[0].color_rules.clone().expect("stored");
+        assert_eq!(
+            stored,
+            vec![config::ColorRule { min: 30.0, color: "#ff0000".to_string() }],
+            "the blank row is dropped"
+        );
+        // Empty editor = no rules = key absent, like every style field.
+        let _ = update(&mut s, Message::ColorRulesPressed(0, 0));
+        let _ = update(&mut s, Message::ColorRuleRemove(0));
+        let _ = update(&mut s, Message::ModalConfirm);
+        assert!(s.config.sections[0].sensors[0].color_rules.is_none());
     }
 }

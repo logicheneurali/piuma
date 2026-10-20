@@ -256,7 +256,7 @@ pub struct SectionConfig {
 /// parses to at least `min`, its text renders in `color`; the highest
 /// matching rule wins. Rules below every reading and unparsable
 /// colours/values are ignored.
-#[derive(Deserialize, serde::Serialize, Clone)]
+#[derive(Debug, Deserialize, serde::Serialize, Clone, PartialEq)]
 pub struct ColorRule {
     pub min: f64,
     pub color: String,
