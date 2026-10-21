@@ -1108,3 +1108,19 @@ fn validation_follows_every_edit() {
     );
     assert!(s.validation.is_empty());
 }
+
+/// The reason line must keep the widget type at the field's position: iced
+/// replaces a subtree on a tag mismatch (`Tree::diff`), which destroys the
+/// text input's focus state — the mid-typing focus-stealing bug.
+#[test]
+fn invalid_under_keeps_the_widget_shape() {
+    let build = |reason: Option<&'static str>| {
+        let field: iced::Element<'_, Message> =
+            input("#rgb", "#ffffff", |v| Message::FontChanged(v)).into();
+        invalid_under(field, reason)
+    };
+    assert_eq!(
+        build(None).as_widget().tag(),
+        build(Some("bad")).as_widget().tag(),
+    );
+}

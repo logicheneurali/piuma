@@ -430,18 +430,23 @@ pub(crate) fn form_grid<'a>(fields: Vec<(&'a str, Element<'a, Message>)>) -> Ele
 }
 
 /// Stacks the red reason under a field whose config value is invalid.
+///
+/// The widget shape must be identical with and without a reason: iced
+/// replaces a whole subtree when a child's type (tag) changes (`Tree::diff`),
+/// and that rebuild destroys the focused text input's state — so the reason
+/// appearing/disappearing mid-typing used to steal the focus. The reason line
+/// therefore stays always in the tree, collapsed to zero height while valid.
 pub(crate) fn invalid_under<'a>(field: Element<'a, Message>, reason: Option<&'a str>) -> Element<'a, Message> {
-    match reason {
-        None => field,
-        Some(msg) => Column::new()
-            .push(field)
-            .push(
-                text(msg).size(10).style(error_text_style),
-            )
-            .spacing(2)
-            .width(Length::Fill)
-            .into(),
-    }
+    let reason_line = text(reason.unwrap_or(""))
+        .size(10)
+        .height(if reason.is_some() { Length::Shrink } else { Length::Fixed(0.0) })
+        .style(error_text_style);
+    Column::new()
+        .push(field)
+        .push(reason_line)
+        .spacing(2)
+        .width(Length::Fill)
+        .into()
 }
 
 /// Colour input filling its cell: text field plus a live 16x16 preview
