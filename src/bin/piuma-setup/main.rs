@@ -23,7 +23,10 @@ mod autostart;
 
 // Freedesktop icon-name → file lookup shared with the bar (roadmap N1):
 // the setup renders the same resolve/widget pair at the same theme and
-// size, so the icon preview shows exactly what the bar will draw.
+// size, so the icon preview shows exactly what the bar will draw. The
+// bar-only view helpers (font_icon_edge, icons_per_line) sit unused
+// here like config's and autostart's: module-wide allow, same baseline.
+#[allow(dead_code)]
 #[path = "../../icons.rs"]
 mod icons;
 

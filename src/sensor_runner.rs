@@ -118,9 +118,14 @@ pub fn run(source: &SensorSource, hypr: Option<&crate::hypr::Snapshot>) -> Read 
     match source {
         // The user-authored text sources: the answer feeds the graph
         // sample when the whole thing is a number (see `strict_number`).
+        // shortcut: the 5s cap (coreutils `timeout`) keeps a command that
+        // never exits — `--follow` streams, listeners, hung pipelines —
+        // from freezing every reading for good: `read_pending` never
+        // clears without a reply, so no further pass would ever run.
+        // Raise the cap when a legitimate command needs longer.
         SensorSource::Command { command } => maybe_measured(
-            match std::process::Command::new("sh")
-                .args(["-c", command])
+            match std::process::Command::new("timeout")
+                .args(["-k", "1", "5", "sh", "-c", command])
                 .output()
             {
                 Ok(out) if out.status.success() => {

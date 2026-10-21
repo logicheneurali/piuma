@@ -69,15 +69,31 @@ fn amdgpu_load() -> Option<f64> {
     None
 }
 
+/// Whether `nvidia-smi` is on PATH: probed once (the hardware doesn't
+/// change while piuma runs) so machines without NVIDIA don't spawn a
+/// failing process on every tick.
+fn have_nvidia_smi() -> bool {
+    static HAVE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *HAVE.get_or_init(|| {
+        std::env::var_os("PATH").is_some_and(|paths| {
+            std::env::split_paths(&paths).any(|dir| dir.join("nvidia-smi").is_file())
+        })
+    })
+}
+
 /// Get GPU load percentage (e.g. `12`) as (text, value): NVIDIA via
 /// nvidia-smi, then the amdgpu sysfs counter (AMD); None elsewhere
 /// (e.g. Intel has no standard interface). No hard dependency on the
 /// NVIDIA driver.
 pub fn gpu_load() -> Option<(String, f64)> {
-    if let Ok(out) = Command::new("nvidia-smi")
-        .args(["--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"])
-        .output()
-    {
+    let nvidia = have_nvidia_smi()
+        .then(|| {
+            Command::new("nvidia-smi")
+                .args(["--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"])
+                .output()
+        })
+        .and_then(Result::ok);
+    if let Some(out) = nvidia {
         if out.status.success() {
             let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !value.is_empty() {
