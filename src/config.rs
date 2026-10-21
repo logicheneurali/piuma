@@ -472,7 +472,7 @@ pub struct ConfigError {
 }
 
 /// The `border_type` values the renderer understands (`styles.rs`).
-const BORDER_TYPES: [&str; 6] = ["full", "corners", "underline", "upperline", "left", "right"];
+pub const BORDER_TYPES: [&str; 6] = ["full", "corners", "underline", "upperline", "left", "right"];
 
 /// The `err_*` helpers below each append one `ConfigError` (path +
 /// reason) when a present value does not parse or is out of range;

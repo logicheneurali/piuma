@@ -36,4 +36,4 @@ strip = true
 
 [[bin]]
 name = "piuma-setup"
-path = "src/bin/piuma-setup.rs"
+path = "src/bin/piuma-setup/main.rs"
