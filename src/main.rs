@@ -30,6 +30,7 @@ mod app_theme;
 mod autostart;
 mod calendar;
 mod config;
+mod corners;
 mod dbusmenu;
 mod fill_sections;
 mod geometry;
@@ -54,6 +55,7 @@ mod wallpaper_ui;
 mod windows;
 mod workspace;
 
+use corners::{corners_view, sync_corners};
 use fill_sections::FillSections;
 use geometry::{corner_radius, panel_anchor, panel_size, panel_thickness, placement_rect};
 use menus::{
@@ -329,6 +331,10 @@ pub(crate) struct Panel {
     /// active output, keyed by the compositor's output name; empty
     /// while the wallpaper is off.
     pub(crate) wallpaper: Vec<(String, iced::window::Id)>,
+    /// Rounded-screen-corner masks (roadmap angoli-schermo): one square
+    /// overlay surface per output corner, keyed "output:corner:radius";
+    /// empty while the feature is off.
+    pub(crate) corners: Vec<(String, iced::window::Id)>,
     /// Colours derived from the wallpaper (`panel.wallpaper_palette`):
     /// applied over the configured defaults while present, dropped when
     /// the option or the wallpaper turns off. Runtime-only — never
@@ -1122,6 +1128,9 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             // cadence: the first tick materializes it after startup,
             // later ticks track enable/path changes (a cheap compare).
             cmds.push(sync_wallpaper(panel));
+            // The corner masks ride the same tick (roadmap angoli):
+            // enable/radius/output changes reopen the squares cheaply.
+            cmds.push(sync_corners(panel));
             // The derived palette follows the same cadence: extracted
             // off-thread only when the wallpaper file changes, dropped
             // when the option turns off.
@@ -1768,6 +1777,9 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
     // Side windows render their own trees; only bar calls feed BAR_ID.
     if panel.wallpaper.iter().any(|(_, id)| *id == window) {
         return wallpaper_view(panel);
+    }
+    if panel.corners.iter().any(|(_, id)| *id == window) {
+        return corners_view(panel, window);
     }
     if let Some((id, _)) = panel.tray_menu.as_ref() {
         if *id == window {
@@ -2765,6 +2777,7 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         graph_link: None,
                         calendar: None,
                         wallpaper: Vec::new(),
+                        corners: Vec::new(),
                         palette: None,
                         palette_key: None,
                     }

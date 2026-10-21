@@ -49,6 +49,11 @@ save writes the new names into `piuma.json`.
 - **Border Styling**: Customizable borders with radius and width
 - **Padding Control**: Space around sensor content
 - **Section-level Styling**: Background and text colors per section
+- **Rounded Screen Corners**: `panel.screen_corners { enable, color, radius }`
+  masks each display corner with a solid-colour square minus the inner
+  quarter disk, so the screen itself reads as rounded like the panel —
+  drawn on layer-shell overlay surfaces, so it needs a layer-shell
+  compositor (Hyprland: works)
 
 ### Panel Positioning
 

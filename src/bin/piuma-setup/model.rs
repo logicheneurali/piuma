@@ -17,6 +17,30 @@ pub struct WallpaperCfg {
     pub path: String,
 }
 
+/// The `panel.screen_corners` block (roadmap angoli-schermo): the
+/// rounded-corner masks drawn over every screen corner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenCornersCfg {
+    pub enable: bool,
+    pub color: String,
+    pub radius: u32,
+}
+
+impl Default for ScreenCornersCfg {
+    fn default() -> Self {
+        // The first edit's defaults = what the bar falls back to when a
+        // field is missing (config.rs): on, black, 32 px.
+        ScreenCornersCfg { enable: true, color: "#000000".to_string(), radius: 32 }
+    }
+}
+
+/// Applies one screen-corners edit, creating the block with its
+/// defaults on first use — the bar reads an absent key as "off", so the
+/// block only ever appears after the user touched the feature.
+pub(crate) fn corners_set(config: &mut PiumaConfig, edit: impl FnOnce(&mut ScreenCornersCfg)) {
+    edit(config.screen_corners.get_or_insert_with(ScreenCornersCfg::default));
+}
+
 // Configuration structure for GUI - mirrors src/config.rs
 #[derive(Debug, Clone)]
 pub struct PiumaConfig {
@@ -48,6 +72,9 @@ pub struct PiumaConfig {
     /// absent. Only this switch is persisted — the extracted tones
     /// never reach the file (they live in the bar's memory).
     pub wallpaper_palette: Option<bool>,
+    /// Rounded screen corners (roadmap angoli-schermo): `None` = key
+    /// absent (the bar draws no masks).
+    pub screen_corners: Option<ScreenCornersCfg>,
     pub section_layout: String,
     pub default_section_weight: u32,
     pub default_bg_color: Option<String>,
@@ -215,6 +242,7 @@ impl Default for PiumaConfig {
             app_theme: None,
             wallpaper: None,
             wallpaper_palette: None,
+            screen_corners: None,
             section_layout: "horizontal".to_string(),
             section_title: None,
             default_section_weight: 1,
@@ -336,6 +364,14 @@ impl PiumaSetup {
             wp.insert("enabled".to_string(), JsonValue::Bool(w.enabled));
             wp.insert("path".to_string(), JsonValue::String(w.path.clone()));
             panel.insert("wallpaper".to_string(), JsonValue::Object(wp));
+        }
+        // The corners block follows the same rule (roadmap angoli).
+        if let Some(c) = &self.config.screen_corners {
+            let mut sc = Map::new();
+            sc.insert("enable".to_string(), JsonValue::Bool(c.enable));
+            sc.insert("color".to_string(), JsonValue::String(c.color.clone()));
+            sc.insert("radius".to_string(), JsonValue::Number(c.radius.into()));
+            panel.insert("screen_corners".to_string(), JsonValue::Object(sc));
         }
         panel.insert("section_layout".to_string(), JsonValue::String(self.config.section_layout.clone()));
         panel.insert("default_section_weight".to_string(), JsonValue::Number(self.config.default_section_weight.into()));
@@ -644,6 +680,7 @@ impl PiumaSetup {
             app_theme: None,
             wallpaper: None,
             wallpaper_palette: None,
+            screen_corners: None,
             section_layout: "horizontal".to_string(),
             section_title: None,
             default_section_weight: 1,
@@ -700,6 +737,16 @@ impl PiumaSetup {
             v.as_object().map(|o| WallpaperCfg {
                 enabled: o.get("enabled").and_then(JsonValue::as_bool).unwrap_or(false),
                 path: o.get("path").and_then(JsonValue::as_str).unwrap_or_default().to_string(),
+            })
+        });
+        // Absent `screen_corners` stays `None`: the bar draws no corner
+        // masks (roadmap angoli-schermo). A partial block falls back per
+        // field, exactly like the bar's own serde defaults.
+        self.config.screen_corners = panel.get("screen_corners").and_then(|v| {
+            v.as_object().map(|o| ScreenCornersCfg {
+                enable: o.get("enable").and_then(JsonValue::as_bool).unwrap_or(false),
+                color: o.get("color").and_then(JsonValue::as_str).unwrap_or("#000000").to_string(),
+                radius: o.get("radius").and_then(JsonValue::as_u64).unwrap_or(32) as u32,
             })
         });
         // Absent `wallpaper_palette` stays `None` (reset default): the

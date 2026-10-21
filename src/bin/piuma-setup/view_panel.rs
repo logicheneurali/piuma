@@ -17,6 +17,8 @@ pub(crate) fn panel_settings(state: &PiumaSetup) -> Element<'_, Message> {
     let thickness = state.config.thickness;
     let anchor = state.config.anchor.clone().unwrap_or_default();
     let align = state.config.align.clone().unwrap_or_default();
+    // Absent corners block = the bar's own fallback radius (config.rs).
+    let corners_radius = state.config.screen_corners.as_ref().map_or(32, |c| c.radius);
 
     // Font Size / Thickness keep their u32 sliders inline: a shared generic
     // slider helper would need `num_traits` bounds, which this binary doesn't depend on.
@@ -96,6 +98,27 @@ pub(crate) fn panel_settings(state: &PiumaSetup) -> Element<'_, Message> {
             .width(Length::Fill)
             .into(),
             state.field_err("panel.align"),
+        )),
+        // Rounded screen corners (roadmap angoli-schermo): an absent
+        // block reads as "off" with the bar's own fallback values.
+        ("Screen Corners", toggler(
+            state.config.screen_corners.as_ref().map_or(false, |c| c.enable))
+            .label("Round the screen corners")
+            .on_toggle(Message::CornersEnabled)
+            .into()),
+        ("Corner Color", color_control(
+            state.config.screen_corners.as_ref().map_or("", |c| c.color.as_str()),
+            state.field_err("panel.screen_corners.color"),
+            Message::CornersColorChanged,
+        )),
+        ("Corner Radius", invalid_under(
+            Row::new()
+                .push(Slider::new(1..=256, corners_radius, Message::CornersRadiusChanged).width(Length::Fill))
+                .push(text(format!("{}px", corners_radius)).size(BODY).width(48))
+                .spacing(8)
+                .width(Length::Fill)
+                .into(),
+            state.field_err("panel.screen_corners.radius"),
         )),
     ];
 

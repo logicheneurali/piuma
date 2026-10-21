@@ -80,6 +80,17 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
             // never reach the file.
             state.config.wallpaper_palette = value.then_some(true);
         }
+        Message::CornersEnabled(value) => {
+            // The toggle flips `enable`: colour and radius survive both
+            // directions (the masks open/close on save + reload).
+            corners_set(&mut state.config, |c| c.enable = value);
+        }
+        Message::CornersColorChanged(value) => {
+            corners_set(&mut state.config, |c| c.color = value);
+        }
+        Message::CornersRadiusChanged(value) => {
+            corners_set(&mut state.config, |c| c.radius = value);
+        }
         Message::TabSelected(tab) => state.active_tab = tab,
         Message::ThicknessChanged(value) => state.config.thickness = value,
         Message::DefaultsStyleChanged(field, value) => {

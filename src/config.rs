@@ -123,6 +123,9 @@ pub struct PanelConfig {
     /// they live in the bar's memory only, so turning the option off
     /// restores the user's own colours on the next rebuild.
     pub wallpaper_palette: Option<bool>,
+    /// Rounded screen corners (roadmap angoli-schermo); absent = off
+    /// (no corner mask surface is opened).
+    pub screen_corners: Option<ScreenCornersConfig>,
     pub section_layout: Option<String>,
     /// Draw each section's title above its stacked sensors (the title
     /// exists only where sensors stack); absent = true.
@@ -157,6 +160,32 @@ pub struct WallpaperConfig {
     /// whole output.
     #[serde(default)]
     pub path: String,
+}
+
+/// `panel.screen_corners`: a square mask per screen corner making the
+/// display read as rounded — the surface paints the square in `color`
+/// except the inner quarter disk, which stays transparent (roadmap
+/// angoli-schermo). Every field defaults so a partial block (or none at
+/// all) keeps old configs working: off, black, 32 px.
+#[derive(Deserialize, serde::Serialize, Clone)]
+pub struct ScreenCornersConfig {
+    /// Whether the corner masks are drawn at all.
+    #[serde(default)]
+    pub enable: bool,
+    /// Mask colour (`#rgb` / `#rrggbb` / `#rrggbbaa`).
+    #[serde(default = "default_corner_color")]
+    pub color: String,
+    /// Corner side in px, also the rounding radius (1..=256).
+    #[serde(default = "default_corner_radius")]
+    pub radius: u32,
+}
+
+fn default_corner_color() -> String {
+    "#000000".to_string()
+}
+
+fn default_corner_radius() -> u32 {
+    32
 }
 
 /// `panel.notifications`: tunes the D-Bus server (the block's presence
@@ -429,6 +458,7 @@ pub fn default_config() -> Config {
             app_theme: None,
             wallpaper: None,
             wallpaper_palette: None,
+            screen_corners: None,
             section_layout: Some("horizontal".to_string()),
             section_title: None,
             default_section_weight: Some(1),
@@ -591,6 +621,11 @@ pub fn validate_config(cfg: &Config) -> Vec<ConfigError> {
     err_range_u32(&mut errors, "panel.thickness", p.thickness, 4, 256);
     err_range_u32(&mut errors, "panel.font_size", p.font_size, 1, 256);
     err_range_u32(&mut errors, "panel.default_section_weight", p.default_section_weight, 1, 1000);
+
+    if let Some(c) = &p.screen_corners {
+        err_color(&mut errors, "panel.screen_corners.color", Some(&c.color));
+        err_range_u32(&mut errors, "panel.screen_corners.radius", Some(c.radius), 1, 256);
+    }
 
     if let Some(d) = &p.sensor_defaults {
         err_sensor_style(
@@ -831,6 +866,50 @@ mod tests {
         let out = serde_json::to_string(&cfg).expect("config must serialize");
         let back: Config = serde_json::from_str(&out).expect("reparse must work");
         assert!(back.panel.wallpaper.is_none());
+    }
+
+    /// Roadmap angoli-schermo: `panel.screen_corners` parses whole,
+    /// partial (per-field defaults) and absent, roundtrips — and the
+    /// validator names a bad colour or radius by path, accepts the
+    /// default one.
+    #[test]
+    fn screen_corners_parse_validate_and_roundtrip() {
+        let json = r##"{"panel":{"screen_corners":{"enable":true,"color":"#101010","radius":48},"sections":[]}}"##;
+        let cfg: Config = serde_json::from_str(json).expect("corners must be valid");
+        let sc = cfg.panel.screen_corners.as_ref().expect("block present");
+        assert!(sc.enable);
+        assert_eq!(sc.color, "#101010");
+        assert_eq!(sc.radius, 48);
+        // A partial block falls back per field (off, black, 32 px)…
+        let cfg: Config =
+            serde_json::from_str(r#"{"panel":{"screen_corners":{},"sections":[]}}"#).expect("partial ok");
+        let sc = cfg.panel.screen_corners.as_ref().expect("block present");
+        assert!(!sc.enable);
+        assert_eq!(sc.color, "#000000");
+        assert_eq!(sc.radius, 32);
+        // …and validates clean (the defaults are in range)…
+        assert_eq!(validate_config(&cfg), Vec::new());
+        // …while an absent block stays absent (old configs: off).
+        let cfg: Config =
+            serde_json::from_str(r#"{"panel":{"sections":[]}}"#).expect("absent ok");
+        assert!(cfg.panel.screen_corners.is_none());
+        assert_eq!(validate_config(&cfg), Vec::new());
+        // Roundtrip through piuma's own serializer.
+        let out = serde_json::to_string(&cfg).expect("config must serialize");
+        let back: Config = serde_json::from_str(&out).expect("reparse must work");
+        assert!(back.panel.screen_corners.is_none());
+        // An unparsable colour and an out-of-range radius are each
+        // reported at their JSON path.
+        let cfg: Config = serde_json::from_str(
+            r#"{"panel":{"screen_corners":{"enable":true,"color":"nope","radius":0},"sections":[]}}"#,
+        )
+        .expect("config must parse");
+        let errors = validate_config(&cfg);
+        let paths: Vec<&str> = errors.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["panel.screen_corners.color", "panel.screen_corners.radius"],
+        );
     }
 
     /// Roadmap N1: `panel.icon_theme` and the per-sensor `icon` parse and

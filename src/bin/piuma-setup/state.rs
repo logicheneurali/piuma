@@ -37,6 +37,11 @@ pub enum Message {
     WallpaperPathChanged(String),
     /// Wallpaper-palette switch (runtime tones from the wallpaper image).
     PaletteFromWallpaper(bool),
+    /// Rounded screen corners (roadmap angoli-schermo): enable toggle,
+    /// mask colour and corner radius in px.
+    CornersEnabled(bool),
+    CornersColorChanged(String),
+    CornersRadiusChanged(u32),
     /// Sidebar category switch (roadmap N4).
     TabSelected(Tab),
     ThicknessChanged(u32),
