@@ -430,13 +430,13 @@ their window set.)
 - **State on the bar**: `⋯` armed and waiting, `✓` applied,
   `✓ saved` right after the click, no value while the file is absent.
 - **What is restored**: the workspace of each window and the exact
-  pixel position and size. The saved geometry is the target: a window
-  that lost it (the tiler re-split the group, a floating window was
-  dragged) floats back to the saved pixels on the next trigger — pixel
-  resizes are ignored on tiled windows, so floating is the only way to
-  impose them — while a window already at the saved geometry keeps its
-  tiled/floating state untouched. Fullscreen windows get no geometry
-  either.
+  geometry. A floating window goes back to the saved pixel position
+  and size; a tiled one is resized *inside* the tiler with the same
+  relative resize the manual drag uses — never floated: the check
+  re-measures after each pass and retries while the split converges,
+  and gives up on the tiler's own partition rather than fight it.
+  A window already at the saved geometry is left untouched.
+  Fullscreen windows get no geometry either.
 - **Matching**: by class *and* window title, with the exact saved
   count — no saved window missing, no extra twin open; windows the
   layout doesn't mention never block it. Titles that change between

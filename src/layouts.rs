@@ -18,6 +18,7 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
+use crate::hypr;
 use crate::windows::{self, WinRow};
 
 /// How long the sensor keeps showing "✓ saved" after a click.
@@ -44,6 +45,10 @@ pub enum Action {
     Move { address: String, workspace: String },
     ToggleFloat { address: String },
     Geometry { address: String, x: i32, y: i32, w: i32, h: i32 },
+    /// The relative size change a tiled window accepts (the same
+    /// split change the manual drag does): `dw`/`dh` are the target
+    /// minus the current size.
+    TiledResize { address: String, dw: i32, dh: i32 },
 }
 
 /// `piuma-layouts.json`: automatic layout name → its windows. A
@@ -147,7 +152,7 @@ pub fn tick(state: &mut LayoutState, rows: &[WinRow]) -> String {
         match state.file.as_ref().and_then(|f| best_match(f, rows)) {
             Some((_, entries)) => {
                 state.matched = true;
-                run(&plan(rows, entries));
+                apply(entries);
             }
             None => state.matched = false,
         }
@@ -239,12 +244,14 @@ pub fn matches(rows: &[WinRow], entries: &[LayoutEntry]) -> bool {
 
 /// What to dispatch to re-apply `entries` to `rows`, in order. Pure —
 /// the tests build rows by hand. The saved geometry is the target: a
-/// window that lost it (the tiler re-split it, a manual move) is
-/// floated back to the saved pixels — Hyprland ignores pixel resizes
-/// on tiled windows, so floating is the only way to impose them — and
-/// a window already at the target is not touched at all. A fullscreen
-/// window gets no geometry (move/resize are ignored on it).
-pub fn plan(rows: &[WinRow], entries: &[LayoutEntry]) -> Vec<Action> {
+/// floating window that lost it is floated back to the saved pixels;
+/// a tiled one is resized inside the tiler (a relative resize, the
+/// same the manual drag does) and is never floated. A window already
+/// at the target is not touched at all; a fullscreen window gets no
+/// geometry (move/resize are ignored on it). `invert` flips the sign
+/// of the tiled resizes (the apply loop's retry when the first sign
+/// pushed the split the wrong way).
+pub fn plan(rows: &[WinRow], entries: &[LayoutEntry], invert: bool) -> Vec<Action> {
     let mut taken = vec![false; rows.len()];
     let mut actions = Vec::new();
     // Positional pairing: same (class, title) twins are matched by
@@ -272,7 +279,11 @@ pub fn plan(rows: &[WinRow], entries: &[LayoutEntry]) -> Vec<Action> {
             });
         }
         let geom_ok = r.x == e.x && r.y == e.y && r.w == e.w && r.h == e.h;
-        if !geom_ok && !r.fullscreen {
+        if geom_ok || r.fullscreen {
+            // At the saved pixels: nothing to do (the floating flag is
+            // not worth a dispatch on its own); a fullscreen window is
+            // never resized either.
+        } else if e.floating {
             if !r.floating {
                 actions.push(Action::ToggleFloat {
                     address: r.address.clone(),
@@ -285,6 +296,28 @@ pub fn plan(rows: &[WinRow], entries: &[LayoutEntry]) -> Vec<Action> {
                 w: e.w,
                 h: e.h,
             });
+        } else if r.floating {
+            // Saved as tiled, floating now: back into the tiler; the
+            // apply loop resizes the new split on the next pass.
+            actions.push(Action::ToggleFloat {
+                address: r.address.clone(),
+            });
+        } else {
+            // Saved as tiled and tiled now: the relative resize is the
+            // only size a tiler accepts (absolute pixels are ignored
+            // on tiled windows) — the window keeps its state.
+            let (dw, dh) = if invert {
+                (r.w - e.w, r.h - e.h)
+            } else {
+                (e.w - r.w, e.h - r.h)
+            };
+            if dw != 0 || dh != 0 {
+                actions.push(Action::TiledResize {
+                    address: r.address.clone(),
+                    dw,
+                    dh,
+                });
+            }
         }
     }
     actions
@@ -308,7 +341,57 @@ pub fn run(actions: &[Action]) {
                 windows::dispatch_waited(&windows::resize_call(address, *w, *h));
                 windows::dispatch_waited(&windows::move_px_call(address, *x, *y));
             }
+            Action::TiledResize { address, dw, dh } => {
+                windows::dispatch_waited(&windows::resize_rel_call(address, *dw, *dh));
+            }
         }
+    }
+}
+
+/// Apply a matched layout: the floating windows get one dispatch pass
+/// (exact pixels), the tiled ones a re-measure loop — a relative
+/// resize moves the neighbouring tile too, so the check repeats while
+/// the leftover (`|dw| + |dh|`) shrinks. A pass that makes it worse
+/// is retried once with the sign flipped (the resize pushes the split
+/// edge towards the tile's sibling, so the sign depends on the tree);
+/// if that fails too, it stops — the tiler's own partition stays and
+/// a window is never floated to force its geometry.
+/// shortcut: a partition needing both signs at the same time can't
+/// converge and is left as the tiler left it (the common
+/// kill + reopen case re-splits to the same geometry by itself and
+/// costs one empty pass). The passes block the bar a few hundred ms
+/// each (waited dispatches + a 200 ms settle).
+fn apply(entries: &[LayoutEntry]) {
+    let Some(mut rows) = hypr::fresh_clients() else {
+        return;
+    };
+    let mut prev = usize::MAX;
+    let mut inverted = false;
+    for _ in 0..4 {
+        let actions = plan(&rows, entries, inverted);
+        if actions.is_empty() {
+            return;
+        }
+        let leftover: usize = actions
+            .iter()
+            .map(|a| match a {
+                Action::TiledResize { dw, dh, .. } => (dw.abs() + dh.abs()) as usize,
+                _ => 0,
+            })
+            .sum();
+        if leftover > 0 && leftover >= prev {
+            if inverted {
+                return;
+            }
+            inverted = true;
+        }
+        prev = leftover;
+        run(&actions);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let Some(fresh) = hypr::fresh_clients() else {
+            return;
+        };
+        rows = fresh;
     }
 }
 
@@ -456,52 +539,73 @@ mod tests {
         assert!(best_match(&file, &other).is_none());
     }
 
-    /// The move to the saved workspace comes first, then the geometry:
-    /// a window that lost it floats back to the saved pixels (toggle
-    /// only when it is still tiled), one already floating gets just
-    /// the geometry.
+    /// The move to the saved workspace comes first, then the size: a
+    /// tiled window is resized inside the tiler (relative resize, no
+    /// floating), a floating one gets the exact pixels.
     #[test]
     fn plan_moves_and_restores_geometry() {
         let entries = vec![
             entry("kitty", "shell", "1", false), // tiled, wrong workspace
             entry("mpv", "video", "1", true),    // floating, wrong geometry
-            entry("slack", "Slack", "1", true),  // tiled now: toggle + geometry
+            entry("slack", "Slack", "1", true),  // tiled now: toggle + pixels
         ];
         let rows = vec![
             row("0xA", "kitty", "shell", "2", false),
             row("0xB", "mpv", "video", "1", true),
             row("0xC", "slack", "Slack", "1", false),
         ];
-        let actions = plan(&rows, &entries);
+        let actions = plan(&rows, &entries, false);
         assert!(matches!(
             actions[0],
             Action::Move { ref address, ref workspace } if address == "0xA" && workspace == "1"
         ));
-        assert!(matches!(actions[1], Action::ToggleFloat { ref address, .. } if address == "0xA"));
-        assert!(matches!(actions[2], Action::Geometry { ref address, .. } if address == "0xA"));
-        assert!(matches!(actions[3], Action::Geometry { ref address, .. } if address == "0xB"));
-        assert!(matches!(actions[4], Action::ToggleFloat { ref address, .. } if address == "0xC"));
-        assert!(matches!(actions[5], Action::Geometry { ref address, .. } if address == "0xC"));
+        assert!(matches!(actions[1], Action::TiledResize { ref address, dw: 300, dh: 400 } if address == "0xA"));
+        assert!(matches!(actions[2], Action::Geometry { ref address, .. } if address == "0xB"));
+        assert!(matches!(actions[3], Action::ToggleFloat { ref address, .. } if address == "0xC"));
+        assert!(matches!(actions[4], Action::Geometry { ref address, .. } if address == "0xC"));
     }
 
-    /// The saved geometry is the target, not the floating flag: a
-    /// floating window at the wrong spot moves there without becoming
-    /// tiled, a tiled one floats to reach the pixels (Hyprland ignores
-    /// pixel resizes on tiled windows).
+    /// A window saved as tiled is never floated back: a floating one
+    /// goes back into the tiler (the resize follows on the next pass
+    /// of the apply loop), while a floating entry still gets its
+    /// exact pixels.
     #[test]
-    fn plan_reaches_the_geometry_whatever_the_flag() {
+    fn plan_keeps_tiled_windows_tiled() {
         let tiled_entry = vec![entry("kitty", "shell", "1", false)];
         let floating_now = vec![row("0xA", "kitty", "shell", "1", true)];
         assert!(
-            matches!(plan(&floating_now, &tiled_entry)[..], [Action::Geometry { .. }]),
-            "already floating: only the geometry, no toggle back to tiled"
+            matches!(plan(&floating_now, &tiled_entry, false)[..], [Action::ToggleFloat { .. }]),
+            "back into the tiler: no pixel geometry on a tiled entry"
         );
 
         let floating = vec![entry("mpv", "video", "1", true)];
         let tiled_now = vec![row("0xB", "mpv", "video", "1", false)];
         assert!(matches!(
-            plan(&tiled_now, &floating)[..],
+            plan(&tiled_now, &floating, false)[..],
             [Action::ToggleFloat { .. }, Action::Geometry { .. }]
+        ));
+    }
+
+    /// A tiled window that lost its size is resized in place with the
+    /// relative resize the tiler accepts (target minus current), and
+    /// with the flipped sign on the apply loop's retry.
+    #[test]
+    fn plan_resizes_tiled_windows_in_place() {
+        let target = vec![LayoutEntry {
+            w: 640,
+            h: 480,
+            ..entry("kitty", "shell", "1", false)
+        }];
+        let mut row_now = row("0xA", "kitty", "shell", "1", false);
+        row_now.w = 960;
+        row_now.h = 1080;
+        assert!(matches!(
+            plan(&[row_now.clone()], &target, false)[..],
+            [Action::TiledResize { ref address, dw: -320, dh: -600 }] if address == "0xA"
+        ));
+        assert!(matches!(
+            plan(&[row_now], &target, true)[..],
+            [Action::TiledResize { ref address, dw: 320, dh: 600 }] if address == "0xA"
         ));
     }
 
@@ -516,17 +620,19 @@ mod tests {
         at_target.w = 300;
         at_target.h = 400;
         assert!(
-            plan(&[at_target.clone()], &[entry("kitty", "shell", "1", false)]).is_empty(),
+            plan(&[at_target.clone()], &[entry("kitty", "shell", "1", false)], false).is_empty(),
             "tiled at the target: untouched"
         );
         let mut floating_at_target = at_target;
         floating_at_target.floating = true;
         assert!(
-            plan(&[floating_at_target.clone()], &[entry("kitty", "shell", "1", true)]).is_empty(),
+            plan(&[floating_at_target.clone()], &[entry("kitty", "shell", "1", true)], false)
+                .is_empty(),
             "floating at the target: untouched"
         );
         assert!(
-            plan(&[floating_at_target], &[entry("kitty", "shell", "1", false)]).is_empty(),
+            plan(&[floating_at_target], &[entry("kitty", "shell", "1", false)], false)
+                .is_empty(),
             "pixels already right: the flag is not worth a dispatch"
         );
     }
@@ -538,7 +644,7 @@ mod tests {
         let mut full = row("0xB", "mpv", "video", "1", true);
         full.fullscreen = true;
         let entries = vec![entry("mpv", "video", "1", true)];
-        assert!(plan(&[full], &entries).is_empty());
+        assert!(plan(&[full], &entries, false).is_empty());
     }
 
     /// Same-title twins pair by where they stand, not by the array
@@ -555,7 +661,7 @@ mod tests {
         let mut right = row("0xR", "kitty", "dup", "1", true);
         right.x = 500;
         // Array order reversed with respect to the saved positions.
-        let actions = plan(&[right, left], &entries);
+        let actions = plan(&[right, left], &entries, false);
         assert_eq!(actions.len(), 2, "one geometry per twin");
         assert!(matches!(actions[0], Action::Geometry { ref address, x: 100, .. } if address == "0xL"));
         assert!(matches!(actions[1], Action::Geometry { ref address, x: 500, .. } if address == "0xR"));
@@ -573,7 +679,7 @@ mod tests {
             row("0xA", "kitty", "a", "1", true),
             row("0xB", "kitty", "a", "1", true),
         ];
-        let actions = plan(&rows, &entries);
+        let actions = plan(&rows, &entries, false);
         assert_eq!(actions.len(), 2);
         assert!(matches!(actions[0], Action::Geometry { ref address, x: 1, .. } if address == "0xA"));
         assert!(matches!(actions[1], Action::Geometry { ref address, x: 2, .. } if address == "0xB"));

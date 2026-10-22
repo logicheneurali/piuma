@@ -70,9 +70,10 @@ pub struct WinRow {
     pub y: i32,
     pub w: i32,
     pub h: i32,
-    /// Tiled vs floating — a saved layout floats a window only to
-    /// impose its saved geometry; an already-matching window is kept
-    /// as it is.
+    /// Tiled vs floating — a saved layout resizes a tiled window
+    /// inside the tiler (never floats it) and places a floating one
+    /// at the saved pixels; an already-matching window is kept as
+    /// it is.
     pub floating: bool,
     /// `fullscreen` in `clients -j` (0 = none): a fullscreen window
     /// gets no geometry (Hyprland ignores move/resize on it).
@@ -285,6 +286,16 @@ pub fn move_px_call(address: &str, x: i32, y: i32) -> String {
 pub fn resize_call(address: &str, w: i32, h: i32) -> String {
     format!(
         "hl.dsp.window.resize({{ window = \"address:{}\", x = {w}, y = {h} }})",
+        sanitize_address(address)
+    )
+}
+
+/// The argument for a relative resize: the split change a tiled
+/// window accepts (absolute pixel sizes are ignored on tiled windows;
+/// this is what the manual mainMod+RMB drag dispatches).
+pub fn resize_rel_call(address: &str, dx: i32, dy: i32) -> String {
+    format!(
+        "hl.dsp.window.resize({{ window = \"address:{}\", x = {dx}, y = {dy}, relative = true }})",
         sanitize_address(address)
     )
 }
