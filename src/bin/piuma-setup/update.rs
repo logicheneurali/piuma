@@ -9,7 +9,7 @@ use crate::controls::{content_scroll_id, sensor_name_id, sorted_rules};
 use crate::modal::{Modal, RuleDraft};
 use crate::view_wallpaper::wallpaper_set;
 use crate::model::*;
-use crate::state::{file_path, list_config_files, sanitize_file_name, Message, PiumaSetup};
+use crate::state::{file_path, list_config_files, sanitize_file_name, Message, PiumaSetup, Tab};
 
 /// Applies one message, then recomputes the invalid-value list so the
 /// red fields, the section frames and the save guard follow every edit
@@ -91,7 +91,22 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
         Message::CornersRadiusChanged(value) => {
             corners_set(&mut state.config, |c| c.radius = value);
         }
-        Message::TabSelected(tab) => state.active_tab = tab,
+        Message::TabSelected(tab) => {
+            // The Layouts tab reads the bar's file on every selection,
+            // so layouts saved meanwhile show up without a restart; an
+            // unreadable file is named in the status instead of being
+            // shown as an empty list.
+            if tab == Tab::Layouts {
+                match load_layouts() {
+                    Ok(list) => state.layouts = list,
+                    Err(e) => {
+                        state.layouts = Vec::new();
+                        state.set_status(e, true);
+                    }
+                }
+            }
+            state.active_tab = tab;
+        }
         Message::ThicknessChanged(value) => state.config.thickness = value,
         Message::DefaultsStyleChanged(field, value) => {
             let d = &mut state.config.sensor_defaults;
@@ -409,7 +424,6 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                         "command" => sensor.source_config.command = if value.is_empty() { None } else { Some(value) },
                         "env_var" => sensor.source_config.env_var = if value.is_empty() { None } else { Some(value) },
                         "text" => sensor.source_config.static_text = if value.is_empty() { None } else { Some(value) },
-                        "name" => sensor.source_config.name = if value.is_empty() { None } else { Some(value) },
                         _ => {}
                     }
                 }
@@ -608,6 +622,12 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                 *slot = kind;
             }
         }
+        Message::LayoutDeletePressed(key) => {
+            state.modal = Some(Modal::ConfirmRemoveLayout(key));
+        }
+        Message::LayoutsClearPressed => {
+            state.modal = Some(Modal::ConfirmClearLayouts);
+        }
         Message::ModalConfirm => match state.modal.take() {
             // The error list has no confirm action: only "Close" dismisses it.
             Some(modal @ Modal::InvalidFields { .. }) => state.modal = Some(modal),
@@ -720,6 +740,31 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                     });
                 }
             }
+            Some(Modal::ConfirmRemoveLayout(key)) => match delete_layout(&key) {
+                Ok(()) => match load_layouts() {
+                    Ok(list) => {
+                        state.layouts = list;
+                        state.set_status("Layout deleted".to_string(), false);
+                    }
+                    Err(e) => state.set_status(e, true),
+                },
+                // The dialog stays open so the error shows inside it.
+                Err(e) => {
+                    state.set_status(e, true);
+                    state.modal = Some(Modal::ConfirmRemoveLayout(key));
+                }
+            },
+            Some(Modal::ConfirmClearLayouts) => match clear_layouts() {
+                Ok(()) => {
+                    state.layouts = Vec::new();
+                    state.set_status("All layouts deleted".to_string(), false);
+                }
+                // The dialog stays open so the error shows inside it.
+                Err(e) => {
+                    state.set_status(e, true);
+                    state.modal = Some(Modal::ConfirmClearLayouts);
+                }
+            },
             Some(Modal::ColorRules { section_index, sensor_index, rules }) => {
                 // Apply: a row whose `min` is blank is one still being typed
                 // (or just added) and is dropped; a typed-but-wrong `min`,

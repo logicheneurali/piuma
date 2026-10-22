@@ -37,6 +37,10 @@ pub enum Modal {
     ConfirmRemoveSection(usize),
     /// Removal confirmation for one sensor.
     ConfirmRemoveSensor(usize, usize),
+    /// Removal confirmation for one saved window layout (its key).
+    ConfirmRemoveLayout(String),
+    /// Removal confirmation for every saved window layout (the file).
+    ConfirmClearLayouts,
     /// Icon browser: target sensor and the query filtering theme names.
     BrowseIcons { section_index: usize, sensor_index: usize, query: String },
     /// Threshold colour-rules editor: target sensor and the draft rows
@@ -205,6 +209,34 @@ pub(crate) fn modal_card(state: &PiumaSetup) -> Element<'_, Message> {
                 dialog_actions(pal, Message::ModalConfirm, "Remove"),
             )
         }
+        Some(Modal::ConfirmRemoveLayout(key)) => {
+            let label = state
+                .layouts
+                .iter()
+                .find(|l| l.key == *key)
+                .map(|l| l.label.clone())
+                .unwrap_or_else(|| key.clone());
+            dialog_frame(
+                pal,
+                "Delete layout",
+                text(format!(
+                    "Delete \"{label}\"? The running bar keeps it until restart."
+                ))
+                .size(BODY)
+                .into(),
+                error,
+                dialog_actions(pal, Message::ModalConfirm, "Delete"),
+            )
+        }
+        Some(Modal::ConfirmClearLayouts) => dialog_frame(
+            pal,
+            "Delete all layouts",
+            text("Delete every saved layout (the whole piuma-layouts.json)? The layout sensor turns off until the next save on the bar.")
+                .size(BODY)
+                .into(),
+            error,
+            dialog_actions(pal, Message::ModalConfirm, "Delete all"),
+        ),
         Some(Modal::BrowseIcons { section_index, sensor_index, query }) => {
             // Theme names as a grid of live previews: type to narrow the
             // list, press a cell to pick; the directory walk is cached

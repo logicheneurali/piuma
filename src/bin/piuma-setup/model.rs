@@ -2,11 +2,14 @@
 //! the serializer/deserializer keeping the file's exact shape (absent
 //! keys stay absent) and the source-type name mapping shared by the
 //! pickers, the labels and the save path.
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
 use serde_json::{Map, Value as JsonValue};
 
 use crate::config;
 use crate::controls::sorted_rules;
-use crate::state::PiumaSetup;
+use crate::state::{config_dir, PiumaSetup};
 
 
 /// The `panel.wallpaper` block (roadmap2 #1): whether the bar draws the
@@ -228,9 +231,6 @@ pub struct SourceConfig {
     pub interface: Option<String>,
     pub device: Option<String>,
     pub format: Option<String>,
-    /// The `layout` sensor's layout file name (piuma defaults it to
-    /// "default" when absent).
-    pub name: Option<String>,
 }
 
 impl Default for PiumaConfig {
@@ -314,7 +314,6 @@ impl Default for SourceConfig {
             interface: None,
             device: None,
             format: None,
-            name: None,
         }
     }
 }
@@ -539,11 +538,6 @@ impl PiumaSetup {
             "static_text" => {
                 if let Some(st) = &sensor.source_config.static_text {
                     map.insert("static_text".to_string(), JsonValue::String(st.clone()));
-                }
-            }
-            "layout" => {
-                if let Some(name) = &sensor.source_config.name {
-                    map.insert("name".to_string(), JsonValue::String(name.clone()));
                 }
             }
             _ => {}
@@ -980,9 +974,6 @@ impl PiumaSetup {
             if let Some(st) = source.get("static_text").and_then(|v| v.as_str()) {
                 sensor.source_config.static_text = Some(st.to_string());
             }
-            if let Some(n) = source.get("name").and_then(|v| v.as_str()) {
-                sensor.source_config.name = Some(n.to_string());
-            }
         }
 
         for (key, field) in [
@@ -1173,25 +1164,92 @@ pub(crate) fn source_label(canonical: &str) -> &'static str {
     }
 }
 
-/// The layout names already saved by the bar (`~/.config/piuma/
-/// layouts/*.json`, sorted): the `layout` sensor's picklist options.
-/// Only well-named files count — an interrupted save's temp file and a
-/// hand-dropped oddity never become selectable layouts.
-pub(crate) fn saved_layout_names() -> Vec<String> {
-    let Some(dir) = dirs::config_dir().map(|d| d.join("piuma").join("layouts")) else {
-        return Vec::new();
+// ── saved window layouts (piuma-layouts.json) ────────────────────────
+
+/// One saved layout as the Layouts tab shows it: its key (the bar's
+/// automatic name) and a label built from the window pairs.
+pub struct SavedLayout {
+    pub key: String,
+    pub label: String,
+    pub windows: usize,
+}
+
+/// `~/.config/piuma/piuma-layouts.json`, next to piuma.json — the one
+/// file the bar's layout engine reads (src/layouts.rs).
+fn layouts_path() -> PathBuf {
+    config_dir().join("piuma-layouts.json")
+}
+
+/// The display label of one saved layout: its (class, title) pairs
+/// sorted exactly like the automatic name, one "class: title" per
+/// window, " · " between them.
+pub(crate) fn layout_label(value: &JsonValue) -> String {
+    let Some(wins) = value.as_array() else {
+        return String::new();
     };
-    let mut names: Vec<String> = std::fs::read_dir(dir)
-        .map(|rd| {
-            rd.flatten()
-                .filter_map(|f| {
-                    let fname = f.file_name().to_string_lossy().to_string();
-                    let name = fname.strip_suffix(".json")?;
-                    config::is_valid_layout_name(name).then(|| name.to_string())
-                })
-                .collect()
+    let mut pairs: Vec<(&str, &str)> = wins
+        .iter()
+        .filter_map(|w| Some((w.get("class")?.as_str()?, w.get("title")?.as_str()?)))
+        .collect();
+    pairs.sort_unstable();
+    pairs.iter().map(|(c, t)| format!("{c}: {t}")).collect::<Vec<_>>().join(" · ")
+}
+
+/// Every saved layout (key → label + window count) in the file's
+/// sorted key order. A missing file is "nothing saved yet"; an
+/// unreadable one is an error, so the tab never pretends the layouts
+/// are gone.
+pub(crate) fn load_layouts() -> Result<Vec<SavedLayout>, String> {
+    let map = load_layout_map()?;
+    Ok(map
+        .into_iter()
+        .map(|(key, value)| SavedLayout {
+            windows: value.as_array().map_or(0, Vec::len),
+            label: layout_label(&value),
+            key,
         })
-        .unwrap_or_default();
-    names.sort();
-    names
+        .collect())
+}
+
+/// Deletes one layout by its key and rewrites the file (tmp + rename);
+/// an emptied map stays on disk, so the system keeps running armed.
+pub(crate) fn delete_layout(key: &str) -> Result<(), String> {
+    let mut map = load_layout_map()?;
+    if map.remove(key).is_some() {
+        write_layout_map(&map)?;
+    }
+    Ok(())
+}
+
+/// Deletes every layout by removing the file itself: the bar's rule
+/// (absent file = system ignored) turns the layout sensor off until
+/// the next save on the bar recreates it.
+pub(crate) fn clear_layouts() -> Result<(), String> {
+    match std::fs::remove_file(layouts_path()) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("cannot delete {}: {e}", layouts_path().display())),
+    }
+}
+
+/// The whole piuma-layouts.json as parsed (missing = empty): generic
+/// values, so the setup preserves entries it never needs to read.
+fn load_layout_map() -> Result<BTreeMap<String, JsonValue>, String> {
+    let path = layouts_path();
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+    };
+    serde_json::from_str(&text).map_err(|e| format!("{} is unreadable: {e}", path.display()))
+}
+
+/// Writes the whole map back atomically (tmp + rename) — the same
+/// dance the bar does, so a crash never leaves a half-written file.
+fn write_layout_map(map: &BTreeMap<String, JsonValue>) -> Result<(), String> {
+    let path = layouts_path();
+    let json = serde_json::to_string_pretty(map).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, &json).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("cannot write {}: {e}", path.display()))
 }

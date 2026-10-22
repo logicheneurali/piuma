@@ -7,6 +7,7 @@ use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Theme
 use crate::controls::content_scroll_id;
 use crate::modal::modal_overlay;
 use crate::style::*;
+use crate::view_layouts::*;
 use crate::view_panel::*;
 use crate::view_sections::*;
 use crate::view_wallpaper::*;
@@ -70,6 +71,7 @@ fn active_card(state: &PiumaSetup) -> Element<'_, Message> {
         Tab::Sections => sections_list(state),
         Tab::Wallpaper => wallpaper_settings(state),
         Tab::AutostartApps => autostart_apps_settings(state),
+        Tab::Layouts => layouts_settings(state),
     }
 }
 

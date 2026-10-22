@@ -117,6 +117,7 @@ fn fixture() -> PiumaSetup {
         validation: Vec::new(),
         wallpaper_files: Vec::new(),
         autostart_apps: Vec::new(),
+        layouts: Vec::new(),
     }
 }
 
@@ -225,10 +226,11 @@ fn tray_sensor_roundtrips_and_validates() {
         .expect("piuma must accept the saved config (pre-save validation)");
 }
 
-/// A `layout` sensor's name must survive load→save — the field that
-/// names the saved layout file is the whole point of the source.
+/// A `layout` sensor survives load→save with no source parameters:
+/// layouts are named automatically now, so a legacy `"name"` in the
+/// file is ignored and never written back.
 #[test]
-fn layout_sensor_name_roundtrips() {
+fn layout_sensor_roundtrips_without_a_name() {
     let json = r##"{
   "panel": {
 "sections": [
@@ -244,9 +246,25 @@ fn layout_sensor_name_roundtrips() {
     let saved = state.serialize().expect("serialize must succeed");
     let out: JsonValue = serde_json::from_str(&saved).expect("saved JSON must parse");
     assert_eq!(out["panel"]["sections"][0]["sensors"][0]["source"]["type"], "layout");
-    assert_eq!(out["panel"]["sections"][0]["sensors"][0]["source"]["name"], "work");
+    assert!(
+        out["panel"]["sections"][0]["sensors"][0]["source"].get("name").is_none(),
+        "the legacy name must not be written back: {saved}"
+    );
     serde_json::from_str::<config::Config>(&saved)
         .expect("piuma must accept the saved config (pre-save validation)");
+}
+
+/// A saved layout's label: its windows as "class: title", sorted
+/// exactly like the automatic name, " · " between them; an entry that
+/// isn't an array of windows shows nothing.
+#[test]
+fn layout_label_lists_windows_sorted() {
+    let value: JsonValue = serde_json::from_str(
+        r#"[{"class":"vivaldi-stable","title":"WhatsApp"},{"class":"kitty","title":"shell"}]"#,
+    )
+    .expect("entries must parse");
+    assert_eq!(layout_label(&value), "kitty: shell · vivaldi-stable: WhatsApp");
+    assert_eq!(layout_label(&JsonValue::Bool(true)), "", "a non-array entry shows nothing");
 }
 
 /// `panel.notifications` and a notifications sensor must survive

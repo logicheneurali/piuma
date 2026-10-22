@@ -147,6 +147,11 @@ pub enum Message {
     ToggleSection(usize),
     /// Toggles the accordion body of one sensor: (section, sensor).
     ToggleSensor(usize, usize),
+    /// Deletes one saved window layout (its automatic name): opens
+    /// the confirmation modal.
+    LayoutDeletePressed(String),
+    /// Deletes every saved window layout: opens the confirmation modal.
+    LayoutsClearPressed,
     /// Save: asks confirmation when the config was modified, then writes.
     SaveConfig,
     /// Opens the "save as" modal (write the config under a new name).
@@ -223,11 +228,12 @@ pub enum Tab {
     Sections,
     Wallpaper,
     AutostartApps,
+    Layouts,
 }
 
 impl Tab {
     /// Sidebar order.
-    pub(crate) const ALL: [Tab; 7] = [
+    pub(crate) const ALL: [Tab; 8] = [
         Tab::Panel,
         Tab::Notifications,
         Tab::SectionDefaults,
@@ -235,6 +241,7 @@ impl Tab {
         Tab::Sections,
         Tab::Wallpaper,
         Tab::AutostartApps,
+        Tab::Layouts,
     ];
 
     /// Label shown on the sidebar button.
@@ -246,7 +253,8 @@ impl Tab {
             Tab::SectionDefaults => "Section Defaults",
             Tab::Sections => "Sections",
             Tab::Wallpaper => "Wallpaper",
-        Tab::AutostartApps => "Autostart apps",
+            Tab::AutostartApps => "Autostart apps",
+            Tab::Layouts => "Layouts",
         }
     }
 }
@@ -285,6 +293,9 @@ pub struct PiumaSetup {
     /// tab and re-read after every switch — the switches show the spec
     /// state merged with the config's own selection.
     pub(crate) autostart_apps: Vec<autostart::editor::App>,
+    /// Saved window layouts (piuma-layouts.json): loaded when the
+    /// Layouts tab is selected, refreshed after every delete.
+    pub(crate) layouts: Vec<SavedLayout>,
 }
 
 impl PiumaSetup {
@@ -307,6 +318,7 @@ impl PiumaSetup {
             validation: Vec::new(),
             wallpaper_files: scan_wallpaper_dirs(&wallpaper_dirs()),
             autostart_apps: Vec::new(),
+            layouts: Vec::new(),
         };
         match fs::read_to_string(file_path(&state.current_file)) {
             Ok(content) => match state.load_from_json(&content) {

@@ -37,6 +37,7 @@ mod state;
 mod style;
 mod update;
 mod view;
+mod view_layouts;
 mod view_panel;
 mod view_sections;
 mod view_wallpaper;

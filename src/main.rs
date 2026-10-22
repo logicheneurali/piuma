@@ -5,7 +5,6 @@
 //! Configuration is loaded from a JSON file (CLI arg or default path).
 //! See `src/config.rs` for the config schema.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
 
@@ -349,8 +348,9 @@ pub(crate) struct Panel {
     /// save (click) reads the windows from it without forking again.
     pub(crate) hypr: Option<hypr::Snapshot>,
     /// The layout engine's session state (roadmap layout-automatici):
-    /// memoized layout files, which layouts already applied and the
-    /// "✓ saved" flash clock.
+    /// the layout file cache, the window set of the last activation
+    /// check, which layouts already applied and the "✓ saved" flash
+    /// clock.
     pub(crate) layout_state: layouts::LayoutState,
 }
 
@@ -888,32 +888,26 @@ fn spawn_read(panel: &mut Panel) -> Command<Message> {
 fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<Command<Message>> {
     let sensor_runner::Reads { hypr, values } = data;
     // ── Layout engine (roadmap layout-automatici) ──
-    // Each `layout` sensor's saved file is matched against this pass's
-    // window set: when every saved window (class + title) is open with
-    // the exact saved count, the layout's plan dispatches once, and
-    // the set moving away re-arms it (opening and closing windows is
-    // the only trigger; unrelated windows never veto). The sensor
-    // texts come from the same state, computed here — the runner knows
-    // nothing about it. Layout files are read once per session (see
-    // `LayoutState`).
-    let mut layout_texts: HashMap<String, String> = HashMap::new();
-    if let Some(rows) = hypr.as_ref().and_then(|h| h.clients.as_deref()) {
-        for name in panel
+    // One shared text for every `layout` sensor, computed here from the
+    // engine's own state (the runner knows nothing about it). The
+    // activation check — matching the window set against the saved
+    // layouts and applying the hit once — runs only when a window was
+    // created or closed since the last pass; the other passes just
+    // report the cached state. The file itself is read once per
+    // session (see `LayoutState`).
+    let layout_text = match (
+        panel
             .config
             .panel
             .sections
             .iter()
             .flat_map(|sec| &sec.sensors)
-            .filter_map(|s| match &s.source {
-                config::SensorSource::Layout { name } => Some(layouts::resolve_name(name.as_deref())),
-                _ => None,
-            })
-        {
-            layout_texts
-                .entry(name.clone())
-                .or_insert_with(|| layouts::tick(&mut panel.layout_state, &name, rows));
-        }
-    }
+            .any(|s| matches!(s.source, config::SensorSource::Layout {})),
+        hypr.as_ref().and_then(|h| h.clients.as_deref()),
+    ) {
+        (true, Some(rows)) => Some(layouts::tick(&mut panel.layout_state, rows)),
+        _ => None,
+    };
     // One reading per configured sensor, consumed in config order.
     let mut reads = values.into_iter();
     // Samples of this pass for the graph history (one read per
@@ -953,10 +947,11 @@ fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<Command<Mess
                     }
                 }
                 let mut value = read.text;
-                // A layout sensor shows the engine's state (just
-                // saved / ✗ no file / ✓ applied / ⋯ armed) instead.
-                if let config::SensorSource::Layout { name } = &s.source {
-                    if let Some(t) = layout_texts.get(&layouts::resolve_name(name.as_deref())) {
+                // A layout sensor shows the engine's state (✓ saved /
+                // ✓ applied / ⋯ armed / nothing while the file is
+                // absent) instead of any reading.
+                if matches!(s.source, config::SensorSource::Layout {}) {
+                    if let Some(t) = &layout_text {
                         value = t.clone();
                     }
                 }
@@ -1519,22 +1514,18 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                         return toggle_notif_list(panel);
                     }
                     // A layout sensor saves the current workspace's
-                    // window arrangement under its name on click (the
-                    // bar's own bookkeeping — no shell action). The
-                    // windows come from the last pass's snapshot.
-                    let layout_name = panel
+                    // window arrangement in piuma-layouts.json on click
+                    // (the bar's own bookkeeping — no shell action; the
+                    // automatic name comes from the window set itself).
+                    // The windows come from the last pass's snapshot.
+                    let is_layout = panel
                         .config
                         .panel
                         .sections
                         .get(section_index)
                         .and_then(|sec| sec.sensors.get(sensor_index))
-                        .and_then(|s| match &s.source {
-                            config::SensorSource::Layout { name } => {
-                                Some(layouts::resolve_name(name.as_deref()))
-                            }
-                            _ => None,
-                        });
-                    if let Some(name) = layout_name {
+                        .is_some_and(|s| matches!(s.source, config::SensorSource::Layout {}));
+                    if is_layout {
                         let rows = panel
                             .hypr
                             .as_ref()
@@ -1544,8 +1535,8 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                             .hypr
                             .as_ref()
                             .and_then(|h| h.active_workspace.as_deref());
-                        if let Err(e) = layouts::save(&mut panel.layout_state, &name, rows, ws) {
-                            eprintln!("[piuma] layout save ({name}) failed: {e}");
+                        if let Err(e) = layouts::save(&mut panel.layout_state, rows, ws) {
+                            eprintln!("[piuma] layout save failed: {e}");
                         }
                         return Command::none();
                     }

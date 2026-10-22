@@ -1,25 +1,30 @@
-//! Window layouts (roadmap layout-automatici): a `layout` sensor saves
-//! the current workspace's window arrangement on click, and every tick
-//! the bar re-applies a saved layout once — as soon as every saved
-//! window (class + title) is open again with the exact saved count.
-//! A set that moves away re-arms the layout, so opening and closing
-//! windows is the only trigger: manual moves between two sets are
-//! never fought, and unrelated windows never veto.
+//! Window layouts (roadmap layout-automatici): everything lives in one
+//! file, `piuma-layouts.json` next to piuma.json — while the file is
+//! absent the layout system is ignored, and the first click on a
+//! `layout` sensor creates it with the current workspace's window
+//! arrangement. Layouts are named automatically: the JSON encoding of
+//! the (class, title) pairs sorted alphabetically — the same windows
+//! always produce the same name, so re-saving replaces instead of
+//! duplicating, and any character a title carries is serializer-
+//! escaped. The activation check runs only when a window is created
+//! or closed (the address set differs from the last check): then the
+//! bar applies, once per window set, the most specific saved layout
+//! whose windows are all open with the exact saved count — manual
+//! moves are never fought, unrelated windows never veto.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::is_valid_layout_name;
 use crate::windows::{self, WinRow};
 
 /// How long the sensor keeps showing "✓ saved" after a click.
 const FLASH: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// One saved window: identified by class + title (the auto-apply match
-/// keys), placed by workspace and — for floating windows — by pixel
+/// One saved window: identified by class + title (the match keys),
+/// placed by workspace and — for floating windows — by pixel
 /// geometry. The address is deliberately absent: it changes every run.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LayoutEntry {
@@ -41,46 +46,61 @@ pub enum Action {
     Geometry { address: String, x: i32, y: i32, w: i32, h: i32 },
 }
 
+/// `piuma-layouts.json`: automatic layout name → its windows. A
+/// BTreeMap so the file is always written in a stable order.
+type LayoutFile = BTreeMap<String, Vec<LayoutEntry>>;
+
 /// The engine's session state, kept on the panel.
 #[derive(Default)]
 pub struct LayoutState {
-    /// Layout name → file contents (`None` = no file): read once per
-    /// session and refreshed on save.
-    /// shortcut: a layout file edited or deleted by hand is not picked
-    /// up until the bar restarts; watch the directory if that matters.
-    cache: HashMap<String, Option<Vec<LayoutEntry>>>,
-    /// Layouts whose plan already fired for the current window set:
-    /// the trigger is the set's transition, not the tick.
-    done: HashSet<String>,
+    /// The parsed file (`None` = absent: the layout system is ignored
+    /// until the first save creates it).
+    /// shortcut: a file created or edited by hand is picked up on the
+    /// next bar restart, not per event.
+    file: Option<LayoutFile>,
+    /// Set when the one-time load has run, so an absent file is not
+    /// re-read (and a broken one not re-logged) on every pass.
+    loaded: bool,
+    /// Window addresses at the last check: a differing set (a window
+    /// was created or closed) is the only event that re-runs it.
+    set: HashSet<String>,
+    /// Whether the last check found a matching layout — the text
+    /// between checks (`✓`/`⋯`).
+    matched: bool,
     /// Last save, for the "✓ saved" flash.
-    flash: Option<(String, Instant)>,
+    flash: Option<Instant>,
 }
 
-/// The sensor's layout name: an absent name means the "default" layout.
-/// (Invalid names are rejected by the config validator already; the
-/// filesystem helpers double-check at the trust boundary.)
-pub fn resolve_name(name: Option<&str>) -> String {
-    name.unwrap_or("default").to_string()
-}
-
-/// `~/.config/piuma/layouts`, next to piuma.json.
-fn dir() -> Option<PathBuf> {
+/// `~/.config/piuma/piuma-layouts.json`, next to piuma.json.
+fn file_path() -> Option<PathBuf> {
     let cfg = crate::CONFIG_PATH.get()?;
-    Some(PathBuf::from(cfg).parent()?.join("layouts"))
+    Some(PathBuf::from(cfg).parent()?.join("piuma-layouts.json"))
 }
 
-/// Save the visible windows of the current workspace as `name`'s
-/// layout; returns how many windows it saved. Written tmp + rename so
-/// a crash can never leave a half-written layout behind.
+/// The automatic layout name: the JSON encoding of the (class, title)
+/// pairs sorted alphabetically. The same windows in any position give
+/// the same name (a re-save replaces that layout), different windows
+/// give a different one, and every title character is escaped by the
+/// serializer — the key stays a valid, unique string whatever the
+/// windows are called.
+fn auto_name(entries: &[LayoutEntry]) -> String {
+    let mut keys: Vec<(&str, &str)> = entries
+        .iter()
+        .map(|e| (e.class.as_str(), e.title.as_str()))
+        .collect();
+    keys.sort_unstable();
+    serde_json::to_string(&keys).unwrap_or_default()
+}
+
+/// Save the visible windows of the current workspace under their
+/// automatic name — replacing any layout saved from the same window
+/// set — and create the file on the first save. Returns how many
+/// windows it saved.
 pub fn save(
     state: &mut LayoutState,
-    name: &str,
     rows: &[WinRow],
     active_workspace: Option<&str>,
 ) -> Result<usize, String> {
-    if !is_valid_layout_name(name) {
-        return Err(format!("invalid layout name: {name}"));
-    }
     let Some(ws) = active_workspace else {
         return Err("no active workspace to save".to_string());
     };
@@ -88,19 +108,95 @@ pub fn save(
     if entries.is_empty() {
         return Err("no visible windows in the current workspace".to_string());
     }
-    let dir = dir().ok_or_else(|| "cannot locate the config directory".to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let json = serde_json::to_string_pretty(&entries).map_err(|e| e.to_string())?;
-    let path = dir.join(format!("{name}.json"));
-    let tmp = dir.join(format!(".{name}.json.tmp"));
-    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
-    // Cache and latch follow the click: the saved set is by definition
-    // matched and already in place — nothing to re-apply.
-    state.cache.insert(name.to_string(), Some(entries));
-    state.done.insert(name.to_string());
-    state.flash = Some((name.to_string(), Instant::now()));
-    Ok(rows.iter().filter(|r| r.visible && r.workspace == ws).count())
+    let path = file_path().ok_or_else(|| "cannot locate the config directory".to_string())?;
+    let count = entries.len();
+    let mut file = state.file.take().unwrap_or_default();
+    file.insert(auto_name(&entries), entries);
+    // Text-only refresh: the sensor shows ✓ for the set just saved
+    // without dispatching anything (the check itself only runs on a
+    // window being created or closed).
+    state.matched = best_match(&file, rows).is_some();
+    // tmp + rename so a crash can never leave a half-written file; the
+    // in-memory copy is kept even when the disk write fails.
+    let written = serde_json::to_string_pretty(&file)
+        .map_err(|e| e.to_string())
+        .and_then(|json| {
+            let tmp = path.with_extension("json.tmp");
+            std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
+            std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+        });
+    state.file = Some(file);
+    state.loaded = true;
+    written?;
+    state.flash = Some(Instant::now());
+    Ok(count)
+}
+
+/// One pass of the engine: the check runs only when a window was
+/// created or closed since the last one (the address set differs) —
+/// then the most specific saved layout whose windows are all open
+/// with the exact saved count applies, once for that set (the next
+/// check waits for the next create/close). Returns the sensor's text
+/// — empty while the file is absent (system ignored).
+pub fn tick(state: &mut LayoutState, rows: &[WinRow]) -> String {
+    if !state.loaded {
+        state.loaded = true;
+        state.file = load();
+    }
+    if window_set_changed(state, rows) {
+        match state.file.as_ref().and_then(|f| best_match(f, rows)) {
+            Some((_, entries)) => {
+                state.matched = true;
+                run(&plan(rows, entries));
+            }
+            None => state.matched = false,
+        }
+    }
+    status_text(state)
+}
+
+/// Whether a window was created or closed since the last check: the
+/// only event that makes the check run — manual moves, resizes and
+/// workspace switches change no address.
+fn window_set_changed(state: &mut LayoutState, rows: &[WinRow]) -> bool {
+    let set: HashSet<String> = rows.iter().map(|r| r.address.clone()).collect();
+    if set == state.set {
+        return false;
+    }
+    state.set = set;
+    true
+}
+
+/// The most specific saved layout whose windows are all open with the
+/// exact saved count: a subset loses to the layout saved from this
+/// very window set; a length tie keeps the earlier (sorted) name.
+fn best_match<'a>(
+    file: &'a LayoutFile,
+    rows: &[WinRow],
+) -> Option<(&'a String, &'a Vec<LayoutEntry>)> {
+    let mut best: Option<(&String, &Vec<LayoutEntry>)> = None;
+    for (name, entries) in file {
+        if matches(rows, entries) && best.map_or(true, |(_, b)| entries.len() > b.len()) {
+            best = Some((name, entries));
+        }
+    }
+    best
+}
+
+/// The sensor's text: the saved flash, ✓ for a matched (and applied)
+/// window set, ⋯ while armed — and nothing at all while the file is
+/// absent, when the layout system is ignored.
+fn status_text(state: &LayoutState) -> String {
+    if let Some(at) = &state.flash {
+        if at.elapsed() < FLASH {
+            return "✓ saved".to_string();
+        }
+    }
+    match (state.file.is_some(), state.matched) {
+        (true, true) => "✓".to_string(),
+        (true, false) => "⋯".to_string(),
+        (false, _) => String::new(),
+    }
 }
 
 /// The layout entries for one save: the visible windows of the active
@@ -186,7 +282,7 @@ pub fn plan(rows: &[WinRow], entries: &[LayoutEntry]) -> Vec<Action> {
 }
 
 /// Fire the actions, waiting for each dispatch to land: a window that
-/// must float first and move after cannot race its own toggle.
+/// must float first and size/place after cannot race its own toggle.
 pub fn run(actions: &[Action]) {
     for a in actions {
         match a {
@@ -207,50 +303,19 @@ pub fn run(actions: &[Action]) {
     }
 }
 
-/// One pass of the engine for one layout: load the file (once per
-/// session), and fire the plan the first time the window set matches
-/// it — a set that moves away re-arms it. Returns the sensor's text.
-pub fn tick(state: &mut LayoutState, name: &str, rows: &[WinRow]) -> String {
-    if !state.cache.contains_key(name) {
-        state.cache.insert(name.to_string(), load(name));
-    }
-    if let Some(entries) = state.cache.get(name).and_then(|c| c.as_ref()) {
-        if matches(rows, entries) {
-            // `insert` is true only the first time: one fire per set.
-            if state.done.insert(name.to_string()) {
-                run(&plan(rows, entries));
-            }
-        } else {
-            state.done.remove(name);
-        }
-    }
-    status_text(state, name)
-}
-
-/// The sensor's text: the layout name plus a state suffix — just
-/// saved (flash), ✗ no file, ✓ applied, ⋯ armed and waiting.
-pub fn status_text(state: &LayoutState, name: &str) -> String {
-    if let Some((n, at)) = &state.flash {
-        if n == name && at.elapsed() < FLASH {
-            return format!("{name} ✓ saved");
-        }
-    }
-    match state.cache.get(name) {
-        Some(None) | None => format!("{name} ✗"),
-        Some(Some(_)) if state.done.contains(name) => format!("{name} ✓"),
-        Some(Some(_)) => format!("{name} ⋯"),
-    }
-}
-
-/// The saved layout, or `None` when the file is missing or broken (a
-/// broken file reads as "no layout": the sensor shows ✗).
-fn load(name: &str) -> Option<Vec<LayoutEntry>> {
-    if !is_valid_layout_name(name) {
-        return None;
-    }
-    let path = dir()?.join(format!("{name}.json"));
+/// The saved layouts, or `None` when the file is missing or broken (a
+/// broken file logs once and reads as "absent": the first save
+/// recreates it).
+fn load() -> Option<LayoutFile> {
+    let path = file_path()?;
     let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&text).ok()
+    match serde_json::from_str(&text) {
+        Ok(file) => Some(file),
+        Err(e) => {
+            eprintln!("[piuma] piuma-layouts.json is unreadable: {e}");
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -287,6 +352,26 @@ mod tests {
         }
     }
 
+    /// The trigger of the check: it runs when a window is created or
+    /// closed (the address set differs) and never otherwise — manual
+    /// moves, resizes and workspace switches change no address. `tick`
+    /// itself is not tested here: it dispatches real `hyprctl` calls,
+    /// and the pure pieces it composes (`window_set_changed`,
+    /// `best_match`, `plan`) are covered individually.
+    #[test]
+    fn check_runs_only_when_a_window_is_created_or_closed() {
+        let mut state = LayoutState::default();
+        let a = row("0xA", "kitty", "shell", "1", false);
+        assert!(window_set_changed(&mut state, &[a.clone()]), "the first set is a change");
+        assert!(!window_set_changed(&mut state, &[a.clone()]), "same windows: no check");
+        let switched = row("0xA", "kitty", "shell", "2", false);
+        assert!(!window_set_changed(&mut state, &[switched]), "a workspace switch changes no address");
+        let b = row("0xB", "firefox", "Home", "1", false);
+        assert!(window_set_changed(&mut state, &[a.clone(), b.clone()]), "a new window is an event");
+        assert!(window_set_changed(&mut state, &[b.clone()]), "a closed window is an event");
+        assert!(!window_set_changed(&mut state, &[b.clone()]), "same set again: quiet");
+    }
+
     /// The trigger: every saved window (by class + title) open with the
     /// exact saved count, no twin extra — windows outside the layout
     /// are ignored.
@@ -316,6 +401,52 @@ mod tests {
         assert!(!matches(&same, &[]), "an empty layout never matches");
     }
 
+    /// The automatic name depends only on the window set: saved in any
+    /// order it is the same string (a re-save replaces), and a title's
+    /// special characters stay inside the escaped JSON key.
+    #[test]
+    fn auto_name_is_the_sorted_window_set() {
+        let a = entry("kitty", "shell", "1", false);
+        let b = entry("firefox", "Home", "2", true);
+        let name_ab = auto_name(&[a.clone(), b.clone()]);
+        let name_ba = auto_name(&[b.clone(), a.clone()]);
+        assert_eq!(name_ab, name_ba, "order must not matter");
+        let other = auto_name(&[entry("kitty", "shell", "1", true)]);
+        assert_ne!(name_ab, other, "different windows, different name");
+        // Special characters: the key is JSON, so quotes stay escaped
+        // and the set survives as a parseable list of pairs.
+        let weird = auto_name(&[entry("wm class", "a \"quoted\" title\nwith newline", "1", false)]);
+        let parsed: Vec<(String, String)> = serde_json::from_str(&weird).expect("key is valid JSON");
+        assert_eq!(parsed[0].1, "a \"quoted\" title\nwith newline");
+    }
+
+    /// The most specific matching layout wins: a saved subset does not
+    /// shadow the layout saved from this very window set.
+    #[test]
+    fn best_match_prefers_the_most_specific_layout() {
+        let mut file: LayoutFile = BTreeMap::new();
+        file.insert(
+            "subset".to_string(),
+            vec![entry("kitty", "shell", "1", false)],
+        );
+        file.insert(
+            "full".to_string(),
+            vec![
+                entry("kitty", "shell", "1", false),
+                entry("firefox", "Home", "1", false),
+            ],
+        );
+        let both = vec![
+            row("0xA", "kitty", "shell", "1", false),
+            row("0xB", "firefox", "Home", "1", false),
+        ];
+        assert_eq!(best_match(&file, &both).map(|(n, _)| n.as_str()), Some("full"));
+        let only_kitty = vec![row("0xA", "kitty", "shell", "1", false)];
+        assert_eq!(best_match(&file, &only_kitty).map(|(n, _)| n.as_str()), Some("subset"));
+        let other = vec![row("0xC", "mail", "Inbox", "1", false)];
+        assert!(best_match(&file, &other).is_none());
+    }
+
     /// Tiled windows only return to their workspace; floating ones get
     /// the pixel geometry; toggles come before the geometry they enable.
     #[test]
@@ -340,17 +471,33 @@ mod tests {
         assert!(matches!(actions[3], Action::Geometry { ref address, .. } if address == "0xC"));
     }
 
+    /// Both float directions are dispatched: floating→tiled gets the
+    /// toggle and no geometry (the tiler owns the size again).
+    #[test]
+    fn plan_toggles_float_state_both_ways() {
+        let tiled = vec![entry("kitty", "shell", "1", false)];
+        let floating_now = vec![row("0xA", "kitty", "shell", "1", true)];
+        assert!(matches!(
+            plan(&floating_now, &tiled)[0],
+            Action::ToggleFloat { .. }
+        ));
+        assert_eq!(plan(&floating_now, &tiled).len(), 1, "no geometry for a tiled entry");
+
+        let floating = vec![entry("mpv", "video", "1", true)];
+        let tiled_now = vec![row("0xB", "mpv", "video", "1", false)];
+        assert!(matches!(
+            plan(&tiled_now, &floating)[..],
+            [Action::ToggleFloat { .. }, Action::Geometry { .. }]
+        ));
+    }
+
     /// A floating window turned tiled gets only the toggle — its size
     /// back to the tiler — and a fullscreen one no geometry at all.
     #[test]
     fn plan_never_fights_the_tiler_or_fullscreen() {
-        let entries = vec![entry("kitty", "shell", "1", false)];
-        let rows = vec![row("0xA", "kitty", "shell", "1", true)];
-        assert!(matches!(plan(&rows, &entries)[0], Action::ToggleFloat { .. }));
-
-        let entries = vec![entry("mpv", "video", "1", true)];
         let mut full = row("0xB", "mpv", "video", "1", true);
         full.fullscreen = true;
+        let entries = vec![entry("mpv", "video", "1", true)];
         assert!(plan(&[full], &entries).is_empty());
     }
 

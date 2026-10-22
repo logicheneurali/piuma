@@ -400,34 +400,53 @@ server emits the spec signals with the right reasons: 1 (expired),
 ### Window layouts
 
 A `layout` sensor saves and re-applies the arrangement of the windows
-in the current workspace. A **click saves**: the visible windows of the
-workspace you are on are written to
-`~/.config/piuma/layouts/<name>.json` under the sensor's `name`
-(absent = `default`; only letters, digits, `-` and `_` are accepted).
-The bar **re-applies the saved layout automatically** as soon as every
-saved window — matched by class *and* window title — is open again with
-the exact saved count. Opening and closing windows is the trigger: the
-layout fires once per window set, moving windows by hand in between is
-never fought, and unrelated windows (another workspace's session, an
-unrelated app) never block it.
+in the current workspace. Everything lives in one file,
+`~/.config/piuma/piuma-layouts.json` (next to `piuma.json`): **while
+the file is absent the layout system is ignored** — the sensor shows
+no value at all — and the **first click creates it** with the current
+arrangement.
+
+A **click saves** the visible windows of the workspace you are on.
+Layouts are **named automatically**: the JSON encoding of the windows'
+(class, title) pairs sorted alphabetically — the same window set always
+produces the same name, so saving again replaces that layout instead of
+duplicating it, whatever the titles contain.
+
+The bar **re-applies a saved layout automatically**, but only when a
+window is **created or closed**: the activation check runs on that
+event (never on a timer), the most specific saved layout whose windows
+are all open — matched by class *and* window title with the exact
+saved count — fires once for that window set, and unrelated windows
+(another workspace's session, an unrelated app) never block it. Moving
+windows by hand in between is never fought.
 
 ```json
-{ "name": "Layout", "source": { "type": "layout", "name": "work" } }
+{ "name": "Layout", "source": { "type": "layout" } }
 ```
 
-- **State on the bar**: `work ⋯` armed and waiting, `work ✓` applied,
-  `work ✗` no saved file, `work ✓ saved` right after the click.
-- **What is restored**: the workspace of each window, and — for
-  floating windows — the exact pixel position and size. Tiled windows
-  only return to their workspace: the tiler keeps owning their
-  geometry. Fullscreen windows get no geometry either.
+(A legacy `"name"` key in the source is ignored: layouts are named by
+their window set.)
+
+- **State on the bar**: `⋯` armed and waiting, `✓` applied,
+  `✓ saved` right after the click, no value while the file is absent.
+- **What is restored**: the workspace of each window and — for
+  floating windows — the exact pixel position and size; the float
+  state itself is restored too, in both directions (floating→tiled and
+  tiled→floating). Tiled windows only return to their workspace: the
+  tiler keeps owning their geometry. Fullscreen windows get no
+  geometry either.
 - **Matching**: by class *and* window title, with the exact saved
   count — no saved window missing, no extra twin open; windows the
   layout doesn't mention never block it. Titles that change between
   sessions (a browser tab, an editor path) break the match — save the
   layout again from the new titles, or keep the window titles stable.
-- **Limitations (v1)**: one layout set per sensor; layout files edited
-  or deleted by hand are picked up on the next bar restart; monitor
+- **Managing layouts**: piuma-setup's **Layouts** tab lists them
+  (their windows as `class: title`) and deletes a single one — or all
+  of them, which removes the file and turns the system off — both
+  behind a confirmation.
+- **Limitations**: every `layout` sensor shares the one file and shows
+  the same state; layout files edited by hand — or deletions made in
+  the setup — reach the running bar on its next restart; monitor
   placement is derived from the saved pixel position only.
 
 ### Portability

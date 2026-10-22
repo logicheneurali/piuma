@@ -319,12 +319,6 @@ pub(crate) fn sensor_view<'a>(
         "static_text" => input("Text", sensor.source_config.static_text.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "text".to_string(), value))
             .width(Length::Fill)
             .into(),
-        "layout" => Row::new()
-            .push(input("Layout name", sensor.source_config.name.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "name".to_string(), value))
-                .width(Length::Fill))
-            .push(picklist(saved_layout_names(), None::<&String>, move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "name".to_string(), value)))
-            .spacing(5)
-            .into(),
         other => Row::new()
             .push(text(format!("{} (no extra config)", source_label(other))).size(BODY))
             .spacing(5)
