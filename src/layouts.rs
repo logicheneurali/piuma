@@ -367,11 +367,8 @@ fn apply(entries: &[LayoutEntry]) {
     };
     let mut prev = usize::MAX;
     let mut inverted = false;
-    for _ in 0..4 {
+    for _ in 0..6 {
         let actions = plan(&rows, entries, inverted);
-        if actions.is_empty() {
-            return;
-        }
         let leftover: usize = actions
             .iter()
             .map(|a| match a {
@@ -386,6 +383,14 @@ fn apply(entries: &[LayoutEntry]) {
             inverted = true;
         }
         prev = leftover;
+        // One tiled resize per pass: a resize moves the split edge
+        // shared with the sibling tile, so two resizes at once undo
+        // each other (the typical case: the split between two stacked
+        // tiles) — the next pass re-measures and takes the next one.
+        let actions = first_resize_only(actions);
+        if actions.is_empty() {
+            return;
+        }
         run(&actions);
         std::thread::sleep(std::time::Duration::from_millis(200));
         let Some(fresh) = hypr::fresh_clients() else {
@@ -393,6 +398,21 @@ fn apply(entries: &[LayoutEntry]) {
         };
         rows = fresh;
     }
+}
+
+/// The actions one pass fires: every non-resize action, but only the
+/// first tiled resize (see the loop above; extracted for a test).
+fn first_resize_only(mut actions: Vec<Action>) -> Vec<Action> {
+    let mut resized = false;
+    actions.retain(|a| match a {
+        Action::TiledResize { .. } => {
+            let keep = !resized;
+            resized = true;
+            keep
+        }
+        _ => true,
+    });
+    actions
 }
 
 /// The saved layouts, or `None` when the file is missing or broken (a
@@ -645,6 +665,29 @@ mod tests {
         full.fullscreen = true;
         let entries = vec![entry("mpv", "video", "1", true)];
         assert!(plan(&[full], &entries, false).is_empty());
+    }
+
+    /// Only the first tiled resize fires per pass: two resizes at
+    /// once on sibling tiles move the same shared split edge and
+    /// cancel each other (the bug that made the loop oscillate
+    /// without ever converging).
+    #[test]
+    fn plan_keeps_one_tiled_resize_per_pass() {
+        let rows = vec![
+            row("0xA", "kitty", "a", "1", false),
+            row("0xB", "kitty", "b", "1", false),
+        ];
+        let entries = vec![
+            LayoutEntry { w: 640, ..entry("kitty", "a", "1", false) },
+            LayoutEntry { w: 500, ..entry("kitty", "b", "1", false) },
+        ];
+        let full = plan(&rows, &entries, false);
+        assert_eq!(full.len(), 2, "both tiles need a resize");
+        let actions = first_resize_only(full);
+        assert!(
+            matches!(actions[..], [Action::TiledResize { ref address, .. }] if address == "0xA"),
+            "one resize per pass, the first positional match"
+        );
     }
 
     /// Same-title twins pair by where they stand, not by the array
