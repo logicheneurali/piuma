@@ -192,6 +192,10 @@ pub fn run(source: &SensorSource, hypr: Option<&crate::hypr::Snapshot>) -> Read 
         // Taskbar icons carry no text: the slots come from
         // `windows::task_icons()`, built per tick in `update`.
         SensorSource::Taskbar {} => plain(String::new()),
+        // A layout sensor's text is the engine's state (armed/applied/
+        // just saved): computed in `apply_read` from the same snapshot,
+        // where the panel's state lives.
+        SensorSource::Layout { .. } => plain(String::new()),
     }
 }
 
@@ -216,6 +220,9 @@ pub fn read_all(sources: &[SensorSource]) -> Reads {
             SensorSource::Window {}
                 | SensorSource::Workspace {}
                 | SensorSource::Taskbar {}
+                // The layout engine matches and saves against the same
+                // snapshot `apply_read` receives.
+                | SensorSource::Layout { .. }
         )
     });
     let hypr = needs_hypr.then(crate::hypr::snapshot);

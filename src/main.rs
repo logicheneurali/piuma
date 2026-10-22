@@ -5,6 +5,7 @@
 //! Configuration is loaded from a JSON file (CLI arg or default path).
 //! See `src/config.rs` for the config schema.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
 
@@ -38,6 +39,7 @@ mod graphs;
 mod hypr;
 mod icons;
 mod instance_lock;
+mod layouts;
 mod menus;
 mod notifications;
 mod palette;
@@ -343,6 +345,13 @@ pub(crate) struct Panel {
     /// The wallpaper file (path + mtime) the current palette was
     /// extracted from: the extraction re-runs only when this changes.
     pub(crate) palette_key: Option<(String, SystemTime)>,
+    /// The last pass's shared compositor snapshot: the layout engine's
+    /// save (click) reads the windows from it without forking again.
+    pub(crate) hypr: Option<hypr::Snapshot>,
+    /// The layout engine's session state (roadmap layout-automatici):
+    /// memoized layout files, which layouts already applied and the
+    /// "✓ saved" flash clock.
+    pub(crate) layout_state: layouts::LayoutState,
 }
 
 /// One open tray menu: which item it belongs to (the item's bus + path
@@ -878,6 +887,33 @@ fn spawn_read(panel: &mut Panel) -> Command<Message> {
 /// the window commands the caller batches.
 fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<Command<Message>> {
     let sensor_runner::Reads { hypr, values } = data;
+    // ── Layout engine (roadmap layout-automatici) ──
+    // Each `layout` sensor's saved file is matched against this pass's
+    // window set: when every saved window (class + title) is open with
+    // the exact saved count, the layout's plan dispatches once, and
+    // the set moving away re-arms it (opening and closing windows is
+    // the only trigger; unrelated windows never veto). The sensor
+    // texts come from the same state, computed here — the runner knows
+    // nothing about it. Layout files are read once per session (see
+    // `LayoutState`).
+    let mut layout_texts: HashMap<String, String> = HashMap::new();
+    if let Some(rows) = hypr.as_ref().and_then(|h| h.clients.as_deref()) {
+        for name in panel
+            .config
+            .panel
+            .sections
+            .iter()
+            .flat_map(|sec| &sec.sensors)
+            .filter_map(|s| match &s.source {
+                config::SensorSource::Layout { name } => Some(layouts::resolve_name(name.as_deref())),
+                _ => None,
+            })
+        {
+            layout_texts
+                .entry(name.clone())
+                .or_insert_with(|| layouts::tick(&mut panel.layout_state, &name, rows));
+        }
+    }
     // One reading per configured sensor, consumed in config order.
     let mut reads = values.into_iter();
     // Samples of this pass for the graph history (one read per
@@ -916,7 +952,14 @@ fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<Command<Mess
                         graph_samples.push(((section_idx, sensor_idx), sample));
                     }
                 }
-                let value = read.text;
+                let mut value = read.text;
+                // A layout sensor shows the engine's state (just
+                // saved / ✗ no file / ✓ applied / ⋯ armed) instead.
+                if let config::SensorSource::Layout { name } = &s.source {
+                    if let Some(t) = layout_texts.get(&layouts::resolve_name(name.as_deref())) {
+                        value = t.clone();
+                    }
+                }
                 // Tray sensors render icons from the shared tray state
                 // (tray.rs) instead of text.
                 let tray_icons =
@@ -992,6 +1035,9 @@ fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<Command<Mess
             sensors,
         });
     }
+    // The next click on a layout sensor saves from this snapshot — no
+    // fork, and exactly what the engine just matched against.
+    panel.hypr = hypr;
     panel.sections = sections;
     // One ring advance per pass: columns repeat their last value
     // when a reading was missing (time stays uniform).
@@ -1471,6 +1517,37 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                         .is_some_and(|s| matches!(s.source, config::SensorSource::Notifications {}));
                     if is_notifications {
                         return toggle_notif_list(panel);
+                    }
+                    // A layout sensor saves the current workspace's
+                    // window arrangement under its name on click (the
+                    // bar's own bookkeeping — no shell action). The
+                    // windows come from the last pass's snapshot.
+                    let layout_name = panel
+                        .config
+                        .panel
+                        .sections
+                        .get(section_index)
+                        .and_then(|sec| sec.sensors.get(sensor_index))
+                        .and_then(|s| match &s.source {
+                            config::SensorSource::Layout { name } => {
+                                Some(layouts::resolve_name(name.as_deref()))
+                            }
+                            _ => None,
+                        });
+                    if let Some(name) = layout_name {
+                        let rows = panel
+                            .hypr
+                            .as_ref()
+                            .and_then(|h| h.clients.as_deref())
+                            .unwrap_or(&[]);
+                        let ws = panel
+                            .hypr
+                            .as_ref()
+                            .and_then(|h| h.active_workspace.as_deref());
+                        if let Err(e) = layouts::save(&mut panel.layout_state, &name, rows, ws) {
+                            eprintln!("[piuma] layout save ({name}) failed: {e}");
+                        }
+                        return Command::none();
                     }
                 }
             }
@@ -2780,6 +2857,8 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         corners: Vec::new(),
                         palette: None,
                         palette_key: None,
+                        hypr: None,
+                        layout_state: layouts::LayoutState::default(),
                     }
                 },
                 namespace,

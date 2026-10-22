@@ -17,7 +17,8 @@ Sensor `type` values follow a naming convention by category:
 - **`detail_`** – used/total ratio: `detail_mem`, `detail_swap`, `detail_disk`
 - **`temp_`** – temperature: `temp_cpu`
 - **no prefix** – not numeric: `net_state`, `uptime`, `clock`, `window`,
-  `workspace`, `command`, `env_var`, `static_text`, `tray`, `notifications`
+  `workspace`, `command`, `env_var`, `static_text`, `tray`, `notifications`,
+  `taskbar`, `layout`
 
 The old names (`ProcCpu`, `NvidiaGpu`, `ProcMem`, `ProcDisk`, `Audio`,
 `Network`, `Uptime`, `Clock`, `Window`, `Workspace`, `Command`, `EnvVar`,
@@ -395,6 +396,39 @@ server emits the spec signals with the right reasons: 1 (expired),
   `default` are not rendered (the spec's `activationToken` is ignored);
   icons come from `image-data`, `image-path` or the `app_icon` path
   (a themed icon *name* yields no icon).
+
+### Window layouts
+
+A `layout` sensor saves and re-applies the arrangement of the windows
+in the current workspace. A **click saves**: the visible windows of the
+workspace you are on are written to
+`~/.config/piuma/layouts/<name>.json` under the sensor's `name`
+(absent = `default`; only letters, digits, `-` and `_` are accepted).
+The bar **re-applies the saved layout automatically** as soon as every
+saved window — matched by class *and* window title — is open again with
+the exact saved count. Opening and closing windows is the trigger: the
+layout fires once per window set, moving windows by hand in between is
+never fought, and unrelated windows (another workspace's session, an
+unrelated app) never block it.
+
+```json
+{ "name": "Layout", "source": { "type": "layout", "name": "work" } }
+```
+
+- **State on the bar**: `work ⋯` armed and waiting, `work ✓` applied,
+  `work ✗` no saved file, `work ✓ saved` right after the click.
+- **What is restored**: the workspace of each window, and — for
+  floating windows — the exact pixel position and size. Tiled windows
+  only return to their workspace: the tiler keeps owning their
+  geometry. Fullscreen windows get no geometry either.
+- **Matching**: by class *and* window title, with the exact saved
+  count — no saved window missing, no extra twin open; windows the
+  layout doesn't mention never block it. Titles that change between
+  sessions (a browser tab, an editor path) break the match — save the
+  layout again from the new titles, or keep the window titles stable.
+- **Limitations (v1)**: one layout set per sensor; layout files edited
+  or deleted by hand are picked up on the next bar restart; monitor
+  placement is derived from the saved pixel position only.
 
 ### Portability
 

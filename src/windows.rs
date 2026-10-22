@@ -64,6 +64,21 @@ pub struct WinRow {
     /// `focusHistoryID == 0`: the window Hyprland reports as focused
     /// right now — highlighted in the row.
     pub focused: bool,
+    /// Global pixel position and size (`at`, `size` in `clients -j`):
+    /// the layout engine's geometry (roadmap layout-automatici).
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    /// Tiled vs floating — a saved layout only fights the tiler for
+    /// floating windows.
+    pub floating: bool,
+    /// `fullscreen` in `clients -j` (0 = none): a fullscreen window
+    /// gets no geometry (Hyprland ignores move/resize on it).
+    pub fullscreen: bool,
+    /// `visible` in `clients -j`: false = on an inactive workspace or
+    /// hidden (the layout save keeps only visible windows).
+    pub visible: bool,
 }
 
 /// One taskbar slot: the address the clicks dispatch against, the
@@ -149,9 +164,36 @@ pub(crate) fn parse_clients(json: &str) -> Vec<WinRow> {
                 // `focusHistoryID` counts back from the focused window:
                 // 0 is the active one (absent → not focused).
                 focused: c.get("focusHistoryID").and_then(|v| v.as_i64()) == Some(0),
+                // Geometry (`at`/`size` are [x, y] / [w, h] pairs),
+                // zeroed when absent — a layout never trusts a hole.
+                x: at(c, 0),
+                y: at(c, 1),
+                w: at_size(c, 0),
+                h: at_size(c, 1),
+                floating: c.get("floating").and_then(|v| v.as_bool()).unwrap_or(false),
+                fullscreen: c.get("fullscreen").and_then(|v| v.as_i64()).unwrap_or(0) > 0,
+                visible: c.get("visible").and_then(|v| v.as_bool()).unwrap_or(true),
             })
         })
         .collect()
+}
+
+/// `at[i]`: the window's i-th global coordinate, 0 when missing.
+fn at(c: &serde_json::Value, i: usize) -> i32 {
+    c.get("at")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.get(i))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0) as i32
+}
+
+/// `size[i]`: the window's i-th size in px, 0 when missing.
+fn at_size(c: &serde_json::Value, i: usize) -> i32 {
+    c.get("size")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.get(i))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0) as i32
 }
 
 /// Workspace order (numeric names first, in numeric order — "2" before
@@ -218,6 +260,34 @@ pub fn move_call(address: &str, workspace: &str) -> String {
     )
 }
 
+/// The argument that toggles a window between tiled and floating (the
+/// wiki's `action` defaults to toggle) — the layout engine's own, not
+/// a taskbar click.
+pub fn toggle_float_call(address: &str) -> String {
+    format!(
+        "hl.dsp.window.float({{ window = \"address:{}\" }})",
+        sanitize_address(address)
+    )
+}
+
+/// The argument that moves a window to an absolute pixel position
+/// (`window.move` picks `movewindowpixel` from its `x`/`y` args).
+pub fn move_px_call(address: &str, x: i32, y: i32) -> String {
+    format!(
+        "hl.dsp.window.move({{ window = \"address:{}\", x = {x}, y = {y} }})",
+        sanitize_address(address)
+    )
+}
+
+/// The argument that sets a window's size in px (`window.resize`
+/// takes the target width/height as `x`/`y`).
+pub fn resize_call(address: &str, w: i32, h: i32) -> String {
+    format!(
+        "hl.dsp.window.resize({{ window = \"address:{}\", x = {w}, y = {h} }})",
+        sanitize_address(address)
+    )
+}
+
 pub fn focus(address: &str) {
     run(focus_call(address));
 }
@@ -236,6 +306,16 @@ fn run(call: String) {
     let _ = std::process::Command::new("hyprctl")
         .args(["dispatch", &call])
         .spawn();
+}
+
+/// Like the clicks' fire-and-forget dispatch, but waits for the
+/// compositor to acknowledge it: the layout engine stacks dispatches
+/// on one window (float it, size it, place it) and a race would land
+/// them out of order.
+pub fn dispatch_waited(call: &str) {
+    let _ = std::process::Command::new("hyprctl")
+        .args(["dispatch", call])
+        .status();
 }
 
 /// An address as the dispatches take it: `0x` plus hex digits only —
@@ -413,9 +493,11 @@ mod tests {
 
     const CLIENTS: &str = r#"[
         {"address": "0xAB12", "class": "kitty", "title": "shell", "mapped": true,
-         "focusHistoryID": 0, "workspace": {"id": 1, "name": "1"}},
+         "focusHistoryID": 0, "workspace": {"id": 1, "name": "1"},
+         "at": [100, 50], "size": [640, 1024], "floating": true, "visible": true},
         {"address": "0xCD34", "class": "vivaldi-stable", "title": "Browser", "mapped": true,
-         "focusHistoryID": 1, "workspace": {"id": 10, "name": "10"}},
+         "focusHistoryID": 1, "workspace": {"id": 10, "name": "10"},
+         "at": [0, 0], "size": [960, 1080], "fullscreen": 1},
         {"address": "0xEF56", "class": "ghost", "title": "mid-air", "mapped": false,
          "workspace": {"id": 1, "name": "1"}}
     ]"#;
@@ -427,6 +509,20 @@ mod tests {
         assert_eq!(rows[0].address, "0xAB12");
         assert_eq!(rows[0].class, "kitty");
         assert_eq!(rows[1].workspace, "10");
+    }
+
+    /// The geometry comes straight from `at`/`size`; a window without
+    /// them parses with a zeroed rect and the default flags.
+    #[test]
+    fn parse_clients_reads_geometry_and_flags() {
+        let rows = parse_clients(CLIENTS);
+        assert_eq!((rows[0].x, rows[0].y), (100, 50));
+        assert_eq!((rows[0].w, rows[0].h), (640, 1024));
+        assert!(rows[0].floating);
+        assert!(rows[0].visible);
+        assert_eq!((rows[1].w, rows[1].h), (960, 1080));
+        assert!(!rows[1].floating, "absent `floating` means tiled");
+        assert!(rows[1].visible, "absent `visible` means shown");
     }
 
     #[test]
@@ -458,6 +554,13 @@ mod tests {
             title: "apple".into(),
             workspace: "2".into(),
             focused: false,
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+            floating: false,
+            fullscreen: false,
+            visible: true,
         });
         sort_rows(&mut rows);
         let order: Vec<&str> = rows.iter().map(|r| r.title.as_str()).collect();
@@ -478,6 +581,18 @@ mod tests {
         assert_eq!(
             move_call("0xAB12", "3"),
             "hl.dsp.window.move({ workspace = \"3\", window = \"address:0xAB12\", silent = true })"
+        );
+        assert_eq!(
+            toggle_float_call("0xAB12"),
+            "hl.dsp.window.float({ window = \"address:0xAB12\" })"
+        );
+        assert_eq!(
+            move_px_call("0xAB12", 10, 20),
+            "hl.dsp.window.move({ window = \"address:0xAB12\", x = 10, y = 20 })"
+        );
+        assert_eq!(
+            resize_call("0xAB12", 800, 600),
+            "hl.dsp.window.resize({ window = \"address:0xAB12\", x = 800, y = 600 })"
         );
     }
 

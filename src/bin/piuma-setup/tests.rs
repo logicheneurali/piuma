@@ -225,6 +225,30 @@ fn tray_sensor_roundtrips_and_validates() {
         .expect("piuma must accept the saved config (pre-save validation)");
 }
 
+/// A `layout` sensor's name must survive load→save — the field that
+/// names the saved layout file is the whole point of the source.
+#[test]
+fn layout_sensor_name_roundtrips() {
+    let json = r##"{
+  "panel": {
+"sections": [
+  {
+    "name": "win",
+    "sensors": [ { "name": "Layout", "source": { "type": "layout", "name": "work" } } ]
+  }
+]
+  }
+}"##;
+    let mut state = fixture();
+    state.load_from_json(json).expect("layout config must load");
+    let saved = state.serialize().expect("serialize must succeed");
+    let out: JsonValue = serde_json::from_str(&saved).expect("saved JSON must parse");
+    assert_eq!(out["panel"]["sections"][0]["sensors"][0]["source"]["type"], "layout");
+    assert_eq!(out["panel"]["sections"][0]["sensors"][0]["source"]["name"], "work");
+    serde_json::from_str::<config::Config>(&saved)
+        .expect("piuma must accept the saved config (pre-save validation)");
+}
+
 /// `panel.notifications` and a notifications sensor must survive
 /// load→save untouched (values and presence included).
 #[test]

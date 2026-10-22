@@ -228,6 +228,9 @@ pub struct SourceConfig {
     pub interface: Option<String>,
     pub device: Option<String>,
     pub format: Option<String>,
+    /// The `layout` sensor's layout file name (piuma defaults it to
+    /// "default" when absent).
+    pub name: Option<String>,
 }
 
 impl Default for PiumaConfig {
@@ -311,6 +314,7 @@ impl Default for SourceConfig {
             interface: None,
             device: None,
             format: None,
+            name: None,
         }
     }
 }
@@ -535,6 +539,11 @@ impl PiumaSetup {
             "static_text" => {
                 if let Some(st) = &sensor.source_config.static_text {
                     map.insert("static_text".to_string(), JsonValue::String(st.clone()));
+                }
+            }
+            "layout" => {
+                if let Some(name) = &sensor.source_config.name {
+                    map.insert("name".to_string(), JsonValue::String(name.clone()));
                 }
             }
             _ => {}
@@ -971,6 +980,9 @@ impl PiumaSetup {
             if let Some(st) = source.get("static_text").and_then(|v| v.as_str()) {
                 sensor.source_config.static_text = Some(st.to_string());
             }
+            if let Some(n) = source.get("name").and_then(|v| v.as_str()) {
+                sensor.source_config.name = Some(n.to_string());
+            }
         }
 
         for (key, field) in [
@@ -1103,7 +1115,7 @@ pub(crate) const SOURCE_TYPES: &[&str] = &[
     // no numeric category
     "net_state", "uptime", "clock", "calendar", "window", "workspace",
     "command", "env_var", "static_text", "tray", "notifications",
-    "taskbar",
+    "taskbar", "layout",
 ];
 
 /// The sensor-type combo's options (roadmap2 #6): every canonical type
@@ -1153,9 +1165,33 @@ pub(crate) fn source_label(canonical: &str) -> &'static str {
         "tray" => "System tray",
         "notifications" => "Desktop notifications",
         "taskbar" => "Window taskbar",
+        "layout" => "Window layout",
         "command" => "Shell command",
         "env_var" => "Environment variable",
         "static_text" => "Static text",
         _ => "Sensor",
     }
+}
+
+/// The layout names already saved by the bar (`~/.config/piuma/
+/// layouts/*.json`, sorted): the `layout` sensor's picklist options.
+/// Only well-named files count — an interrupted save's temp file and a
+/// hand-dropped oddity never become selectable layouts.
+pub(crate) fn saved_layout_names() -> Vec<String> {
+    let Some(dir) = dirs::config_dir().map(|d| d.join("piuma").join("layouts")) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter_map(|f| {
+                    let fname = f.file_name().to_string_lossy().to_string();
+                    let name = fname.strip_suffix(".json")?;
+                    config::is_valid_layout_name(name).then(|| name.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
 }

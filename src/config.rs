@@ -422,6 +422,13 @@ pub enum SensorSource {
     /// (windows.rs reads `hyprctl clients -j` per sensor tick).
     #[serde(rename = "taskbar")]
     Taskbar {},
+    /// Window layout (roadmap layout-automatici): the click saves the
+    /// current workspace's window arrangement under `name`, and the bar
+    /// re-applies it whenever every saved window (class + title) is
+    /// open again with the exact saved count (layouts.rs holds the
+    /// engine and the file).
+    #[serde(rename = "layout")]
+    Layout { name: Option<String> },
 }
 
 // ── defaults ────────────────────────────────────────────────────────
@@ -529,6 +536,17 @@ fn err_one_of(errors: &mut Vec<ConfigError>, path: &str, value: Option<&str>, al
 
 /// Signed style numbers keep the `-1 = disabled` sentinel valid (see
 /// `style_num`), so the ranges start at -1 where a sentinel exists.
+/// A layout file name is a bare identifier — letters, digits, `-` and
+/// `_` — so it can never walk out of `~/.config/piuma/layouts` and a
+/// name in the config always names one file. Shared with the setup bin
+/// (config.rs is compiled into both).
+pub fn is_valid_layout_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 fn err_range(errors: &mut Vec<ConfigError>, path: &str, value: Option<i32>, min: i32, max: i32) {
     if let Some(v) = value {
         if !(min..=max).contains(&v) {
@@ -723,6 +741,16 @@ pub fn validate_config(cfg: &Config) -> Vec<ConfigError> {
             if let Some(rules) = &sensor.color_rules {
                 for (k, rule) in rules.iter().enumerate() {
                     err_color(&mut errors, &format!("{spath}.color_rules[{k}].color"), Some(&rule.color));
+                }
+            }
+            if let SensorSource::Layout { name: Some(name) } = &sensor.source {
+                if !is_valid_layout_name(name) {
+                    errors.push(ConfigError {
+                        path: format!("{spath}.source.name"),
+                        message: format!(
+                            "{name:?}: only letters, digits, '-' and '_' (a layout file name)"
+                        ),
+                    });
                 }
             }
         }
@@ -1107,6 +1135,49 @@ mod tests {
         ));
         let out = serde_json::to_string(&cfg).expect("config must serialize");
         assert!(out.contains(r#""taskbar""#), "got: {out}");
+    }
+
+    /// The layout sensor type parses with and without its name (absent
+    /// = the "default" layout) and survives a save roundtrip.
+    #[test]
+    fn layout_sensor_parses_and_roundtrips() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[{"sensors":[
+                {"name":"L","source":{"type":"layout","name":"work"}},
+                {"name":"D","source":{"type":"layout"}}
+            ]}]}}"#,
+        )
+        .expect("sensor must parse");
+        let sensors = &cfg.panel.sections[0].sensors;
+        assert!(matches!(
+            &sensors[0].source,
+            SensorSource::Layout { name: Some(name) } if name == "work"
+        ));
+        assert!(matches!(&sensors[1].source, SensorSource::Layout { name: None }));
+        let out = serde_json::to_string(&cfg).expect("config must serialize");
+        assert!(out.contains(r#""type":"layout","name":"work""#), "got: {out}");
+    }
+
+    /// A layout name is a bare file name: the traversal shapes a name
+    /// could carry are named errors, not silently loaded files.
+    #[test]
+    fn layout_names_are_validated_at_the_config_boundary() {
+        let ok = is_valid_layout_name("work_v2-1");
+        assert!(ok, "bare identifiers pass");
+        assert!(!is_valid_layout_name(""));
+        assert!(!is_valid_layout_name("../escape"));
+        assert!(!is_valid_layout_name("a b"));
+        let cfg: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[{"sensors":[
+                {"name":"L","source":{"type":"layout","name":"../escape"}}
+            ]}]}}"#,
+        )
+        .expect("sensor must parse");
+        let errors = validate_config(&cfg);
+        assert!(
+            errors.iter().any(|e| e.path.contains("source.name")),
+            "the bad name must be reported: {errors:?}"
+        );
     }
 
     // ── parse_color strictness ─────────────────────────────────────
