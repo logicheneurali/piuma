@@ -18,7 +18,6 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use crate::hypr;
 use crate::windows::{self, WinRow};
 
 /// How long the sensor keeps showing "✓ saved" after a click.
@@ -45,10 +44,6 @@ pub enum Action {
     Move { address: String, workspace: String },
     ToggleFloat { address: String },
     Geometry { address: String, x: i32, y: i32, w: i32, h: i32 },
-    /// The relative size change a tiled window accepts (the same
-    /// split change the manual drag does): `dw`/`dh` are the target
-    /// minus the current size.
-    TiledResize { address: String, dw: i32, dh: i32 },
 }
 
 /// `piuma-layouts.json`: automatic layout name → its windows. A
@@ -152,7 +147,7 @@ pub fn tick(state: &mut LayoutState, rows: &[WinRow]) -> String {
         match state.file.as_ref().and_then(|f| best_match(f, rows)) {
             Some((_, entries)) => {
                 state.matched = true;
-                apply(entries);
+                run(&plan(rows, entries));
             }
             None => state.matched = false,
         }
@@ -223,10 +218,11 @@ fn entries_for(rows: &[WinRow], active_workspace: &str) -> Vec<LayoutEntry> {
 }
 
 /// Exact count on the layout's own (class, title) keys: every saved
-/// window must be open, and no extra twin of it — while windows the
-/// layout doesn't mention (another workspace's session, an unrelated
-/// app) never veto the trigger. An empty layout never matches (there
-/// is nothing to restore).
+/// window must be open, and no extra twin of it — and no unrelated
+/// window on the layout's own workspaces either: the layout describes
+/// that workspace's window set exclusively, so an extra window there
+/// keeps it unapplied. Windows on other workspaces never veto. An
+/// empty layout never matches (there is nothing to restore).
 pub fn matches(rows: &[WinRow], entries: &[LayoutEntry]) -> bool {
     if entries.is_empty() {
         return false;
@@ -239,19 +235,26 @@ pub fn matches(rows: &[WinRow], entries: &[LayoutEntry]) -> bool {
     for e in entries {
         *saved.entry((&e.class, &e.title)).or_insert(0) += 1;
     }
-    saved.iter().all(|(key, n)| cur.get(key) == Some(n))
+    if !saved.iter().all(|(key, n)| cur.get(key) == Some(n)) {
+        return false;
+    }
+    let layout_ws: HashSet<&str> = entries.iter().map(|e| e.workspace.as_str()).collect();
+    rows.iter()
+        .filter(|r| layout_ws.contains(r.workspace.as_str()))
+        .all(|r| saved.contains_key(&(&r.class, &r.title)))
 }
 
 /// What to dispatch to re-apply `entries` to `rows`, in order. Pure —
-/// the tests build rows by hand. The saved geometry is the target: a
-/// floating window that lost it is floated back to the saved pixels;
-/// a tiled one is resized inside the tiler (a relative resize, the
-/// same the manual drag does) and is never floated. A window already
-/// at the target is not touched at all; a fullscreen window gets no
-/// geometry (move/resize are ignored on it). `invert` flips the sign
-/// of the tiled resizes (the apply loop's retry when the first sign
-/// pushed the split the wrong way).
-pub fn plan(rows: &[WinRow], entries: &[LayoutEntry], invert: bool) -> Vec<Action> {
+/// the tests build rows by hand. A floating window that lost its
+/// geometry is floated back to the saved pixels; a tiled one only
+/// goes back to its workspace (and back into the tiler when it was
+/// floated): the split a tiler draws cannot be restored from pixel
+/// geometry alone — a relative resize undoes the sibling's and can
+/// strangle a tile — while a plain kill + reopen re-splits to the
+/// same geometry by itself. A window already at the target is not
+/// touched at all; a fullscreen window gets no geometry (move/resize
+/// are ignored on it).
+pub fn plan(rows: &[WinRow], entries: &[LayoutEntry]) -> Vec<Action> {
     let mut taken = vec![false; rows.len()];
     let mut actions = Vec::new();
     // Positional pairing: same (class, title) twins are matched by
@@ -298,27 +301,15 @@ pub fn plan(rows: &[WinRow], entries: &[LayoutEntry], invert: bool) -> Vec<Actio
             });
         } else if r.floating {
             // Saved as tiled, floating now: back into the tiler; the
-            // apply loop resizes the new split on the next pass.
+            // split after the toggle is the tiler's own.
             actions.push(Action::ToggleFloat {
                 address: r.address.clone(),
             });
-        } else {
-            // Saved as tiled and tiled now: the relative resize is the
-            // only size a tiler accepts (absolute pixels are ignored
-            // on tiled windows) — the window keeps its state.
-            let (dw, dh) = if invert {
-                (r.w - e.w, r.h - e.h)
-            } else {
-                (e.w - r.w, e.h - r.h)
-            };
-            if dw != 0 || dh != 0 {
-                actions.push(Action::TiledResize {
-                    address: r.address.clone(),
-                    dw,
-                    dh,
-                });
-            }
         }
+        // Saved as tiled and tiled now: no dispatch — a relative
+        // resize moves the sibling's edge too and, without the tree's
+        // shape, can only strangle a tile instead of hitting the
+        // saved split (measured: 456 px → 31 px).
     }
     actions
 }
@@ -341,78 +332,8 @@ pub fn run(actions: &[Action]) {
                 windows::dispatch_waited(&windows::resize_call(address, *w, *h));
                 windows::dispatch_waited(&windows::move_px_call(address, *x, *y));
             }
-            Action::TiledResize { address, dw, dh } => {
-                windows::dispatch_waited(&windows::resize_rel_call(address, *dw, *dh));
-            }
         }
     }
-}
-
-/// Apply a matched layout: the floating windows get one dispatch pass
-/// (exact pixels), the tiled ones a re-measure loop — a relative
-/// resize moves the neighbouring tile too, so the check repeats while
-/// the leftover (`|dw| + |dh|`) shrinks. A pass that makes it worse
-/// is retried once with the sign flipped (the resize pushes the split
-/// edge towards the tile's sibling, so the sign depends on the tree);
-/// if that fails too, it stops — the tiler's own partition stays and
-/// a window is never floated to force its geometry.
-/// shortcut: a partition needing both signs at the same time can't
-/// converge and is left as the tiler left it (the common
-/// kill + reopen case re-splits to the same geometry by itself and
-/// costs one empty pass). The passes block the bar a few hundred ms
-/// each (waited dispatches + a 200 ms settle).
-fn apply(entries: &[LayoutEntry]) {
-    let Some(mut rows) = hypr::fresh_clients() else {
-        return;
-    };
-    let mut prev = usize::MAX;
-    let mut inverted = false;
-    for _ in 0..6 {
-        let actions = plan(&rows, entries, inverted);
-        let leftover: usize = actions
-            .iter()
-            .map(|a| match a {
-                Action::TiledResize { dw, dh, .. } => (dw.abs() + dh.abs()) as usize,
-                _ => 0,
-            })
-            .sum();
-        if leftover > 0 && leftover >= prev {
-            if inverted {
-                return;
-            }
-            inverted = true;
-        }
-        prev = leftover;
-        // One tiled resize per pass: a resize moves the split edge
-        // shared with the sibling tile, so two resizes at once undo
-        // each other (the typical case: the split between two stacked
-        // tiles) — the next pass re-measures and takes the next one.
-        let actions = first_resize_only(actions);
-        if actions.is_empty() {
-            return;
-        }
-        run(&actions);
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        let Some(fresh) = hypr::fresh_clients() else {
-            return;
-        };
-        rows = fresh;
-    }
-}
-
-/// The actions one pass fires: every non-resize action, but only the
-/// first tiled resize (see the loop above; extracted for a test).
-fn first_resize_only(mut actions: Vec<Action>) -> Vec<Action> {
-    let mut resized = false;
-    actions.retain(|a| match a {
-        Action::TiledResize { .. } => {
-            let keep = !resized;
-            resized = true;
-            keep
-        }
-        _ => true,
-    });
-    actions
 }
 
 /// The saved layouts, or `None` when the file is missing or broken (a
@@ -485,8 +406,10 @@ mod tests {
     }
 
     /// The trigger: every saved window (by class + title) open with the
-    /// exact saved count, no twin extra — windows outside the layout
-    /// are ignored.
+    /// exact saved count, no twin extra — and no unrelated window on
+    /// the layout's own workspace either (the layout describes that
+    /// workspace exclusively), while windows on other workspaces are
+    /// ignored.
     #[test]
     fn matches_requires_exact_counts_on_layout_keys() {
         let entries = vec![entry("kitty", "shell", "1", false), entry("firefox", "Home", "1", false)];
@@ -495,12 +418,21 @@ mod tests {
             row("0xB", "firefox", "Home", "3", false),
         ];
         assert!(matches(&same, &entries), "workspace and order are free");
-        let unrelated = vec![
+        let other_ws = vec![
+            same[0].clone(),
+            same[1].clone(),
+            row("0xC", "mail", "Inbox", "5", false),
+        ];
+        assert!(matches(&other_ws, &entries), "another workspace's window never vetoes");
+        let extra_here = vec![
             same[0].clone(),
             same[1].clone(),
             row("0xC", "mail", "Inbox", "1", false),
         ];
-        assert!(matches(&unrelated, &entries), "unrelated windows never veto");
+        assert!(
+            !matches(&extra_here, &entries),
+            "an extra window on the layout's own workspace vetoes"
+        );
         let twin = vec![
             same[0].clone(),
             row("0xD", "kitty", "shell", "1", false),
@@ -559,9 +491,9 @@ mod tests {
         assert!(best_match(&file, &other).is_none());
     }
 
-    /// The move to the saved workspace comes first, then the size: a
-    /// tiled window is resized inside the tiler (relative resize, no
-    /// floating), a floating one gets the exact pixels.
+    /// The move to the saved workspace comes first; a tiled window
+    /// then gets no size dispatch (the tiler keeps its split), while
+    /// a floating one gets the exact pixels.
     #[test]
     fn plan_moves_and_restores_geometry() {
         let entries = vec![
@@ -574,43 +506,44 @@ mod tests {
             row("0xB", "mpv", "video", "1", true),
             row("0xC", "slack", "Slack", "1", false),
         ];
-        let actions = plan(&rows, &entries, false);
+        let actions = plan(&rows, &entries);
+        assert_eq!(actions.len(), 4, "move, then geometry/toggle per floating entry");
         assert!(matches!(
             actions[0],
             Action::Move { ref address, ref workspace } if address == "0xA" && workspace == "1"
         ));
-        assert!(matches!(actions[1], Action::TiledResize { ref address, dw: 300, dh: 400 } if address == "0xA"));
-        assert!(matches!(actions[2], Action::Geometry { ref address, .. } if address == "0xB"));
-        assert!(matches!(actions[3], Action::ToggleFloat { ref address, .. } if address == "0xC"));
-        assert!(matches!(actions[4], Action::Geometry { ref address, .. } if address == "0xC"));
+        assert!(matches!(actions[1], Action::Geometry { ref address, .. } if address == "0xB"));
+        assert!(matches!(actions[2], Action::ToggleFloat { ref address, .. } if address == "0xC"));
+        assert!(matches!(actions[3], Action::Geometry { ref address, .. } if address == "0xC"));
     }
 
     /// A window saved as tiled is never floated back: a floating one
-    /// goes back into the tiler (the resize follows on the next pass
-    /// of the apply loop), while a floating entry still gets its
-    /// exact pixels.
+    /// goes back into the tiler (its split is then the tiler's own),
+    /// while a floating entry still gets its exact pixels.
     #[test]
     fn plan_keeps_tiled_windows_tiled() {
         let tiled_entry = vec![entry("kitty", "shell", "1", false)];
         let floating_now = vec![row("0xA", "kitty", "shell", "1", true)];
         assert!(
-            matches!(plan(&floating_now, &tiled_entry, false)[..], [Action::ToggleFloat { .. }]),
+            matches!(plan(&floating_now, &tiled_entry)[..], [Action::ToggleFloat { .. }]),
             "back into the tiler: no pixel geometry on a tiled entry"
         );
 
         let floating = vec![entry("mpv", "video", "1", true)];
         let tiled_now = vec![row("0xB", "mpv", "video", "1", false)];
         assert!(matches!(
-            plan(&tiled_now, &floating, false)[..],
+            plan(&tiled_now, &floating)[..],
             [Action::ToggleFloat { .. }, Action::Geometry { .. }]
         ));
     }
 
-    /// A tiled window that lost its size is resized in place with the
-    /// relative resize the tiler accepts (target minus current), and
-    /// with the flipped sign on the apply loop's retry.
+    /// A tiled window that lost its size gets no dispatch at all: the
+    /// split a tiler draws cannot be hit from pixel geometry — a
+    /// relative resize moves the sibling's shared edge too and, in
+    /// the live test, strangled a tile to 31 px instead of reaching
+    /// the target — so the tiler's own partition stands.
     #[test]
-    fn plan_resizes_tiled_windows_in_place() {
+    fn plan_leaves_a_tiled_window_to_the_tiler() {
         let target = vec![LayoutEntry {
             w: 640,
             h: 480,
@@ -619,14 +552,7 @@ mod tests {
         let mut row_now = row("0xA", "kitty", "shell", "1", false);
         row_now.w = 960;
         row_now.h = 1080;
-        assert!(matches!(
-            plan(&[row_now.clone()], &target, false)[..],
-            [Action::TiledResize { ref address, dw: -320, dh: -600 }] if address == "0xA"
-        ));
-        assert!(matches!(
-            plan(&[row_now], &target, true)[..],
-            [Action::TiledResize { ref address, dw: 320, dh: 600 }] if address == "0xA"
-        ));
+        assert!(plan(&[row_now], &target).is_empty(), "no resize, no float, no move");
     }
 
     /// At the saved geometry nothing is dispatched — tiled or not, and
@@ -640,18 +566,18 @@ mod tests {
         at_target.w = 300;
         at_target.h = 400;
         assert!(
-            plan(&[at_target.clone()], &[entry("kitty", "shell", "1", false)], false).is_empty(),
+            plan(&[at_target.clone()], &[entry("kitty", "shell", "1", false)]).is_empty(),
             "tiled at the target: untouched"
         );
         let mut floating_at_target = at_target;
         floating_at_target.floating = true;
         assert!(
-            plan(&[floating_at_target.clone()], &[entry("kitty", "shell", "1", true)], false)
+            plan(&[floating_at_target.clone()], &[entry("kitty", "shell", "1", true)])
                 .is_empty(),
             "floating at the target: untouched"
         );
         assert!(
-            plan(&[floating_at_target], &[entry("kitty", "shell", "1", false)], false)
+            plan(&[floating_at_target], &[entry("kitty", "shell", "1", false)])
                 .is_empty(),
             "pixels already right: the flag is not worth a dispatch"
         );
@@ -664,30 +590,7 @@ mod tests {
         let mut full = row("0xB", "mpv", "video", "1", true);
         full.fullscreen = true;
         let entries = vec![entry("mpv", "video", "1", true)];
-        assert!(plan(&[full], &entries, false).is_empty());
-    }
-
-    /// Only the first tiled resize fires per pass: two resizes at
-    /// once on sibling tiles move the same shared split edge and
-    /// cancel each other (the bug that made the loop oscillate
-    /// without ever converging).
-    #[test]
-    fn plan_keeps_one_tiled_resize_per_pass() {
-        let rows = vec![
-            row("0xA", "kitty", "a", "1", false),
-            row("0xB", "kitty", "b", "1", false),
-        ];
-        let entries = vec![
-            LayoutEntry { w: 640, ..entry("kitty", "a", "1", false) },
-            LayoutEntry { w: 500, ..entry("kitty", "b", "1", false) },
-        ];
-        let full = plan(&rows, &entries, false);
-        assert_eq!(full.len(), 2, "both tiles need a resize");
-        let actions = first_resize_only(full);
-        assert!(
-            matches!(actions[..], [Action::TiledResize { ref address, .. }] if address == "0xA"),
-            "one resize per pass, the first positional match"
-        );
+        assert!(plan(&[full], &entries).is_empty());
     }
 
     /// Same-title twins pair by where they stand, not by the array
@@ -704,7 +607,7 @@ mod tests {
         let mut right = row("0xR", "kitty", "dup", "1", true);
         right.x = 500;
         // Array order reversed with respect to the saved positions.
-        let actions = plan(&[right, left], &entries, false);
+        let actions = plan(&[right, left], &entries);
         assert_eq!(actions.len(), 2, "one geometry per twin");
         assert!(matches!(actions[0], Action::Geometry { ref address, x: 100, .. } if address == "0xL"));
         assert!(matches!(actions[1], Action::Geometry { ref address, x: 500, .. } if address == "0xR"));
@@ -722,7 +625,7 @@ mod tests {
             row("0xA", "kitty", "a", "1", true),
             row("0xB", "kitty", "a", "1", true),
         ];
-        let actions = plan(&rows, &entries, false);
+        let actions = plan(&rows, &entries);
         assert_eq!(actions.len(), 2);
         assert!(matches!(actions[0], Action::Geometry { ref address, x: 1, .. } if address == "0xA"));
         assert!(matches!(actions[1], Action::Geometry { ref address, x: 2, .. } if address == "0xB"));

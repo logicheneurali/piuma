@@ -429,19 +429,23 @@ their window set.)
 
 - **State on the bar**: `⋯` armed and waiting, `✓` applied,
   `✓ saved` right after the click, no value while the file is absent.
-- **What is restored**: the workspace of each window and the exact
-  geometry. A floating window goes back to the saved pixel position
-  and size; a tiled one is resized *inside* the tiler with the same
-  relative resize the manual drag uses — never floated: the check
-  re-measures after each pass and retries while the split converges,
-  and gives up on the tiler's own partition rather than fight it.
-  A window already at the saved geometry is left untouched.
+- **What is restored**: the workspace of each window and, for a
+  floating one, the exact pixel position and size; a tiled one goes
+  back into the tiler (and there only — never floated), keeping the
+  split the tiler draws: a plain kill + reopen of one of its windows
+  re-splits to the saved geometry by itself, while a relative resize
+  would push a shared edge and strangle a tile instead. A window
+  already at the saved geometry is left untouched.
   Fullscreen windows get no geometry either.
 - **Matching**: by class *and* window title, with the exact saved
-  count — no saved window missing, no extra twin open; windows the
-  layout doesn't mention never block it. Titles that change between
-  sessions (a browser tab, an editor path) break the match — save the
-  layout again from the new titles, or keep the window titles stable.
+  count — no saved window missing, no extra twin open — and no
+  unrelated window on the layout's own workspace either: the layout
+  describes that workspace's window set exclusively, so an extra
+  window there keeps it unapplied.
+  Windows on other workspaces never block it. Titles that change
+  between sessions (a browser tab, an editor path) break the match —
+  save the layout again from the new titles, or keep the window
+  titles stable.
 - **Managing layouts**: piuma-setup's **Layouts** tab lists them
   (their windows as `class: title`) and deletes a single one — or all
   of them, which removes the file and turns the system off — both
