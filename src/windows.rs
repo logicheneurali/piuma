@@ -70,8 +70,9 @@ pub struct WinRow {
     pub y: i32,
     pub w: i32,
     pub h: i32,
-    /// Tiled vs floating — a saved layout only fights the tiler for
-    /// floating windows.
+    /// Tiled vs floating — a saved layout floats a window only to
+    /// impose its saved geometry; an already-matching window is kept
+    /// as it is.
     pub floating: bool,
     /// `fullscreen` in `clients -j` (0 = none): a fullscreen window
     /// gets no geometry (Hyprland ignores move/resize on it).

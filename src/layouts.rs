@@ -238,18 +238,26 @@ pub fn matches(rows: &[WinRow], entries: &[LayoutEntry]) -> bool {
 }
 
 /// What to dispatch to re-apply `entries` to `rows`, in order. Pure —
-/// the tests build rows by hand. Tiled windows only go back to their
-/// workspace (the tiler owns their geometry); a fullscreen window gets
-/// no geometry either (Hyprland ignores move/resize while fullscreen).
+/// the tests build rows by hand. The saved geometry is the target: a
+/// window that lost it (the tiler re-split it, a manual move) is
+/// floated back to the saved pixels — Hyprland ignores pixel resizes
+/// on tiled windows, so floating is the only way to impose them — and
+/// a window already at the target is not touched at all. A fullscreen
+/// window gets no geometry (move/resize are ignored on it).
 pub fn plan(rows: &[WinRow], entries: &[LayoutEntry]) -> Vec<Action> {
     let mut taken = vec![false; rows.len()];
     let mut actions = Vec::new();
-    for e in entries {
-        // Same class + title, first not-yet-taken window: the order
-        // pairs duplicates deterministically.
+    // Positional pairing: same (class, title) twins are matched by
+    // where they sit, not by array order (`clients -j` lists creation
+    // order, which can differ between the save and the re-apply).
+    let mut rows_order: Vec<usize> = (0..rows.len()).collect();
+    rows_order.sort_by_key(|&i| (rows[i].x, rows[i].y));
+    let mut wanted: Vec<&LayoutEntry> = entries.iter().collect();
+    wanted.sort_by_key(|e| (e.x, e.y));
+    for e in wanted {
         let mut found = None;
-        for (i, r) in rows.iter().enumerate() {
-            if !taken[i] && r.class == e.class && r.title == e.title {
+        for &i in &rows_order {
+            if !taken[i] && rows[i].class == e.class && rows[i].title == e.title {
                 found = Some(i);
                 break;
             }
@@ -263,12 +271,13 @@ pub fn plan(rows: &[WinRow], entries: &[LayoutEntry]) -> Vec<Action> {
                 workspace: e.workspace.clone(),
             });
         }
-        if r.floating != e.floating {
-            actions.push(Action::ToggleFloat {
-                address: r.address.clone(),
-            });
-        }
-        if e.floating && !r.fullscreen {
+        let geom_ok = r.x == e.x && r.y == e.y && r.w == e.w && r.h == e.h;
+        if !geom_ok && !r.fullscreen {
+            if !r.floating {
+                actions.push(Action::ToggleFloat {
+                    address: r.address.clone(),
+                });
+            }
             actions.push(Action::Geometry {
                 address: r.address.clone(),
                 x: e.x,
@@ -447,10 +456,12 @@ mod tests {
         assert!(best_match(&file, &other).is_none());
     }
 
-    /// Tiled windows only return to their workspace; floating ones get
-    /// the pixel geometry; toggles come before the geometry they enable.
+    /// The move to the saved workspace comes first, then the geometry:
+    /// a window that lost it floats back to the saved pixels (toggle
+    /// only when it is still tiled), one already floating gets just
+    /// the geometry.
     #[test]
-    fn plan_moves_tiled_and_places_floating() {
+    fn plan_moves_and_restores_geometry() {
         let entries = vec![
             entry("kitty", "shell", "1", false), // tiled, wrong workspace
             entry("mpv", "video", "1", true),    // floating, wrong geometry
@@ -466,22 +477,25 @@ mod tests {
             actions[0],
             Action::Move { ref address, ref workspace } if address == "0xA" && workspace == "1"
         ));
-        assert!(matches!(actions[1], Action::Geometry { ref address, .. } if address == "0xB"));
-        assert!(matches!(actions[2], Action::ToggleFloat { ref address } if address == "0xC"));
-        assert!(matches!(actions[3], Action::Geometry { ref address, .. } if address == "0xC"));
+        assert!(matches!(actions[1], Action::ToggleFloat { ref address, .. } if address == "0xA"));
+        assert!(matches!(actions[2], Action::Geometry { ref address, .. } if address == "0xA"));
+        assert!(matches!(actions[3], Action::Geometry { ref address, .. } if address == "0xB"));
+        assert!(matches!(actions[4], Action::ToggleFloat { ref address, .. } if address == "0xC"));
+        assert!(matches!(actions[5], Action::Geometry { ref address, .. } if address == "0xC"));
     }
 
-    /// Both float directions are dispatched: floating→tiled gets the
-    /// toggle and no geometry (the tiler owns the size again).
+    /// The saved geometry is the target, not the floating flag: a
+    /// floating window at the wrong spot moves there without becoming
+    /// tiled, a tiled one floats to reach the pixels (Hyprland ignores
+    /// pixel resizes on tiled windows).
     #[test]
-    fn plan_toggles_float_state_both_ways() {
-        let tiled = vec![entry("kitty", "shell", "1", false)];
+    fn plan_reaches_the_geometry_whatever_the_flag() {
+        let tiled_entry = vec![entry("kitty", "shell", "1", false)];
         let floating_now = vec![row("0xA", "kitty", "shell", "1", true)];
-        assert!(matches!(
-            plan(&floating_now, &tiled)[0],
-            Action::ToggleFloat { .. }
-        ));
-        assert_eq!(plan(&floating_now, &tiled).len(), 1, "no geometry for a tiled entry");
+        assert!(
+            matches!(plan(&floating_now, &tiled_entry)[..], [Action::Geometry { .. }]),
+            "already floating: only the geometry, no toggle back to tiled"
+        );
 
         let floating = vec![entry("mpv", "video", "1", true)];
         let tiled_now = vec![row("0xB", "mpv", "video", "1", false)];
@@ -491,14 +505,60 @@ mod tests {
         ));
     }
 
-    /// A floating window turned tiled gets only the toggle — its size
-    /// back to the tiler — and a fullscreen one no geometry at all.
+    /// At the saved geometry nothing is dispatched — tiled or not, and
+    /// even when the floating flag differs: no pointless toggles, no
+    /// re-applying what is already there.
     #[test]
-    fn plan_never_fights_the_tiler_or_fullscreen() {
+    fn plan_touches_nothing_at_the_saved_geometry() {
+        let mut at_target = row("0xA", "kitty", "shell", "1", false);
+        at_target.x = 10;
+        at_target.y = 20;
+        at_target.w = 300;
+        at_target.h = 400;
+        assert!(
+            plan(&[at_target.clone()], &[entry("kitty", "shell", "1", false)]).is_empty(),
+            "tiled at the target: untouched"
+        );
+        let mut floating_at_target = at_target;
+        floating_at_target.floating = true;
+        assert!(
+            plan(&[floating_at_target.clone()], &[entry("kitty", "shell", "1", true)]).is_empty(),
+            "floating at the target: untouched"
+        );
+        assert!(
+            plan(&[floating_at_target], &[entry("kitty", "shell", "1", false)]).is_empty(),
+            "pixels already right: the flag is not worth a dispatch"
+        );
+    }
+
+    /// A fullscreen window gets no geometry at all — Hyprland would
+    /// ignore the move/resize.
+    #[test]
+    fn plan_never_fights_fullscreen() {
         let mut full = row("0xB", "mpv", "video", "1", true);
         full.fullscreen = true;
         let entries = vec![entry("mpv", "video", "1", true)];
         assert!(plan(&[full], &entries).is_empty());
+    }
+
+    /// Same-title twins pair by where they stand, not by the array
+    /// order: `clients -j` lists creation order, which can be reversed
+    /// with respect to the saved positions after a kill and reopen.
+    #[test]
+    fn plan_pairs_twins_by_position_not_array_order() {
+        let entries = vec![
+            LayoutEntry { x: 100, ..entry("kitty", "dup", "1", true) },
+            LayoutEntry { x: 500, ..entry("kitty", "dup", "1", true) },
+        ];
+        let mut left = row("0xL", "kitty", "dup", "1", true);
+        left.x = 100;
+        let mut right = row("0xR", "kitty", "dup", "1", true);
+        right.x = 500;
+        // Array order reversed with respect to the saved positions.
+        let actions = plan(&[right, left], &entries);
+        assert_eq!(actions.len(), 2, "one geometry per twin");
+        assert!(matches!(actions[0], Action::Geometry { ref address, x: 100, .. } if address == "0xL"));
+        assert!(matches!(actions[1], Action::Geometry { ref address, x: 500, .. } if address == "0xR"));
     }
 
     /// Two same-class windows pair with the entries in order, and each
