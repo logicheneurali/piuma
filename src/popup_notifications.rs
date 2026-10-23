@@ -11,8 +11,9 @@ use crate::{
 };
 use iced::font::Font;
 use iced::widget::image::Image;
-use iced::widget::{container, text, Column, MouseArea, Row};
-use iced::{Alignment, Color, Element, Length, Task as Command};
+use iced::widget::{container, scrollable, text, Column, MouseArea, Row};
+use iced::{Alignment, Background, Border, Color, Element, Length, Task as Command};
+use iced::widget::scrollable::{AutoScroll, Rail, Scroller};
 use iced_exwlshell::reexport::{
     Anchor, KeyboardInteractivity, Layer, Margin, NewLayerShellSettings,
 };
@@ -262,7 +263,48 @@ pub(crate) fn popup_view(panel: &Panel) -> Element<'_, Message> {
         if let Some(icon) = icon {
             content = content.push(icon);
         }
-        let content = content.push(lines.width(Length::Fill)).width(Length::Fill);
+        // The text area scrolls inside the card: an overlong body (or
+        // one with line breaks) reads through the wheel instead of
+        // being clipped, while the card — and the popup surface —
+        // keeps the style's height. The budget is what `popup_card_h`
+        // leaves between the two paddings (5 lines of font). The
+        // scrollbar follows the bar's own colours (not iced's default)
+        // and appears only once the content overflows (the vertical
+        // rail is disabled until it does).
+        let text_area = scrollable(lines.width(Length::Fill))
+            .width(Length::Fill)
+            .height(Length::Fixed((5 * st.font_size) as f32))
+            .style(move |_, _| scrollable::Style {
+                container: container::Style::default(),
+                vertical_rail: Rail {
+                    background: Some(Background::Color(st.bg)),
+                    border: Border::default(),
+                    scroller: Scroller {
+                        background: Background::Color(st.border),
+                        border: Border::default(),
+                    },
+                },
+                horizontal_rail: Rail {
+                    background: Some(Background::Color(st.bg)),
+                    border: Border::default(),
+                    scroller: Scroller {
+                        background: Background::Color(st.border),
+                        border: Border::default(),
+                    },
+                },
+                gap: None,
+                auto_scroll: AutoScroll {
+                    background: Background::Color(st.bg),
+                    border: Border::default(),
+                    shadow: iced::Shadow {
+                        color: Color::BLACK.scale_alpha(0.7),
+                        offset: iced::Vector::ZERO,
+                        blur_radius: 2.0,
+                    },
+                    icon: st.text,
+                },
+            });
+        let content = content.push(text_area).width(Length::Fill);
         let card_row: Row<'_, Message> = Row::new()
             .spacing(8)
             .align_y(Alignment::Center)
