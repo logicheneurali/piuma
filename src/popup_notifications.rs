@@ -283,9 +283,11 @@ pub(crate) fn popup_view(panel: &Panel) -> Element<'_, Message> {
             .align_y(Alignment::Center);
         let text_area = scrollable(lines.width(Length::Fill))
             .width(Length::Fill)
-            // Shorter than the card: the gap above/below is the rail's
-            // vertical padding — the rail only spans this inner height.
-            .height(Length::Fixed((4 * st.font_size) as f32))
+            // Ties this inner area to the card's 8 lines of font minus the
+            // two paddings (which the card's own border consumes). The rail
+            // spans only this height, so the leftover top/bottom is its
+            // padding — grows with the card, never a fixed 4 lines.
+            .height(Length::Fixed((8 * st.font_size) as f32))
             .style(move |_, _| scrollable::Style {
                 container: container::Style::default(),
                 vertical_rail: Rail {
