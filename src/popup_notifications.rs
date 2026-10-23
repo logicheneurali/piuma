@@ -273,7 +273,12 @@ pub(crate) fn popup_view(panel: &Panel) -> Element<'_, Message> {
         // colours (not iced's default) and appears only once the content
         // overflows (the vertical rail is disabled until it does).
         let lines = container(lines)
-            .padding(u16::try_from(st.padding).unwrap_or(0))
+            .padding(iced::Padding {
+                top: st.padding.min(u16::MAX as u32) as f32 / 2.0,
+                right: st.padding.min(u16::MAX as u32) as f32,
+                bottom: st.padding.min(u16::MAX as u32) as f32 / 2.0,
+                left: 0.0,
+            })
             .width(Length::Fill);
         let text_area = scrollable(lines.width(Length::Fill))
             .width(Length::Fill)
