@@ -42,6 +42,13 @@ pub fn snapshot() -> Snapshot {
     }
 }
 
+/// A fresh `hyprctl clients -j`: the measured layout resizes re-read
+/// right after every dispatch (the panel's own snapshot lags one tick
+/// behind).
+pub(crate) fn fresh_clients() -> Option<Vec<windows::WinRow>> {
+    fetch("clients").map(|json| windows::parse_clients(&json))
+}
+
 /// `hyprctl <cmd> -j` stdout, or `None` when the command fails (the
 /// sensor's own "no data" path).
 fn fetch(cmd: &str) -> Option<String> {

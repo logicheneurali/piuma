@@ -290,6 +290,16 @@ pub fn resize_call(address: &str, w: i32, h: i32) -> String {
     )
 }
 
+/// The argument for a relative resize: the split change a tiled
+/// window accepts (absolute pixel sizes are ignored on tiled windows;
+/// this is what the manual mainMod+RMB drag dispatches).
+pub fn resize_rel_call(address: &str, dx: i32, dy: i32) -> String {
+    format!(
+        "hl.dsp.window.resize({{ window = \"address:{}\", x = {dx}, y = {dy}, relative = true }})",
+        sanitize_address(address)
+    )
+}
+
 pub fn focus(address: &str) {
     run(focus_call(address));
 }

@@ -415,10 +415,11 @@ duplicating it, whatever the titles contain.
 The bar **re-applies a saved layout automatically**, but only when a
 window is **created or closed**: the activation check runs on that
 event (never on a timer), the most specific saved layout whose windows
-are all open — matched by class *and* window title with the exact
-saved count — fires once for that window set, and unrelated windows
-(another workspace's session, an unrelated app) never block it. Moving
-windows by hand in between is never fought.
+are all open — by exact class + title match first, or, when a title
+changed, by the same classes with the titles still closest — fires
+once for that window set, and unrelated windows (another workspace's
+session, an unrelated app) never block it. Moving windows by hand in
+between is never fought.
 
 ```json
 { "name": "Layout", "source": { "type": "layout" } }
@@ -431,21 +432,29 @@ their window set.)
   `✓ saved` right after the click, no value while the file is absent.
 - **What is restored**: the workspace of each window and, for a
   floating one, the exact pixel position and size; a tiled one goes
-  back into the tiler (and there only — never floated), keeping the
-  split the tiler draws: a plain kill + reopen of one of its windows
-  re-splits to the saved geometry by itself, while a relative resize
-  would push a shared edge and strangle a tile instead. A window
-  already at the saved geometry is left untouched.
-  Fullscreen windows get no geometry either.
+  back into the tiler (and there only — never floated) with its saved
+  **size**, applied *measured*: an 8 px probe teaches each edge which
+  way it really answers (a bottom window grows by asking up), the
+  exact ask follows from that sign, and anything that would push a
+  tile under 80 px — or fails to shrink the gap — reverts at once. An
+  edge the probe cannot move (a full-width tile's x is the monitor's
+  own border) or a tree that cannot hold the saved shape at all (a
+  kill + reopen re-inserts the window elsewhere) is left to the
+  tiler: no window is ever floated or strangled to force it. A window
+  already at the saved size is left untouched. Fullscreen windows get
+  no geometry either.
 - **Matching**: by class *and* window title, with the exact saved
   count — no saved window missing, no extra twin open — and no
   unrelated window on the layout's own workspace either: the layout
   describes that workspace's window set exclusively, so an extra
-  window there keeps it unapplied.
-  Windows on other workspaces never block it. Titles that change
-  between sessions (a browser tab, an editor path) break the match —
-  save the layout again from the new titles, or keep the window
-  titles stable.
+  window there keeps it unapplied. Windows on other workspaces never
+  block it. When **no** saved title fits anymore (a terminal followed
+  its directory, a browser its tab), a fallback picks the layout with
+  the very same window classes — the same count per class on its own
+  workspaces, so the extra-window veto holds by class too — whose
+  titles still **resemble** the open ones the most, and only when
+  that winner is clear: a tie applies nothing rather than guessing
+  between two same-class layouts.
 - **Managing layouts**: piuma-setup's **Layouts** tab lists them
   (their windows as `class: title`) and deletes a single one — or all
   of them, which removes the file and turns the system off — both

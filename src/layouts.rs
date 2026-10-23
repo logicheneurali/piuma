@@ -8,9 +8,13 @@
 //! duplicating, and any character a title carries is serializer-
 //! escaped. The activation check runs only when a window is created
 //! or closed (the address set differs from the last check): then the
-//! bar applies, once per window set, the most specific saved layout
-//! whose windows are all open with the exact saved count — manual
-//! moves are never fought, unrelated windows never veto.
+//! bar applies, once per window set, the saved layout whose windows
+//! are all open — exactly by (class, title) first, or, when a title
+//! changed, by the same window classes with the titles still closest
+//! (a clear winner only). A layout owns its workspaces exclusively:
+//! an extra window there keeps it unapplied; other workspaces never
+//! veto. Tiled sizes are restored through a measured probe; a window
+//! is never floated to force it.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -18,6 +22,7 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
+use crate::hypr;
 use crate::windows::{self, WinRow};
 
 /// How long the sensor keeps showing "✓ saved" after a click.
@@ -44,6 +49,10 @@ pub enum Action {
     Move { address: String, workspace: String },
     ToggleFloat { address: String },
     Geometry { address: String, x: i32, y: i32, w: i32, h: i32 },
+    /// A tiled window's target size in px — absolute, so the measured
+    /// apply loop can recompute the leftover after every dispatch,
+    /// once the sibling's edge has already moved.
+    TiledResize { address: String, w: i32, h: i32 },
 }
 
 /// `piuma-layouts.json`: automatic layout name → its windows. A
@@ -145,9 +154,10 @@ pub fn tick(state: &mut LayoutState, rows: &[WinRow]) -> String {
     }
     if window_set_changed(state, rows) {
         match state.file.as_ref().and_then(|f| best_match(f, rows)) {
-            Some((_, entries)) => {
+            Some((name, entries)) => {
+                eprintln!("[piuma] layout applied: {name}");
                 state.matched = true;
-                run(&plan(rows, entries));
+                apply(rows, entries);
             }
             None => state.matched = false,
         }
@@ -169,7 +179,9 @@ fn window_set_changed(state: &mut LayoutState, rows: &[WinRow]) -> bool {
 
 /// The most specific saved layout whose windows are all open with the
 /// exact saved count: a subset loses to the layout saved from this
-/// very window set; a length tie keeps the earlier (sorted) name.
+/// very window set; a length tie keeps the earlier (sorted) name. An
+/// exact match always wins — the fuzzy pass only takes over when no
+/// saved title fits anymore.
 fn best_match<'a>(
     file: &'a LayoutFile,
     rows: &[WinRow],
@@ -180,7 +192,101 @@ fn best_match<'a>(
             best = Some((name, entries));
         }
     }
-    best
+    best.or_else(|| fuzzy_match(file, rows))
+}
+
+/// The fallback when no title matches exactly (a terminal followed its
+/// directory, a browser its tab): a layout with the very same window
+/// classes — same multiset on its own workspaces, so the extra-window
+/// veto holds by class too — competes on how much its saved titles
+/// still resemble the open ones. The strictly best score wins; a tie
+/// means no layout, never a guess — the file can hold several
+/// same-class layouts that only their titles tell apart.
+fn fuzzy_match<'a>(
+    file: &'a LayoutFile,
+    rows: &[WinRow],
+) -> Option<(&'a String, &'a Vec<LayoutEntry>)> {
+    let mut best: Option<(f32, &String, &Vec<LayoutEntry>)> = None;
+    let mut second = 0.0_f32;
+    for (name, entries) in file {
+        let Some(score) = fuzzy_score(rows, entries) else {
+            continue;
+        };
+        if score <= 0.0 {
+            continue;
+        }
+        if best.as_ref().map_or(true, |(s, _, _)| score > *s) {
+            second = best.as_ref().map_or(0.0, |(s, _, _)| *s);
+            best = Some((score, name, entries));
+        } else {
+            second = second.max(score);
+        }
+    }
+    match best {
+        Some((score, name, entries)) if score > second => Some((name, entries)),
+        _ => None,
+    }
+}
+
+/// `None` when the layout's classes differ from the open windows'
+/// (no candidate at all), else the summed title resemblance: 1.0 for
+/// an exactly saved title, otherwise the best same-class share of the
+/// saved title's words still found. Every candidate covers the same
+/// window count (equal multisets), so scores are comparable as they
+/// are.
+fn fuzzy_score(rows: &[WinRow], entries: &[LayoutEntry]) -> Option<f32> {
+    if entries.is_empty() {
+        return None;
+    }
+    let layout_ws: HashSet<&str> = entries.iter().map(|e| e.workspace.as_str()).collect();
+    let mut saved: HashMap<&str, usize> = HashMap::new();
+    for e in entries {
+        *saved.entry(e.class.as_str()).or_insert(0) += 1;
+    }
+    let mut cur: HashMap<&str, usize> = HashMap::new();
+    for r in rows
+        .iter()
+        .filter(|r| layout_ws.contains(r.workspace.as_str()))
+    {
+        *cur.entry(r.class.as_str()).or_insert(0) += 1;
+    }
+    if cur != saved {
+        return None;
+    }
+    Some(
+        entries
+            .iter()
+            .map(|e| {
+                rows.iter()
+                    .filter(|r| {
+                        layout_ws.contains(r.workspace.as_str()) && r.class == e.class
+                    })
+                    .map(|r| title_resemble(&e.title, &r.title))
+                    .fold(0.0_f32, f32::max)
+            })
+            .sum(),
+    )
+}
+
+/// How much an open title still resembles the saved one: 1.0 when
+/// equal, otherwise the share of the saved title's words found in it
+/// ("~ - fish" vs "~/src - fish" keeps "fish" and drops the path).
+fn title_resemble(saved: &str, open: &str) -> f32 {
+    if saved == open {
+        return 1.0;
+    }
+    let words = |s: &str| -> HashSet<String> {
+        s.split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(|w| w.to_lowercase())
+            .collect()
+    };
+    let a = words(saved);
+    let b = words(open);
+    if a.is_empty() {
+        return 0.0;
+    }
+    a.intersection(&b).count() as f32 / a.len() as f32
 }
 
 /// The sensor's text: the saved flash, ✓ for a matched (and applied)
@@ -246,12 +352,10 @@ pub fn matches(rows: &[WinRow], entries: &[LayoutEntry]) -> bool {
 
 /// What to dispatch to re-apply `entries` to `rows`, in order. Pure —
 /// the tests build rows by hand. A floating window that lost its
-/// geometry is floated back to the saved pixels; a tiled one only
-/// goes back to its workspace (and back into the tiler when it was
-/// floated): the split a tiler draws cannot be restored from pixel
-/// geometry alone — a relative resize undoes the sibling's and can
-/// strangle a tile — while a plain kill + reopen re-splits to the
-/// same geometry by itself. A window already at the target is not
+/// geometry is floated back to the saved pixels; a tiled one gets its
+/// target size (fired *measured* by `apply`: probe, exact delta,
+/// guardrail) and goes back into the tiler when it was floated —
+/// never floated itself. A window already at the target is not
 /// touched at all; a fullscreen window gets no geometry (move/resize
 /// are ignored on it).
 pub fn plan(rows: &[WinRow], entries: &[LayoutEntry]) -> Vec<Action> {
@@ -305,11 +409,15 @@ pub fn plan(rows: &[WinRow], entries: &[LayoutEntry]) -> Vec<Action> {
             actions.push(Action::ToggleFloat {
                 address: r.address.clone(),
             });
+        } else if r.w != e.w || r.h != e.h {
+            // Saved as tiled and tiled now, size off: the absolute
+            // target — `apply` fires it measured (probe + guardrail).
+            actions.push(Action::TiledResize {
+                address: r.address.clone(),
+                w: e.w,
+                h: e.h,
+            });
         }
-        // Saved as tiled and tiled now: no dispatch — a relative
-        // resize moves the sibling's edge too and, without the tree's
-        // shape, can only strangle a tile instead of hitting the
-        // saved split (measured: 456 px → 31 px).
     }
     actions
 }
@@ -332,8 +440,132 @@ pub fn run(actions: &[Action]) {
                 windows::dispatch_waited(&windows::resize_call(address, *w, *h));
                 windows::dispatch_waited(&windows::move_px_call(address, *x, *y));
             }
+            // Never fired here: apply() splits the plan and sends the
+            // tiled targets through the measured probe loop.
+            Action::TiledResize { .. } => {}
         }
     }
+}
+
+/// The probe's step in px, and the smallest tiled window a resize may
+/// leave standing (anything under it means a tile was strangled
+/// against the wall — see `newly_strangled`).
+const PROBE: i32 = 8;
+const MIN_TILE: i32 = 80;
+
+/// Apply a matched layout: the moves, toggles and floating geometry
+/// fire in one pass, then every tiled target runs *measured* — one
+/// window and one axis at a time (height, then width): an `PROBE` px
+/// probe shows which way that edge really answers (a bottom window
+/// grows by asking up), the exact ask follows from that sign, and
+/// anything that strangles a tile (under `MIN_TILE`) or fails to
+/// shrink the leftover reverts at once.
+/// shortcut: an edge the probe cannot move (a full-width tile's x is
+/// the monitor's own border) or a tree that cannot hold the saved
+/// shape at all is left to the tiler — without the tree's shape there
+/// is no second way to push, and guessing is what strangled a tile to
+/// 31 px in the live test. The pass blocks the bar ~150 ms per
+/// resize, a few hundred ms in the usual case.
+fn apply(rows: &[WinRow], entries: &[LayoutEntry]) {
+    let mut simple = Vec::new();
+    let mut resizes = Vec::new();
+    for a in plan(rows, entries) {
+        match a {
+            Action::TiledResize { address, w, h } => resizes.push((address, w, h)),
+            other => simple.push(other),
+        }
+    }
+    run(&simple);
+    // Every axis is guarded on its own (a rejected attempt reverts to
+    // its own measured start) and the targets are absolute: one
+    // unreachable axis never invalidates the next window's.
+    for (address, w, h) in resizes {
+        measured_resize(&address, h, 0, 1);
+        measured_resize(&address, w, 1, 0);
+    }
+}
+
+/// One axis of one window, measured: probe `PROBE` px towards the
+/// target to learn which way this edge really answers, fire the ask
+/// that learning implies, verify nothing got strangled and the
+/// leftover shrank (revert when not) — at most two rounds, for an
+/// edge that moves slower than asked. A silent edge or a rejected
+/// ask leaves that axis to the tiler; nothing else is affected.
+fn measured_resize(address: &str, target: i32, sx: i32, sy: i32) {
+    for _round in 0..2 {
+        let Some(before) = hypr::fresh_clients() else {
+            return;
+        };
+        let axis = |r: &WinRow| sx * r.w + sy * r.h;
+        let Some(start) = before.iter().find(|r| r.address == address) else {
+            return; // nothing left to resize
+        };
+        let leftover = target - axis(start);
+        if leftover == 0 {
+            return;
+        }
+        // Probe in the direction the target lies: it both covers the
+        // first few px and teaches the edge's response sign.
+        let asked = PROBE * leftover.signum();
+        windows::dispatch_waited(&windows::resize_rel_call(address, sx * asked, sy * asked));
+        let Some(probe_rows) = hypr::fresh_clients() else {
+            return;
+        };
+        let probed = probe_rows.iter().find(|r| r.address == address);
+        let moved = probed.map_or(0, |p| axis(p) - axis(start));
+        let Some(ask) = probed.and_then(|p| probe_ask(asked, moved, axis(p), target)) else {
+            return; // edge silent: nothing happened, nothing to undo
+        };
+        if ask != 0 {
+            windows::dispatch_waited(&windows::resize_rel_call(address, sx * ask, sy * ask));
+        }
+        let Some(after) = hypr::fresh_clients() else {
+            return;
+        };
+        let now = after.iter().find(|r| r.address == address);
+        let bad = newly_strangled(&before, &after)
+            || now.map_or(true, |m| (target - axis(m)).abs() >= leftover.abs());
+        if bad {
+            // Back to this round's start with the learned sign: the ask
+            // chain is relative, so one opposite move of the same
+            // magnitude undoes it (a clamp that swallowed the ask leaves
+            // at most the probe's px — bounded, and re-measured next
+            // pass).
+            if let Some(cur) = now {
+                let back = (axis(start) - axis(cur)) * asked.signum() * moved.signum();
+                windows::dispatch_waited(&windows::resize_rel_call(address, sx * back, sy * back));
+            }
+            return;
+        }
+    }
+}
+
+/// The ask (px along the axis) the probe taught for `target`: the
+/// edge's response may be inverted (a bottom window grows through its
+/// top border — asking down moved it away), so the ask follows the
+/// measured sign; magnitude stays 1:1 (live probes moved exactly
+/// their ask). `None` when the edge did not move at all: clamped, and
+/// that axis is left to the tiler — with nothing to undo.
+/// shortcut: sign only — an edge that answers slower than asked makes
+/// the ask overshoot in proportion; the strangle guard reverts it.
+fn probe_ask(asked: i32, moved: i32, probed: i32, target: i32) -> Option<i32> {
+    if moved == 0 {
+        return None;
+    }
+    Some((target - probed) * asked.signum() * moved.signum())
+}
+
+/// A tiled window that stood at least `MIN_TILE` on both sides and
+/// fell under one during the resize: a strangle in progress, and the
+/// caller reverts. Floating windows are no business of the probe.
+fn newly_strangled(before: &[WinRow], after: &[WinRow]) -> bool {
+    after.iter().any(|r| {
+        !r.floating
+            && (r.w < MIN_TILE || r.h < MIN_TILE)
+            && before.iter().any(|b| {
+                b.address == r.address && !b.floating && b.w >= MIN_TILE && b.h >= MIN_TILE
+            })
+    })
 }
 
 /// The saved layouts, or `None` when the file is missing or broken (a
@@ -491,9 +723,59 @@ mod tests {
         assert!(best_match(&file, &other).is_none());
     }
 
+    /// Fallback when no saved title fits anymore: with the very same
+    /// window classes the layout whose titles still resemble the open
+    /// ones wins — but only a strict winner; differing classes are no
+    /// candidate at all (the extra-window veto holds by class too).
+    #[test]
+    fn best_match_falls_back_to_resembling_titles() {
+        let mut file: LayoutFile = BTreeMap::new();
+        file.insert(
+            "fish".to_string(),
+            vec![
+                entry("kitty", "shell", "1", false),
+                entry("kitty", "~ - fish", "1", false),
+                entry("kitty", "~/src - fish", "1", false),
+            ],
+        );
+        file.insert(
+            "tools".to_string(),
+            vec![
+                entry("kitty", "shell", "1", false),
+                entry("kitty", "~: btop", "1", false),
+                entry("kitty", "~: journalctl", "1", false),
+            ],
+        );
+        // Every title changed, the words still point at "fish".
+        let open = vec![
+            row("0xA", "kitty", "shell down", "1", false),
+            row("0xB", "kitty", "~/Downloads - fish", "1", false),
+            row("0xC", "kitty", "fish", "1", false),
+        ];
+        assert_eq!(
+            best_match(&file, &open).map(|(n, _)| n.as_str()),
+            Some("fish"),
+            "the layout whose titles still resemble wins"
+        );
+        // Same classes, no resemblance on either side: no guess.
+        let alien = vec![
+            row("0xA", "kitty", "zzz", "1", false),
+            row("0xB", "kitty", "qqq", "1", false),
+            row("0xC", "kitty", "www", "1", false),
+        ];
+        assert_eq!(best_match(&file, &alien).map(|(n, _)| n.as_str()), None);
+        // Another class on the layout's workspace: not a candidate.
+        let other_class = vec![
+            row("0xA", "konsole", "shell down", "1", false),
+            row("0xB", "konsole", "fish", "1", false),
+            row("0xC", "konsole", "fish", "1", false),
+        ];
+        assert_eq!(best_match(&file, &other_class).map(|(n, _)| n.as_str()), None);
+    }
+
     /// The move to the saved workspace comes first; a tiled window
-    /// then gets no size dispatch (the tiler keeps its split), while
-    /// a floating one gets the exact pixels.
+    /// then gets its measured size target, a floating one the exact
+    /// pixels.
     #[test]
     fn plan_moves_and_restores_geometry() {
         let entries = vec![
@@ -507,14 +789,22 @@ mod tests {
             row("0xC", "slack", "Slack", "1", false),
         ];
         let actions = plan(&rows, &entries);
-        assert_eq!(actions.len(), 4, "move, then geometry/toggle per floating entry");
+        assert_eq!(
+            actions.len(),
+            5,
+            "move + size target, geometry, toggle + geometry"
+        );
         assert!(matches!(
             actions[0],
             Action::Move { ref address, ref workspace } if address == "0xA" && workspace == "1"
         ));
-        assert!(matches!(actions[1], Action::Geometry { ref address, .. } if address == "0xB"));
-        assert!(matches!(actions[2], Action::ToggleFloat { ref address, .. } if address == "0xC"));
-        assert!(matches!(actions[3], Action::Geometry { ref address, .. } if address == "0xC"));
+        assert!(matches!(
+            actions[1],
+            Action::TiledResize { ref address, w: 300, h: 400 } if address == "0xA"
+        ));
+        assert!(matches!(actions[2], Action::Geometry { ref address, .. } if address == "0xB"));
+        assert!(matches!(actions[3], Action::ToggleFloat { ref address, .. } if address == "0xC"));
+        assert!(matches!(actions[4], Action::Geometry { ref address, .. } if address == "0xC"));
     }
 
     /// A window saved as tiled is never floated back: a floating one
@@ -537,13 +827,12 @@ mod tests {
         ));
     }
 
-    /// A tiled window that lost its size gets no dispatch at all: the
-    /// split a tiler draws cannot be hit from pixel geometry — a
-    /// relative resize moves the sibling's shared edge too and, in
-    /// the live test, strangled a tile to 31 px instead of reaching
-    /// the target — so the tiler's own partition stands.
+    /// A tiled window that lost its size gets its absolute target as
+    /// the action — fired measured by `apply`, never a float and
+    /// never the saved position: the tiler owns the split, the probe
+    /// owns the size.
     #[test]
-    fn plan_leaves_a_tiled_window_to_the_tiler() {
+    fn plan_targets_tiled_window_size() {
         let target = vec![LayoutEntry {
             w: 640,
             h: 480,
@@ -552,7 +841,66 @@ mod tests {
         let mut row_now = row("0xA", "kitty", "shell", "1", false);
         row_now.w = 960;
         row_now.h = 1080;
-        assert!(plan(&[row_now], &target).is_empty(), "no resize, no float, no move");
+        assert!(
+            matches!(
+                plan(&[row_now], &target)[..],
+                [Action::TiledResize { ref address, w: 640, h: 480 }] if address == "0xA"
+            ),
+            "absolute target, no float, no position"
+        );
+    }
+
+    /// The probe teaches the edge's sign: an answer in the asked
+    /// direction gives the direct ask, an inverted one (a bottom
+    /// window grows through its top border) flips it, a silent edge
+    /// gives nothing — that axis stays with the tiler, undamaged.
+    #[test]
+    fn probe_ask_follows_the_measured_edge() {
+        assert_eq!(probe_ask(8, 8, 508, 700), Some(192), "grow: direct answer");
+        assert_eq!(probe_ask(-8, -8, 492, 300), Some(-192), "shrink: direct answer");
+        assert_eq!(probe_ask(8, 8, 508, 506), Some(-2), "overshoot is corrected");
+        assert_eq!(probe_ask(8, 0, 503, 700), None, "silent edge: clamped, no undo needed");
+        assert_eq!(
+            probe_ask(8, -8, 495, 1022),
+            Some(-527),
+            "inverted: grows by asking the other way"
+        );
+        assert_eq!(
+            probe_ask(-8, 8, 511, 300),
+            Some(211),
+            "inverted: shrinks by asking the other way"
+        );
+    }
+
+    /// The guardrail fires on the window that *fell* under the floor,
+    /// not on one that was already small; floating windows are the
+    /// tiler's own business.
+    #[test]
+    fn strangled_tiles_are_the_ones_that_just_fell_under_the_floor() {
+        let mut big = row("0xA", "kitty", "t", "1", false);
+        big.w = 937;
+        big.h = 503;
+        let mut strangled = big.clone();
+        strangled.w = 31;
+        assert!(
+            newly_strangled(&[big.clone()], &[strangled.clone()]),
+            "937 → 31 px is a strangle"
+        );
+        let mut grown = big.clone();
+        grown.w = 1200;
+        assert!(!newly_strangled(&[big.clone()], &[grown]), "growth is fine");
+        let mut tiny = big.clone();
+        tiny.w = 40;
+        assert!(
+            !newly_strangled(&[tiny.clone()], &[strangled.clone()]),
+            "a tile that was already tiny is no news of ours"
+        );
+        let mut floating_now = strangled;
+        floating_now.floating = true;
+        assert!(
+            !newly_strangled(&[big.clone()], &[floating_now]),
+            "floating windows never count"
+        );
     }
 
     /// At the saved geometry nothing is dispatched — tiled or not, and
