@@ -274,15 +274,18 @@ pub(crate) fn popup_view(panel: &Panel) -> Element<'_, Message> {
         // overflows (the vertical rail is disabled until it does).
         let lines = container(lines)
             .padding(iced::Padding {
-                top: st.padding.min(u16::MAX as u32) as f32 / 2.0,
+                top: 0.0,
                 right: st.padding.min(u16::MAX as u32) as f32,
-                bottom: st.padding.min(u16::MAX as u32) as f32 / 2.0,
+                bottom: 0.0,
                 left: 0.0,
             })
-            .width(Length::Fill);
+            .width(Length::Fill)
+            .align_y(Alignment::Center);
         let text_area = scrollable(lines.width(Length::Fill))
             .width(Length::Fill)
-            .height(Length::Fixed((5 * st.font_size) as f32))
+            // Shorter than the card: the gap above/below is the rail's
+            // vertical padding — the rail only spans this inner height.
+            .height(Length::Fixed((4 * st.font_size) as f32))
             .style(move |_, _| scrollable::Style {
                 container: container::Style::default(),
                 vertical_rail: Rail {
