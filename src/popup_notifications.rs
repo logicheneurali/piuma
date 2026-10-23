@@ -267,7 +267,7 @@ pub(crate) fn popup_view(panel: &Panel) -> Element<'_, Message> {
         // one with line breaks) reads through the wheel instead of
         // being clipped, while the card — and the popup surface —
         // keeps the style's height. The budget is what `popup_card_h`
-        // leaves between the two paddings (5 lines of font). `lines`
+        // leaves between the two paddings (8 lines of font). `lines`
         // sits in a `padding`-inset container so text and the scrollbar
         // don't hug the card edges. The scrollbar follows the bar's own
         // colours (not iced's default) and appears only once the content

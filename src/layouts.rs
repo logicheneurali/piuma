@@ -78,6 +78,9 @@ pub struct LayoutState {
     matched: bool,
     /// Last save, for the "✓ saved" flash.
     flash: Option<Instant>,
+    /// Last apply, for the "✓ applied" flash — set by `tick` the same
+    /// way the save flash is, whenever a check matches and runs.
+    applied: Option<Instant>,
 }
 
 /// `~/.config/piuma/piuma-layouts.json`, next to piuma.json.
@@ -157,6 +160,7 @@ pub fn tick(state: &mut LayoutState, rows: &[WinRow]) -> String {
             Some((name, entries)) => {
                 eprintln!("[piuma] layout applied: {name}");
                 state.matched = true;
+                state.applied = Some(Instant::now());
                 apply(rows, entries);
             }
             None => state.matched = false,
@@ -289,13 +293,19 @@ fn title_resemble(saved: &str, open: &str) -> f32 {
     a.intersection(&b).count() as f32 / a.len() as f32
 }
 
-/// The sensor's text: the saved flash, ✓ for a matched (and applied)
-/// window set, ⋯ while armed — and nothing at all while the file is
-/// absent, when the layout system is ignored.
+/// The sensor's text: the saved flash, the applied flash (the same
+/// `FLASH` window — a save wins, it is the rarer, explicit action),
+/// ✓ for a matched window set, ⋯ while armed — and nothing at all
+/// while the file is absent, when the layout system is ignored.
 fn status_text(state: &LayoutState) -> String {
     if let Some(at) = &state.flash {
         if at.elapsed() < FLASH {
             return "✓ saved".to_string();
+        }
+    }
+    if let Some(at) = &state.applied {
+        if at.elapsed() < FLASH {
+            return "✓ applied".to_string();
         }
     }
     match (state.file.is_some(), state.matched) {
@@ -635,6 +645,22 @@ mod tests {
         assert!(window_set_changed(&mut state, &[a.clone(), b.clone()]), "a new window is an event");
         assert!(window_set_changed(&mut state, &[b.clone()]), "a closed window is an event");
         assert!(!window_set_changed(&mut state, &[b.clone()]), "same set again: quiet");
+    }
+
+    /// The applied flash: `✓ applied` for the `FLASH` window after an
+    /// apply, then the plain match sign — and an explicit save still
+    /// outranks it (both flashes use the same window).
+    #[test]
+    fn status_shows_the_applied_flash_then_the_match_sign() {
+        let mut state = LayoutState::default();
+        state.file = Some(BTreeMap::new());
+        state.matched = true;
+        state.applied = Some(Instant::now());
+        assert_eq!(status_text(&state), "✓ applied", "fresh apply");
+        state.applied = Some(Instant::now() - FLASH);
+        assert_eq!(status_text(&state), "✓", "the flash fades to the match sign");
+        state.flash = Some(Instant::now());
+        assert_eq!(status_text(&state), "✓ saved", "a save outranks an old apply");
     }
 
     /// The trigger: every saved window (by class + title) open with the

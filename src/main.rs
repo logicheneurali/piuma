@@ -101,6 +101,10 @@ pub(crate) const DEFAULT_FONT_SIZE: u32 = 14;
 /// Gap between two sensor boxes inside a section: the same rhythm on
 /// both axes, whether the sensors sit in a row or a stacked column.
 const SENSOR_SPACING: f32 = 8.0;
+/// Dwell before a sensor hover activates (style, graph/calendar
+/// popup): an enter only takes effect once the pointer has rested
+/// this long, so an involuntary sweep across the bar triggers nothing.
+const SENSOR_HOVER_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
 pub(crate) const DEFAULT_BG_COLOR: Color = Color::from_rgba(0.06, 0.06, 0.08, 0.85);
 pub(crate) const DEFAULT_TEXT_COLOR: Color = Color::from_rgb(0.88, 0.88, 0.94);
 
@@ -250,6 +254,51 @@ pub(crate) struct SectionStyle {
     pub(crate) sensors: Vec<SensorStyle>,
 }
 
+/// The sensor hover's dwell gate: an enter is only *armed* (with a
+/// fresh sequence number), and it activates when — and only if — its
+/// confirmation arrives while still pending: a leave on that sensor,
+/// or a newer enter, drops it first. This is what gives the hover its
+/// delay — a pointer sweeping past a sensor fires no style and opens
+/// no popup.
+#[derive(Default)]
+struct HoverGate {
+    /// The armed enter (section, sensor, sequence), `None` while idle.
+    pending: Option<(usize, usize, u64)>,
+    /// Bumped on every enter: a confirmation carrying an older one is
+    /// stale and must not fire.
+    seq: u64,
+}
+
+impl HoverGate {
+    /// Arm an enter; the returned token is what its confirmation must
+    /// carry to still be accepted.
+    fn enter(&mut self, section: usize, sensor: usize) -> (usize, usize, u64) {
+        self.seq += 1;
+        let token = (section, sensor, self.seq);
+        self.pending = Some(token);
+        token
+    }
+
+    /// Cancel the armed enter of this sensor — a leave must not drop
+    /// another sensor's pending arm (enter/leave can arrive reordered).
+    fn leave(&mut self, section: usize, sensor: usize) {
+        if matches!(self.pending, Some((s, i, _)) if (s, i) == (section, sensor)) {
+            self.pending = None;
+        }
+    }
+
+    /// Whether `token` still is the armed enter: true exactly once, for
+    /// a confirmation no leave or newer enter has superseded.
+    fn confirm(&mut self, section: usize, sensor: usize, seq: u64) -> bool {
+        if self.pending == Some((section, sensor, seq)) {
+            self.pending = None;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 pub(crate) struct Panel {
     pub(crate) config: config::Config,
     pub(crate) sections: Vec<SectionData>,
@@ -269,6 +318,9 @@ pub(crate) struct Panel {
     pub(crate) popup_resync: bool,
     /// Index into `sections[s]` and `sections[s].sensors[sensor]` under the cursor.
     pub(crate) hovered: Option<(usize, usize)>,
+    /// The dwell gate behind `hovered`: enters arm here and reach it
+    /// only after `SENSOR_HOVER_DELAY` while still pending.
+    pub(crate) hover_gate: HoverGate,
     /// State (mtime, len) of the last config read attempt: unchanged files
     /// are skipped on the next tick instead of being re-read and parsed.
     pub(crate) last_reload: Option<(SystemTime, u64)>,
@@ -471,6 +523,10 @@ pub(crate) enum Message {
     IcedEvent(iced::window::Id, Event),
     /// A sensor entered/exited the hover state: (section_index, sensor_index, hovered).
     SensorHovered(usize, usize, bool),
+    /// An armed sensor enter's dwell elapsed (carrying its sequence
+    /// token): the hover activates only if no leave or newer enter has
+    /// superseded it (see `HoverGate`).
+    SensorHoverConfirmed(usize, usize, u64),
     /// A sensor was clicked: (section_index, sensor_index, action).
     SensorPressed(usize, usize, Option<String>),
     /// A workspace button was clicked: focus that workspace (roadmap2 #4).
@@ -1705,11 +1761,30 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
         }
         Message::SensorHovered(section_index, sensor_index, hovered) => {
             if hovered {
-                panel.hovered = Some((section_index, sensor_index));
-            } else if panel.hovered == Some((section_index, sensor_index)) {
-                panel.hovered = None;
+                // Only armed: the hover (style and popups) activates
+                // when the dwell confirms it, so a pointer sweeping
+                // past a sensor triggers nothing.
+                let token = panel.hover_gate.enter(section_index, sensor_index);
+                Command::perform(
+                    async move { tray::delay(SENSOR_HOVER_DELAY).await },
+                    move |_| Message::SensorHoverConfirmed(token.0, token.1, token.2),
+                )
+            } else {
+                // Leaving is immediate: it cancels a pending enter and
+                // closes an active hover alike.
+                panel.hover_gate.leave(section_index, sensor_index);
+                if panel.hovered == Some((section_index, sensor_index)) {
+                    panel.hovered = None;
+                }
+                hover_sync(panel, section_index, sensor_index, false)
             }
-            hover_sync(panel, section_index, sensor_index, hovered)
+        }
+        Message::SensorHoverConfirmed(section_index, sensor_index, seq) => {
+            if !panel.hover_gate.confirm(section_index, sensor_index, seq) {
+                return Command::none(); // superseded: the pointer moved on
+            }
+            panel.hovered = Some((section_index, sensor_index));
+            hover_sync(panel, section_index, sensor_index, true)
         }
         Message::GraphPopupExited => {
             // The pointer left the surface: this exit is the fast
@@ -2547,7 +2622,7 @@ pub(crate) fn popup_style(config: &config::Config, pal: Option<&palette::Palette
 /// the default style gives exactly the F3 geometry (2×12 + 5×12 = 84),
 /// so the stack stays click-exact for every style.
 fn popup_card_h(style: &PopupStyle) -> u32 {
-    2 * style.padding + 5 * style.font_size
+    2 * style.padding + 8 * style.font_size
 }
 
 
@@ -2824,6 +2899,7 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         cfg_gen: 0,
                         popup_resync: false,
                         hovered: None,
+                        hover_gate: HoverGate::default(),
                         last_reload: config_file_state(),
                         last_size: size,
                         last_anchor: anchor,
@@ -2946,26 +3022,48 @@ fn parse_config_arg() -> Option<String> {
 mod tests {
     use super::{
         config, focused_output_in, icons_theme, monitor_names_json, palette, popup_card_h,
-        popup_style, PopupStyle,
+        popup_style, HoverGate, PopupStyle,
     };
+
+    /// The hover dwell gate: an enter arms, its confirmation activates
+    /// exactly once — a leave on that sensor or a newer enter cancels
+    /// it (the stale token then never fires), while another sensor's
+    /// leave leaves the arm standing.
+    #[test]
+    fn hover_gate_confirms_only_unsuperseded_enters() {
+        let mut gate = HoverGate::default();
+        let a = gate.enter(0, 1);
+        assert!(!gate.confirm(9, 9, a.2), "a foreign token never confirms");
+        assert!(gate.confirm(a.0, a.1, a.2), "the armed enter confirms");
+        assert!(!gate.confirm(a.0, a.1, a.2), "exactly once");
+
+        let b = gate.enter(0, 1);
+        gate.leave(0, 1);
+        assert!(!gate.confirm(b.0, b.1, b.2), "a cancelled enter never activates");
+
+        let c = gate.enter(0, 1);
+        gate.leave(1, 0);
+        assert!(gate.confirm(c.0, c.1, c.2), "another sensor's leave keeps the arm");
+
+        let d1 = gate.enter(0, 1);
+        let d2 = gate.enter(0, 1);
+        assert!(!gate.confirm(d1.0, d1.1, d1.2), "the stale arm is superseded");
+        assert!(gate.confirm(d2.0, d2.1, d2.2), "the newest arm wins");
+    }
 
     /// The default popup style must keep the F3 geometry exactly (84px
     /// cards): the surface size is computed from it, and any drift would
     /// leave a dead (click-blocking) strip below the stack.
     #[test]
     fn popup_card_h_defaults_to_84_and_scales_with_style() {
-        assert_eq!(popup_card_h(&PopupStyle::default()), 84);
+        assert_eq!(popup_card_h(&PopupStyle::default()), 120);
         let styled = PopupStyle {
             font_size: 16,
             padding: 8,
             ..PopupStyle::default()
         };
-        assert_eq!(popup_card_h(&styled), 96);
+        assert_eq!(popup_card_h(&styled), 144);
     }
-
-
-
-
 
 
     /// Roadmap N1 gate: no declared icon = no theme, even with

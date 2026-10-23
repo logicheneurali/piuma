@@ -377,8 +377,10 @@ no popup); its keys are optional and fall back to the values above:
   `panel.sensor_defaults` — the defaults are white text on black with a
   grey border, and an absent or `-1` numeric key means "use the
   default". The card height follows font and padding, so the surface
-  stays click-exact for any style. All of it is editable in
-  `piuma-setup` under *Desktop Notifications*.
+  stays click-exact for any style, and the card's text scrolls inside
+  it (wheel) when a long body — or one with line breaks — does not
+  fit. All of it is editable in `piuma-setup` under *Desktop
+  Notifications*.
 
 ```json
 { "name": "Notifiche", "source": { "type": "notifications" } }
