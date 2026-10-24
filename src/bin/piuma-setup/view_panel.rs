@@ -42,7 +42,7 @@ pub(crate) fn panel_settings(state: &PiumaSetup) -> Element<'_, Message> {
         ("Icon Theme", icon_theme_picker(state).into()),
         // Autostart lives in its own tab now (roadmap2 #2).
         ("App Theme", toggler(state.config.app_theme.unwrap_or(false))
-            .label("Generate GTK theme bridge")
+            .label("Generate GTK theme")
             .on_toggle(Message::AppThemeChanged)
             .into()),
         ("Thickness", invalid_under(

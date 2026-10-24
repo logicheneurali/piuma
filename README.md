@@ -188,38 +188,31 @@ and piuma never launches itself. Absent (the default) the feature is
 dormant — nothing is scanned or spawned. The toggle lives in
 piuma-setup's *Panel Settings* card.
 
-`panel.app_theme: true` generates `<config dir>/theme/gtk.css` — a
-small GTK stylesheet carrying the bar's **character** (`panel.font`,
-`font_size`, `bold`), its **background/colours**
-(`default_bg_color`, `default_text_color`) and its **borders**
-(`sensor_defaults` / `section_defaults` border colour and radius) for
-GTK applications. The file lives inside piuma's own directory, is
-rewritten on config reload only when its content changes, and is
-removed when the toggle goes off; piuma never edits your `gtk.css`,
-`gtk-4.0/gtk.css` or `settings.ini`. Opt in once by adding
-`@import url("file:///home/you/.config/piuma/theme/gtk.css");` at the
-top of your `~/.config/gtk-3.0/gtk.css` (and `gtk-4.0/gtk.css`).
+`panel.app_theme: true` generates a complete GTK theme at
+`~/.local/share/themes/Piuma`: piuma copies the Adwaita stylesheets of
+`adw-gtk3-dark` (the widget rules, for GTK3 and GTK4) and appends its
+own palette block, so the theme is self-contained and follows the
+Adwaita schema. The block maps the bar's three layers: **windows**
+(window, headerbar, sidebar, dialog) use the panel palette,
+**containers** (views, lists, cards) the section palette, **interactive
+widgets** (buttons, entries, combos, menus) the sensor palette; every
+hover uses that layer's hover tone. Translucent tones are flattened
+onto the surface behind them so nested GTK widgets cannot blend twice.
 
-piuma also writes a real GTK theme directory at
-`~/.local/share/themes/Piuma` (dark: `adw-gtk3-dark` base + piuma
-palette, plus `gtk-3.0/gtk.css` and `gtk-4.0/gtk.css`). When
-`app_theme` is on, piuma injects `GTK_THEME=Piuma` (and
+GTK loads `~/.config/gtk-{3,4}.0/gtk.css` at USER priority, above any
+theme, so piuma also appends the same block to those two files between
+`piuma theme begin` / `piuma theme end` markers — otherwise an existing
+customisation would keep pinning the old colours. Disabling the toggle
+removes the marked block and the theme directory, leaving the rest of
+your files untouched.
+
+When `app_theme` is on, piuma injects `GTK_THEME=Piuma` (and
 `QT_QPA_PLATFORMTHEME=gtk3`) into Hyprland's environment via a marked
 block in `~/.config/hypr/hyprland.lua`, followed by a compositor
-`reload config-only`. GTK applications that respect `GTK_THEME` pick
-up the Piuma theme automatically — no `@import` needed. Qt follows
-via `libqgtk3` on the `QT_QPA_PLATFORMTHEME` variable.
-
-Coexistence: the bridge declares its own `@piuma_bg` / `@piuma_fg` /
-`@piuma_border` names and joins your cascade additively, so an existing
-customisation — a KDE/Breeze setup, or a hand-made palette like
-`window_bg_color` — keeps winning wherever it sets the same property;
-the bridge only fills the gaps. To let piuma win on a property, point
-your own rule at it (`@define-color window_bg_color @piuma_bg;`).
-Disabling the toggle removes only piuma's generated files. Qt
-applications are not themed (that would require qt6ct/kvantum); they
-keep their current style. The effect is best-effort — it follows each
-app's CSS cascade.
+`reload config-only`, so new GTK applications pick the theme up
+automatically. Qt follows via `libqgtk3` on the
+`QT_QPA_PLATFORMTHEME` variable. Qt applications are not themed (that
+would require qt6ct/kvantum); they keep their current style.
 
 Numeric style fields — `border_width`, `border_width_hover`, `border_radius`
 and `padding` (on sensors, on sections, and on `panel.sensor_defaults` /
