@@ -17,9 +17,15 @@
 //! `panel.app_theme` also appends the same palette block to the user's
 //! `~/.config/gtk-{3,4}.0/gtk.css` (marked, removable): GTK loads those
 //! at USER priority, above any theme, so an existing customisation would
-//! otherwise keep pinning the old colours. It also injects
-//! `GTK_THEME=Piuma` into Hyprland's env so apps pick the theme up
-//! automatically. Qt follows via `QT_QPA_PLATFORMTHEME=gtk3`.
+//! otherwise keep pinning the old colours.
+//!
+//! Qt half: Qt only reads colours from a platform theme, so the toggle
+//! selects `QT_QPA_PLATFORMTHEME=kde` (the KDE plugin reads `kdeglobals`)
+//! with `QT_STYLE_OVERRIDE=Fusion` (Breeze draws its own palette and
+//! ignores the QPalette). The `[Colors:*]` groups of `kdeglobals` are
+//! patched to the piuma palette while the toggle is on and restored from
+//! a backup when it goes off. The env block lives in Hyprland's config
+//! and is reloaded by the compositor, so newly launched apps pick it up.
 
 use std::path::Path;
 
@@ -73,7 +79,7 @@ pub fn sync(config_path: &Path, panel: &config::PanelConfig, pal: Option<&palett
     } else {
         remove_theme_dir();
     }
-    sync_qt(panel);
+    sync_qt(config_path, &tones, enabled);
 }
 
 const CSS_BEGIN: &str = "/* piuma theme begin — generated, do not edit */";
@@ -118,6 +124,7 @@ fn strip_block(text: &str) -> String {
 struct Tones {
     panel_bg: String,
     panel_fg: String,
+    panel_fg_dim: String,
     section_bg: String,
     section_fg: String,
     section_fg_dim: String,
@@ -203,6 +210,7 @@ impl Tones {
         Self {
             panel_bg: css(panel_bg),
             panel_fg: css(panel_fg),
+            panel_fg_dim: css(dim(panel_fg, panel_bg)),
             section_bg: css(section_bg),
             section_fg: css(section_fg),
             section_fg_dim: css(dim(section_fg, section_bg)),
@@ -484,14 +492,25 @@ fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Qt side of the bridge: keep the marked block in Hyprland's config
-/// in step with `panel.app_theme`.
-fn sync_qt(panel: &config::PanelConfig) {
+/// Qt side of the bridge: keep the marked block in Hyprland's config in
+/// step with `panel.app_theme`, and the KDE palette in `kdeglobals`.
+///
+/// Qt apps take their palette from the platform theme; the only plugin
+/// on this system that reads a configurable palette is the KDE one, so
+/// the block selects it and forces the Fusion style (Breeze draws its
+/// own colours and ignores the palette). KDE apps read the `[Colors:*]`
+/// groups of `kdeglobals`, which are patched while the toggle is on and
+/// restored from a backup when it goes off.
+fn sync_qt(config_path: &Path, tones: &Tones, enabled: bool) {
+    sync_hypr_env(enabled);
+    sync_kde(config_path, tones, enabled);
+}
+
+fn sync_hypr_env(enabled: bool) {
     let Some(dir) = dirs::config_dir() else { return; };
     let file = dir.join("hypr").join("hyprland.lua");
     if !file.exists() { return; }
     let Ok(existing) = std::fs::read_to_string(&file) else { return; };
-    let enabled = panel.app_theme.unwrap_or(false);
     let Some(updated) = qt_applied(&existing, enabled) else { return; };
     if let Err(err) = std::fs::write(&file, &updated) {
         eprintln!("[piuma] Qt theme bridge: cannot write {}: {err}", file.display());
@@ -501,11 +520,172 @@ fn sync_qt(panel: &config::PanelConfig) {
     let _ = std::process::Command::new("hyprctl").args(["reload", "config-only"]).output();
 }
 
+/// Patch (or restore) the KDE colour groups. The untouched file is kept
+/// next to piuma's config so disabling the toggle restores it exactly.
+fn sync_kde(config_path: &Path, tones: &Tones, enabled: bool) {
+    let Some(dir) = dirs::config_dir() else { return; };
+    let file = dir.join("kdeglobals");
+    let Some(theme_dir) = config_path.parent().map(|p| p.join("theme")) else { return; };
+    let backup = theme_dir.join("kdeglobals.pre-piuma");
+
+    if enabled {
+        let existing = std::fs::read_to_string(&file).unwrap_or_default();
+        // Keep the first untouched copy: later syncs see the patched file.
+        if !backup.exists() {
+            write(&backup, &existing);
+        }
+        write(&file, &patch_kdeglobals(&existing, tones));
+        if let Some(data) = dirs::data_dir() {
+            write(&data.join("color-schemes").join("Piuma.colors"),
+                &kde_scheme(tones, true));
+        }
+    } else {
+        if backup.exists() {
+            let original = std::fs::read_to_string(&backup).unwrap_or_default();
+            write(&file, &original);
+            let _ = std::fs::remove_file(&backup);
+        }
+        if let Some(data) = dirs::data_dir() {
+            let _ = std::fs::remove_file(data.join("color-schemes").join("Piuma.colors"));
+        }
+    }
+}
+
+/// The group → (background, foreground, inactive foreground) mapping:
+/// windows use the panel palette, views/containers the section palette,
+/// buttons/selection the sensor palette.
+fn kde_groups(tones: &Tones) -> [(&'static str, &str, &str, &str); 7] {
+    [
+        ("Colors:Window", &tones.panel_bg, &tones.panel_fg, &tones.panel_fg_dim),
+        ("Colors:Header", &tones.panel_bg, &tones.panel_fg, &tones.panel_fg_dim),
+        ("Colors:Complementary", &tones.panel_bg, &tones.panel_fg, &tones.panel_fg_dim),
+        ("Colors:View", &tones.section_bg, &tones.section_fg, &tones.section_fg_dim),
+        ("Colors:Button", &tones.sensor_bg, &tones.sensor_fg, &tones.sensor_fg_dim),
+        ("Colors:Tooltip", &tones.sensor_bg, &tones.sensor_fg, &tones.sensor_fg_dim),
+        ("Colors:Selection", &tones.sensor_hover_bg, &tones.sensor_hover_fg, &tones.sensor_hover_fg),
+    ]
+}
+
+/// `#rrggbb` → the `r,g,b` triplets KDE config files use.
+fn triplet(hex: &str) -> String {
+    let h = hex.trim_start_matches('#');
+    let byte = |i: usize| u8::from_str_radix(h.get(i..i + 2).unwrap_or("00"), 16).unwrap_or(0);
+    format!("{},{},{}", byte(0), byte(2), byte(4))
+}
+
+fn patch_kdeglobals(text: &str, tones: &Tones) -> String {
+    let mut ini = Ini::parse(text);
+    for (group, bg, fg, dim) in kde_groups(tones) {
+        let bg = triplet(bg);
+        let fg = triplet(fg);
+        let dim = triplet(dim);
+        for (key, value) in [
+            ("BackgroundNormal", &bg),
+            ("BackgroundAlternate", &bg),
+            ("BackgroundActive", &bg),
+            ("BackgroundInactive", &bg),
+            ("ForegroundNormal", &fg),
+            ("ForegroundActive", &fg),
+            ("ForegroundInactive", &dim),
+            ("DecorationFocus", &bg),
+            ("DecorationHover", &bg),
+        ] {
+            ini.set(group, key, value);
+        }
+    }
+    ini.set("General", "ColorScheme", "Piuma");
+    ini.render()
+}
+
+/// The standalone `~/.local/share/color-schemes/Piuma.colors` (Plasma's
+/// picker), built from the same groups.
+fn kde_scheme(tones: &Tones, full: bool) -> String {
+    let mut ini = Ini::default();
+    for (group, bg, fg, dim) in kde_groups(tones) {
+        ini.set(group, "BackgroundNormal", &triplet(bg));
+        ini.set(group, "BackgroundAlternate", &triplet(bg));
+        ini.set(group, "BackgroundActive", &triplet(bg));
+        ini.set(group, "BackgroundInactive", &triplet(bg));
+        ini.set(group, "ForegroundNormal", &triplet(fg));
+        ini.set(group, "ForegroundActive", &triplet(fg));
+        ini.set(group, "ForegroundInactive", &triplet(dim));
+        ini.set(group, "DecorationFocus", &triplet(bg));
+        ini.set(group, "DecorationHover", &triplet(bg));
+    }
+    if full {
+        ini.set("General", "Name", "Piuma");
+        ini.set("General", "ColorScheme", "Piuma");
+        ini.set("KDE", "contrast", "0");
+    }
+    ini.render()
+}
+
+/// Minimal INI document, enough for `kdeglobals`: sections in file order,
+/// `key=value` lines, no comments or continuations (the real file has none).
+#[derive(Default)]
+struct Ini {
+    sections: Vec<(String, Vec<(String, String)>)>,
+}
+
+impl Ini {
+    fn parse(text: &str) -> Self {
+        let mut ini = Self::default();
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() { continue; }
+            if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+                ini.sections.push((name.trim().to_string(), Vec::new()));
+            } else if let Some((key, value)) = line.split_once('=') {
+                if ini.sections.is_empty() { ini.sections.push((String::new(), Vec::new())); }
+                if let Some((_, entries)) = ini.sections.last_mut() {
+                    entries.push((key.trim().to_string(), value.to_string()));
+                }
+            }
+        }
+        ini
+    }
+
+    fn set(&mut self, section: &str, key: &str, value: &str) {
+        let index = match self.sections.iter().position(|(name, _)| name == section) {
+            Some(index) => index,
+            None => {
+                self.sections.push((section.to_string(), Vec::new()));
+                self.sections.len() - 1
+            }
+        };
+        let entries = &mut self.sections[index].1;
+        match entries.iter_mut().find(|(k, _)| k == key) {
+            Some((_, v)) => *v = value.to_string(),
+            None => entries.push((key.to_string(), value.to_string())),
+        }
+    }
+
+    fn render(&self) -> String {
+        let mut out = String::new();
+        for (name, entries) in &self.sections {
+            if name.is_empty() { continue; }
+            out.push('[');
+            out.push_str(name);
+            out.push_str("]\n");
+            for (key, value) in entries {
+                out.push_str(key);
+                out.push('=');
+                out.push_str(value);
+                out.push('\n');
+            }
+            out.push('\n');
+        }
+        out
+    }
+}
+
 const QT_BEGIN: &str = "-- generated by piuma (Qt theme bridge) — do not edit";
 const QT_END: &str = "-- end piuma Qt theme bridge";
 
 fn qt_block() -> String {
-    format!("{QT_BEGIN}\nhl.env(\"GTK_THEME\", \"Piuma\")\nhl.env(\"QT_QPA_PLATFORMTHEME\", \"gtk3\")\n{QT_END}\n")
+    format!(
+        "{QT_BEGIN}\nhl.env(\"GTK_THEME\", \"Piuma\")\nhl.env(\"QT_QPA_PLATFORMTHEME\", \"kde\")\nhl.env(\"QT_STYLE_OVERRIDE\", \"Fusion\")\n{QT_END}\n"
+    )
 }
 
 fn qt_applied(existing: &str, enabled: bool) -> Option<String> {
@@ -691,9 +871,34 @@ mod tests {
     }
 
     #[test]
-    fn qt_block_includes_gtk_theme() {
+    fn qt_block_selects_the_kde_platform_theme() {
         let block = qt_block();
         assert!(block.contains("GTK_THEME"), "GTK_THEME in block: {block}");
-        assert!(block.contains("QT_QPA_PLATFORMTHEME"), "Qt in block: {block}");
+        assert!(block.contains("\"QT_QPA_PLATFORMTHEME\", \"kde\""), "Qt platform theme: {block}");
+        assert!(block.contains("\"QT_STYLE_OVERRIDE\", \"Fusion\""), "palette-driven style: {block}");
+    }
+
+    #[test]
+    fn kdeglobals_patch_maps_the_three_layers_and_drops_on_restore() {
+        let panel = config::default_config().panel;
+        let t = tones(&panel, None);
+        let original = "[General]\nColorScheme=Dracula\n\n[Colors:View]\nBackgroundNormal=40,42,54\nForegroundNormal=248,248,242\n";
+        let patched = patch_kdeglobals(original, &t);
+        assert!(patched.contains("ColorScheme=Piuma"), "scheme switched: {patched}");
+        assert!(patched.contains(&format!("BackgroundNormal={}", triplet(&t.panel_bg))), "window: {patched}");
+        assert!(patched.contains(&format!("BackgroundNormal={}", triplet(&t.section_bg))), "view: {patched}");
+        assert!(patched.contains(&format!("BackgroundNormal={}", triplet(&t.sensor_bg))), "button: {patched}");
+        assert!(!patched.contains("BackgroundNormal=40,42,54"), "old view colour gone: {patched}");
+
+        // A patched file parsed again keeps one copy of every key.
+        let again = patch_kdeglobals(&patched, &t);
+        assert_eq!(again.matches("[Colors:View]").count(), 1, "no duplicate sections");
+        assert_eq!(again.matches("BackgroundNormal").count(), patched.matches("BackgroundNormal").count());
+    }
+
+    #[test]
+    fn triplet_reads_css_hex() {
+        assert_eq!(triplet("#011432"), "1,20,50");
+        assert_eq!(triplet("#d2d7e0"), "210,215,224");
     }
 }

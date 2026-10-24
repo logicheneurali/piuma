@@ -206,13 +206,23 @@ customisation would keep pinning the old colours. Disabling the toggle
 removes the marked block and the theme directory, leaving the rest of
 your files untouched.
 
-When `app_theme` is on, piuma injects `GTK_THEME=Piuma` (and
-`QT_QPA_PLATFORMTHEME=gtk3`) into Hyprland's environment via a marked
-block in `~/.config/hypr/hyprland.lua`, followed by a compositor
-`reload config-only`, so new GTK applications pick the theme up
-automatically. Qt follows via `libqgtk3` on the
-`QT_QPA_PLATFORMTHEME` variable. Qt applications are not themed (that
-would require qt6ct/kvantum); they keep their current style.
+When `app_theme` is on, piuma injects `GTK_THEME=Piuma`,
+`QT_QPA_PLATFORMTHEME=kde` and `QT_STYLE_OVERRIDE=Fusion` into
+Hyprland's environment via a marked block in
+`~/.config/hypr/hyprland.lua`, followed by a compositor
+`reload config-only`, so new applications pick them up automatically.
+Qt apps take their palette from the platform theme: the KDE plugin is
+the one that reads a configurable palette, and the Fusion style is
+needed because Breeze draws its own colours. piuma therefore patches
+the `[Colors:*]` groups of `~/.config/kdeglobals` (windows → panel,
+views → section, buttons/selection → sensor, disabled text dimmed) and
+writes `~/.local/share/color-schemes/Piuma.colors`; the untouched
+`kdeglobals` is kept at `<config dir>/theme/kdeglobals.pre-piuma` and
+put back, with the scheme file removed, when the toggle goes off.
+Applications already running keep their palette until restarted. Qt5
+apps fall back to their own style (no KDE platform-theme plugin for
+Qt5 is installed); Qt6 apps, including the KDE ones, follow the
+palette.
 
 Numeric style fields — `border_width`, `border_width_hover`, `border_radius`
 and `padding` (on sensors, on sections, and on `panel.sensor_defaults` /
