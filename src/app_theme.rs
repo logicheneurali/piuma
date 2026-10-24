@@ -120,6 +120,33 @@ fn strip_block(text: &str) -> String {
     out
 }
 
+/// Restore the user files when the session ends. logind and systemd stop
+/// a session with SIGTERM (a normal `reboot`, `poweroff` or `loginctl`
+/// logout), so the palette does not outlive piuma in a Plasma/GNOME
+/// session. A forced reboot or a crash cannot be caught; the next start
+/// with the toggle off restores the files anyway.
+pub fn install_exit_cleanup(config_path: std::path::PathBuf, panel: config::PanelConfig) {
+    let mut disabled = panel;
+    disabled.app_theme = Some(false);
+    let signals = signal_hook::iterator::Signals::new([
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGINT,
+    ]);
+    let mut signals = match signals {
+        Ok(signals) => signals,
+        Err(err) => {
+            eprintln!("[piuma] exit cleanup disabled: {err}");
+            return;
+        }
+    };
+    std::thread::spawn(move || {
+        if signals.forever().next().is_some() {
+            sync(&config_path, &disabled, None);
+            std::process::exit(0);
+        }
+    });
+}
+
 /// The three palette layers resolved for the theme, in CSS colours.
 struct Tones {
     panel_bg: String,

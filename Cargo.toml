@@ -21,6 +21,8 @@ simple_logger = "5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 dirs = "5.0"
+# Session-exit cleanup: SIGTERM/SIGINT restore the files piuma edits.
+signal-hook = "0.3"
 # System tray (StatusNotifierItem): async D-Bus client/watcher.
 zbus = "5"
 # Freedesktop icon-name → file lookup for tray items.

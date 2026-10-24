@@ -2857,6 +2857,9 @@ fn main() -> Result<(), iced_exwlshell::Error> {
     // (writes/removes only piuma's own file; off = untouched).
     // The palette arrives with PaletteReady below, which resyncs.
     app_theme::sync(&resolved_config_path, &config.panel, None);
+    // Session exit (logind/systemd send SIGTERM) restores the user files,
+    // so the palette does not leak into a Plasma/GNOME session.
+    app_theme::install_exit_cleanup(resolved_config_path.clone(), config.panel.clone());
 
     // Best-effort primary monitor dimensions for screen-wide surface sizing.
     unsafe {

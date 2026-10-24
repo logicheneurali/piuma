@@ -224,6 +224,17 @@ apps fall back to their own style (no KDE platform-theme plugin for
 Qt5 is installed); Qt6 apps, including the KDE ones, follow the
 palette.
 
+Session exit: logind and systemd stop a session with SIGTERM, which
+piuma catches to restore `kdeglobals`, remove the marked block from
+`gtk.css`, remove the Hyprland env block and delete the theme and
+scheme files. A `loginctl` logout and a normal `reboot`/`poweroff` are
+therefore clean: a Plasma or GNOME session started afterwards sees none
+of piuma's colours. A forced reboot, a crash or `kill -9` cannot be
+caught, but the next piuma start with the toggle off restores the files
+anyway. The environment of the running Hyprland session cannot be
+un-set without restarting the compositor, so a GTK app launched there
+after piuma stopped falls back to the default theme (with a warning).
+
 Numeric style fields — `border_width`, `border_width_hover`, `border_radius`
 and `padding` (on sensors, on sections, and on `panel.sensor_defaults` /
 `panel.section_defaults`) use the range `-1..=N`:
