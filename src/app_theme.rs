@@ -259,7 +259,7 @@ fn sync_theme_dir(panel: &config::PanelConfig, pal: Option<&palette::Palette>) {
     for version in ["gtk-3.0", "gtk-4.0"] {
         let file = dir.join(version).join("gtk.css");
         if enabled {
-            write_theme_file(&file, panel, pal);
+            write_theme_file(&file, panel, pal, version);
         } else {
             remove_theme_ours(&file);
         }
@@ -285,8 +285,8 @@ fn ensure_theme_dir(dir: &Path) {
 }
 
 /// Write the theme CSS file, skipping if byte-identical.
-fn write_theme_file(file: &Path, panel: &config::PanelConfig, pal: Option<&palette::Palette>) {
-    let content = render_theme_css(panel, pal);
+fn write_theme_file(file: &Path, panel: &config::PanelConfig, pal: Option<&palette::Palette>, gtk_version: &str) {
+    let content = render_theme_css(panel, pal, gtk_version);
     if let Ok(existing) = std::fs::read_to_string(file) {
         if existing == content {
             return;
@@ -301,13 +301,18 @@ fn write_theme_file(file: &Path, panel: &config::PanelConfig, pal: Option<&palet
 }
 
 /// The GTK theme CSS: base import + palette override + character.
-fn render_theme_css(panel: &config::PanelConfig, pal: Option<&palette::Palette>) -> String {
+fn render_theme_css(panel: &config::PanelConfig, pal: Option<&palette::Palette>, gtk_version: &str) -> String {
     let mut css = String::new();
     css.push_str(HEADER);
     css.push_str("\n\n");
 
-    // Base import: GTK3 uses @import url(), GTK4 too.
-    css.push_str("@import url('/usr/share/themes/adw-gtk3-dark/gtk-3.0/gtk.css');\n\n");
+    // Base import: GTK3 vs GTK4 have different CSS files; using the
+    // wrong one makes GTK4 fall back to defaults (dashed borders, etc.).
+    let base_path: &str = match gtk_version {
+        "gtk-4.0" => "/usr/share/themes/adw-gtk3-dark/gtk-4.0/gtk.css",
+        _ => "/usr/share/themes/adw-gtk3-dark/gtk-3.0/gtk.css",
+    };
+    css.push_str(&format!("@import url('{}');\n\n", base_path));
 
     // Palette overrides (the base defines `piuma_*` names that the
     // bridge rules below consume; GTK resolves them at rule time).
@@ -475,7 +480,7 @@ mod tests {
     #[test]
     fn render_theme_css_derives_bar_style() {
         let panel = config::default_config().panel;
-        let css = render_theme_css(&panel, None);
+        let css = render_theme_css(&panel, None, "gtk-3.0");
         assert!(css.starts_with(HEADER), "ownership header: {css}");
         assert!(css.contains("adw-gtk3-dark"), "base import: {css}");
         assert!(css.contains("Noto Sans"), "font: {css}");
