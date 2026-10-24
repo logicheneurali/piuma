@@ -93,7 +93,7 @@ pub fn sync(config_path: &Path, panel: &config::PanelConfig, pal: Option<&palett
         remove_theme_dir();
     }
     sync_qt(config_path, &tones, enabled);
-    sync_apps(config_path, &tones, enabled);
+    sync_apps(config_path, panel, &tones, enabled);
 }
 
 const CSS_BEGIN: &str = "/* piuma theme begin — generated, do not edit */";
@@ -737,11 +737,11 @@ impl Ini {
 /// Env-selected config dirs, removed when theming is off.
 const APP_CONFIGS: &[&str] = &["kitty", "mpv", "yazi"];
 
-fn sync_apps(config_path: &Path, tones: &Tones, enabled: bool) {
+fn sync_apps(config_path: &Path, panel: &config::PanelConfig, tones: &Tones, enabled: bool) {
     let Some(root) = config_path.parent().map(|dir| dir.join("theme")) else { return };
     if enabled {
         write_app_configs(&root, tones);
-        write_phase2(&root, tones);
+        write_phase2(&root, tones, panel);
     } else {
         for dir in APP_CONFIGS {
             let _ = std::fs::remove_dir_all(root.join(dir));
@@ -846,7 +846,7 @@ inactive = {{ fg = "{dim}", bg = "{bg}" }}
     )
 }
 
-fn write_phase2(root: &Path, t: &Tones) {
+fn write_phase2(root: &Path, t: &Tones, panel: &config::PanelConfig) {
     let Some(config) = dirs::config_dir() else { return };
 
     apply_marked(
@@ -857,7 +857,7 @@ fn write_phase2(root: &Path, t: &Tones) {
         &foot_ini(t),
     );
 
-    write(&root.join("piuma.rasi"), &rofi_rasi(t));
+    write(&root.join("piuma.rasi"), &rofi_rasi(t, panel));
     apply_marked(
         &config.join("rofi").join("config.rasi"),
         true,
@@ -893,22 +893,104 @@ fn foot_ini(t: &Tones) -> String {
     )
 }
 
-fn rofi_rasi(t: &Tones) -> String {
+fn rofi_rasi(t: &Tones, panel: &config::PanelConfig) -> String {
+    let section = panel.section_defaults.as_ref();
+    let sensor = panel.sensor_defaults.as_ref();
+    let num = |value: Option<i32>, fallback: u32| config::style_num(value).unwrap_or(fallback);
+    // Window: the section border/radius; rows: the sensor one. piuma's
+    // border colour is often fully transparent, which rofi renders as no
+    // border — the hover border is what marks the selected row.
+    let radius = num(section.and_then(|d| d.border_radius), 12);
+    let border = num(section.and_then(|d| d.border_width), 1);
+    let border_color = section
+        .and_then(|d| d.border_color.as_deref())
+        .and_then(color)
+        .map(hex_alpha)
+        .unwrap_or_else(|| "transparent".to_string());
+    let row_radius = num(sensor.and_then(|d| d.border_radius), 8);
+    let row_border = num(sensor.and_then(|d| d.border_width), 2);
+    let row_border_color = sensor
+        .and_then(|d| d.border_color_hover.as_deref())
+        .and_then(color)
+        .map(hex_alpha)
+        .unwrap_or_else(|| t.sensor_hover_bg.clone());
+    let pad = num(sensor.and_then(|d| d.padding), 4);
+    let main_pad = pad + 6;
+    let row_v = pad + 2;
+    let row_h = pad + 6;
+
     format!(
         r#"* {{
     background-color: {bg};
     text-color: {fg};
-    border-color: {hover};
+    border-color: {border_color};
 }}
-window {{ background-color: {bg}; border: 1px; border-color: {hover}; }}
-inputbar {{ background-color: {sensor}; text-color: {fg}; }}
-listview {{ background-color: {bg}; }}
-element selected {{ background-color: {hover}; text-color: {hoverfg}; }}
-element urgent {{ text-color: {dim}; }}
+window {{
+    background-color: {bg};
+    border: {border}px;
+    border-color: {border_color};
+    border-radius: {radius}px;
+}}
+mainbox {{
+    spacing: {gap}px;
+    padding: {main_pad}px;
+}}
+inputbar {{
+    background-color: {sensor};
+    color: {fg};
+    border: 0px;
+    border-radius: {row_radius}px;
+    padding: {row_v}px {row_h}px;
+    margin: 0px 0px {gap}px 0px;
+}}
+listview {{
+    background-color: transparent;
+    padding: 0px;
+    border: 0px;
+}}
+element {{
+    background-color: transparent;
+    color: {fg};
+    border: 0px;
+    border-radius: {row_radius}px;
+    padding: {row_v}px {row_h}px;
+}}
+element selected.normal, element selected.active, element selected.urgent {{
+    background-color: {hover};
+    color: {hoverfg};
+    border: {row_border}px;
+    border-color: {row_border_color};
+}}
+element normal.active {{
+    color: {hoverfg};
+}}
 "#,
-        bg = t.panel_bg, fg = t.panel_fg, hover = t.sensor_hover_bg,
-        sensor = t.sensor_bg, hoverfg = t.sensor_hover_fg, dim = t.panel_fg_dim
+        bg = t.panel_bg,
+        fg = t.panel_fg,
+        sensor = t.sensor_bg,
+        hover = t.sensor_hover_bg,
+        hoverfg = t.sensor_hover_fg,
+        border_color = border_color,
+        border = border,
+        radius = radius,
+        row_radius = row_radius,
+        row_border = row_border,
+        row_border_color = row_border_color,
+        main_pad = main_pad,
+        row_v = row_v,
+        row_h = row_h,
+        gap = pad + 4,
     )
+}
+
+/// `#rrggbbaa` when translucent, `#rrggbb` otherwise (rofi's colour syntax).
+fn hex_alpha(c: Color) -> String {
+    let byte = |v: f32| (v * 255.0).round() as u8;
+    if c.a >= 0.999 {
+        format!("#{:02x}{:02x}{:02x}", byte(c.r), byte(c.g), byte(c.b))
+    } else {
+        format!("#{:02x}{:02x}{:02x}{:02x}", byte(c.r), byte(c.g), byte(c.b), byte(c.a))
+    }
 }
 
 fn btop_theme(t: &Tones) -> String {
@@ -1244,7 +1326,11 @@ mod tests {
         assert!(!foot.contains('#'), "foot wants bare hex: {foot}");
         assert!(foot.contains(&format!("background={}", t.panel_bg.trim_start_matches('#'))));
 
-        assert!(rofi_rasi(&t).contains(&format!("background-color: {};", t.panel_bg)));
+        let panel = config::default_config().panel;
+        let rasi = rofi_rasi(&t, &panel);
+        assert!(rasi.contains(&format!("background-color: {};", t.panel_bg)), "rofi bg: {rasi}");
+        assert!(rasi.contains("element selected.normal"), "rofi selection: {rasi}");
+        assert!(rasi.contains("border-radius"), "rofi radius: {rasi}");
         assert!(btop_theme(&t).contains(&format!("theme[main_bg]=\"{}\"", t.panel_bg)));
         assert!(yazi_theme(&t).contains(&format!("bg = \"{}\"", t.panel_bg)));
         assert!(alacritty_colors(&t).contains("[colors.primary]"));
