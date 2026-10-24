@@ -120,10 +120,12 @@ struct Tones {
     panel_fg: String,
     section_bg: String,
     section_fg: String,
+    section_fg_dim: String,
     section_hover_bg: String,
     section_hover_fg: String,
     sensor_bg: String,
     sensor_fg: String,
+    sensor_fg_dim: String,
     sensor_hover_bg: String,
     sensor_hover_fg: String,
 }
@@ -203,10 +205,12 @@ impl Tones {
             panel_fg: css(panel_fg),
             section_bg: css(section_bg),
             section_fg: css(section_fg),
+            section_fg_dim: css(dim(section_fg, section_bg)),
             section_hover_bg: css(section_hover_bg),
             section_hover_fg: css(section_hover_fg),
             sensor_bg: css(sensor_bg),
             sensor_fg: css(sensor_fg),
+            sensor_fg_dim: css(dim(sensor_fg, sensor_bg)),
             sensor_hover_bg: css(sensor_hover_bg),
             sensor_hover_fg: css(sensor_hover_fg),
         }
@@ -221,6 +225,7 @@ impl Tones {
         let (shb, shf) = (&self.section_hover_bg, &self.section_hover_fg);
         let (tb, tf) = (&self.sensor_bg, &self.sensor_fg);
         let (thb, thf) = (&self.sensor_hover_bg, &self.sensor_hover_fg);
+        let (tfd, sfd) = (&self.sensor_fg_dim, &self.section_fg_dim);
 
         format!(
             r#"/* piuma palette — windows */
@@ -320,6 +325,31 @@ window.background.background .sidebar .view:hover {{
   color: {shf};
 }}
 
+/* insensitive / disabled — dimmed text, so a disabled row reads as such
+   and cannot be mistaken for a clickable one */
+window.background.background button:not(.flat):not(.titlebutton):disabled,
+window.background.background menubutton > button:disabled,
+window.background.background splitbutton > button:disabled,
+window.background.background combobox button:disabled,
+window.background.background dropdown button:disabled,
+window.background.background entry:disabled,
+window.background.background spinbutton:disabled,
+popover.menu listview > row:disabled,
+popover.menu row:disabled,
+popover.menu modelbutton:disabled,
+menu menuitem:disabled,
+.context-menu menuitem:disabled {{
+  background-image: none;
+  color: {tfd};
+}}
+window.background.background listview > row:disabled,
+window.background.background list > row:disabled,
+window.background.background .view:disabled,
+window.background.background .sidebar .view:disabled {{
+  background-image: none;
+  color: {sfd};
+}}
+
 /* interactive widgets — sensor palette (Adwaita mixes these from the
    foreground, so the named colours alone cannot reach them) */
 window.background.background button:not(.flat):not(.titlebutton),
@@ -405,6 +435,11 @@ fn solid(c: Color, behind: Color) -> Color {
         b: c.b * c.a + behind.b * (1.0 - c.a),
         a: 1.0,
     }
+}
+
+/// A dimmed (insensitive) tone: half the text tone over its surface.
+fn dim(fg: Color, bg: Color) -> Color {
+    solid(Color { a: 0.5, ..fg }, bg)
 }
 
 /// Materialise the theme: copy the Adwaita schema for both GTK versions,
@@ -590,6 +625,17 @@ mod tests {
         assert!(css.contains(&format!("@define-color accent_bg_color {};", t.sensor_hover_bg)));
         assert!(css.contains("button:not(.flat)"));
         assert!(css.contains("popover.menu listview > row:hover"));
+    }
+
+    #[test]
+    fn disabled_text_is_dimmed() {
+        let panel = config::default_config().panel;
+        let t = tones(&panel, None);
+        assert_ne!(t.sensor_fg_dim, t.sensor_fg, "disabled interactive text must differ");
+        assert_ne!(t.section_fg_dim, t.section_fg, "disabled container text must differ");
+        let css = t.css();
+        assert!(css.contains("menuitem:disabled"), "menu disabled rule: {css}");
+        assert!(css.contains("row:disabled"), "row disabled rule: {css}");
     }
 
     #[test]
