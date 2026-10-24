@@ -200,13 +200,23 @@ removed when the toggle goes off; piuma never edits your `gtk.css`,
 `@import url("file:///home/you/.config/piuma/theme/gtk.css");` at the
 top of your `~/.config/gtk-3.0/gtk.css` (and `gtk-4.0/gtk.css`).
 
+piuma also writes a real GTK theme directory at
+`~/.local/share/themes/Piuma` (dark: `adw-gtk3-dark` base + piuma
+palette, plus `gtk-3.0/gtk.css` and `gtk-4.0/gtk.css`). When
+`app_theme` is on, piuma injects `GTK_THEME=Piuma` (and
+`QT_QPA_PLATFORMTHEME=gtk3`) into Hyprland's environment via a marked
+block in `~/.config/hypr/hyprland.lua`, followed by a compositor
+`reload config-only`. GTK applications that respect `GTK_THEME` pick
+up the Piuma theme automatically — no `@import` needed. Qt follows
+via `libqgtk3` on the `QT_QPA_PLATFORMTHEME` variable.
+
 Coexistence: the bridge declares its own `@piuma_bg` / `@piuma_fg` /
 `@piuma_border` names and joins your cascade additively, so an existing
 customisation — a KDE/Breeze setup, or a hand-made palette like
 `window_bg_color` — keeps winning wherever it sets the same property;
 the bridge only fills the gaps. To let piuma win on a property, point
 your own rule at it (`@define-color window_bg_color @piuma_bg;`).
-Disabling the toggle removes only piuma's generated file. Qt
+Disabling the toggle removes only piuma's generated files. Qt
 applications are not themed (that would require qt6ct/kvantum); they
 keep their current style. The effect is best-effort — it follows each
 app's CSS cascade.
