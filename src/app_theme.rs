@@ -188,7 +188,11 @@ impl Tones {
     /// palette (keeping the configured transparency) > configured
     /// default > the next coarser layer.
     fn resolve(panel: &config::PanelConfig, pal: Option<&palette::Palette>) -> Self {
-        let panel_bg = crate::styles::panel_bg(panel, pal);
+        // The bar may be translucent over the wallpaper; an application
+        // theme cannot be (nothing predictable behind it), so the panel
+        // tone is always generated opaque.
+        let mut panel_bg = crate::styles::panel_bg(panel, pal);
+        panel_bg.a = 1.0;
         let panel_fg = crate::styles::default_text(panel, pal);
         let section = panel.section_defaults.as_ref();
         let sensor = panel.sensor_defaults.as_ref();
@@ -1263,11 +1267,22 @@ mod tests {
     }
 
     #[test]
-    fn css_emits_alpha_as_rgba() {
+    fn panel_background_is_always_opaque() {
         let mut panel = config::default_config().panel;
         panel.default_bg_color = Some("#10203080".to_string());
+        panel.section_defaults = Some(config::SectionDefaults {
+            bg_color: Some("#20304040".to_string()),
+            text_color: None,
+            border_color: None,
+            border_width: None,
+            border_radius: None,
+            border_type: None,
+            respect_screen_edges: None,
+        });
         let t = tones(&panel, None);
-        assert!(t.css().contains("rgba(16, 32, 48, 0.502)"), "alpha kept: {}", t.css());
+        assert_eq!(t.panel_bg, "#102030", "panel alpha forced opaque: {}", t.panel_bg);
+        assert!(t.section_bg.starts_with('#'), "section flattened: {}", t.section_bg);
+        assert!(!t.css().contains("rgba"), "no translucent tone in the css: {}", t.css());
     }
 
     #[test]
