@@ -235,6 +235,27 @@ anyway. The environment of the running Hyprland session cannot be
 un-set without restarting the compositor, so a GTK app launched there
 after piuma stopped falls back to the default theme (with a warning).
 
+Other applications. Two mechanisms, both reverted on exit:
+
+- **Environment-selected config dirs** — piuma writes a directory under
+  `<config dir>/theme/` and points the app at it, leaving the user's
+  files untouched: `KITTY_CONFIG_DIRECTORY` (our `kitty.conf` includes
+  yours, then sets colours), `MPV_HOME` (`mpv.conf` includes yours,
+  `script-opts/osc.conf` carries the OSC palette; `scripts`, `fonts`,
+  `input.conf` and `watch_later` are symlinked), `YAZI_CONFIG_HOME`
+  (`theme.toml` generated, your `yazi.toml`/`keymap.toml`/`vfs.toml`
+  symlinked).
+- **Marked includes in your files** — reverted from the same markers:
+  foot (`[colors-dark]` block; foot 1.28 has no top-level include at
+  the end), rofi (`@theme` line), btop (`color_theme = "piuma"` with a
+  generated theme file and the previous name restored), alacritty (the
+  palette file is added to `[general] import`; the original line is
+  kept and put back).
+
+Background, foreground, selection, cursor and accent come from the
+three layers; ANSI colours and syntax highlighting are deliberately
+left alone so command output and code stay readable.
+
 Numeric style fields — `border_width`, `border_width_hover`, `border_radius`
 and `padding` (on sensors, on sections, and on `panel.sensor_defaults` /
 `panel.section_defaults`) use the range `-1..=N`:

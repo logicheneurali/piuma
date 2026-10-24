@@ -26,6 +26,13 @@
 //! patched to the piuma palette while the toggle is on and restored from
 //! a backup when it goes off. The env block lives in Hyprland's config
 //! and is reloaded by the compositor, so newly launched apps pick it up.
+//!
+//! Other apps: kitty, mpv and yazi get a config directory selected by an
+//! environment variable (`KITTY_CONFIG_DIRECTORY`, `MPV_HOME`,
+//! `YAZI_CONFIG_HOME`) that includes or symlinks the user's own config;
+//! foot, rofi, btop and alacritty get a marked include in their user file
+//! (or a generated theme file plus the previous value saved). Everything
+//! is generated under `<config dir>/theme` and reverted on exit.
 
 use std::path::Path;
 
@@ -70,7 +77,13 @@ pub fn sync(config_path: &Path, panel: &config::PanelConfig, pal: Option<&palett
     let block = tones.css();
     for version in ["gtk-3.0", "gtk-4.0"] {
         if let Some(dir) = dirs::config_dir() {
-            apply_block(&dir.join(version).join("gtk.css"), enabled.then_some(block.as_str()));
+            apply_marked(
+                &dir.join(version).join("gtk.css"),
+                enabled,
+                CSS_BEGIN,
+                CSS_END,
+                &block,
+            );
         }
     }
 
@@ -80,38 +93,43 @@ pub fn sync(config_path: &Path, panel: &config::PanelConfig, pal: Option<&palett
         remove_theme_dir();
     }
     sync_qt(config_path, &tones, enabled);
+    sync_apps(config_path, &tones, enabled);
 }
 
 const CSS_BEGIN: &str = "/* piuma theme begin — generated, do not edit */";
 const CSS_END: &str = "/* piuma theme end */";
+const INI_BEGIN: &str = "# piuma theme begin — generated, do not edit";
+const INI_END: &str = "# piuma theme end";
+const RASI_BEGIN: &str = "/* piuma theme begin — generated, do not edit */";
+const RASI_END: &str = "/* piuma theme end */";
 
-/// Append (or strip) the marked palette block at the END of a stylesheet:
-/// last declaration wins in GTK's cascade, and the markers make the block
+/// Append (or strip) a marked block at the END of a text file: last
+/// declaration wins in GTK's cascade, and the markers make the block
 /// removable without touching the user's own rules.
-fn apply_block(file: &Path, block: Option<&str>) {
+fn apply_marked(file: &Path, enabled: bool, begin: &str, end: &str, body: &str) {
     let existing = std::fs::read_to_string(file).unwrap_or_default();
-    let Some(block) = block else {
+    let base = strip_block(&existing, begin, end);
+    if !enabled {
         if existing.is_empty() { return; }
-        write(file, &strip_block(&existing));
+        write(file, &base);
         return;
-    };
-    let base = strip_block(&existing);
+    }
     let prefix = if base.trim().is_empty() {
         String::new()
     } else {
         format!("{}\n", base.trim_end())
     };
-    write(file, &format!("{prefix}{CSS_BEGIN}\n{block}{CSS_END}\n"));
+    write(file, &format!("{prefix}{begin}\n{body}{end}\n"));
 }
 
 /// Drop the piuma block, keeping every line the user wrote.
-fn strip_block(text: &str) -> String {
+fn strip_block(text: &str, begin: &str, end: &str) -> String {
     let mut out = String::new();
     let mut skipping = false;
     for line in text.lines() {
-        if line.trim() == CSS_BEGIN { skipping = true; continue; }
+        if line.trim() == begin { skipping = true; continue; }
         if skipping {
-            if line.trim() == CSS_END { skipping = false; }
+            if line.trim() == end { skipping = false; }
             continue;
         }
         out.push_str(line);
@@ -148,6 +166,7 @@ pub fn install_exit_cleanup(config_path: std::path::PathBuf, panel: config::Pane
 }
 
 /// The three palette layers resolved for the theme, in CSS colours.
+#[derive(Default)]
 struct Tones {
     panel_bg: String,
     panel_fg: String,
@@ -529,16 +548,18 @@ fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// groups of `kdeglobals`, which are patched while the toggle is on and
 /// restored from a backup when it goes off.
 fn sync_qt(config_path: &Path, tones: &Tones, enabled: bool) {
-    sync_hypr_env(enabled);
+    let theme_root = config_path.parent().map(|dir| dir.join("theme"));
+    sync_hypr_env(enabled, theme_root.as_deref());
     sync_kde(config_path, tones, enabled);
 }
 
-fn sync_hypr_env(enabled: bool) {
+fn sync_hypr_env(enabled: bool, theme_root: Option<&Path>) {
     let Some(dir) = dirs::config_dir() else { return; };
     let file = dir.join("hypr").join("hyprland.lua");
     if !file.exists() { return; }
     let Ok(existing) = std::fs::read_to_string(&file) else { return; };
-    let Some(updated) = qt_applied(&existing, enabled) else { return; };
+    let block = enabled.then(|| env_block(theme_root));
+    let Some(updated) = env_applied(&existing, block.as_deref()) else { return; };
     if let Err(err) = std::fs::write(&file, &updated) {
         eprintln!("[piuma] Qt theme bridge: cannot write {}: {err}", file.display());
         return;
@@ -706,17 +727,328 @@ impl Ini {
     }
 }
 
-const QT_BEGIN: &str = "-- generated by piuma (Qt theme bridge) — do not edit";
-const QT_END: &str = "-- end piuma Qt theme bridge";
+// ---- other applications ------------------------------------------------
+// Phase 1: config dirs selected by an environment variable (kitty, mpv,
+// yazi) — piuma writes a directory under its own config and points the
+// app at it, so nothing of the user's is touched.
+// Phase 2: no env hook (foot, rofi, btop, alacritty) — a marked include
+// in the user's file, stripped again when the toggle goes off.
 
-fn qt_block() -> String {
+/// Env-selected config dirs, removed when theming is off.
+const APP_CONFIGS: &[&str] = &["kitty", "mpv", "yazi"];
+
+fn sync_apps(config_path: &Path, tones: &Tones, enabled: bool) {
+    let Some(root) = config_path.parent().map(|dir| dir.join("theme")) else { return };
+    if enabled {
+        write_app_configs(&root, tones);
+        write_phase2(&root, tones);
+    } else {
+        for dir in APP_CONFIGS {
+            let _ = std::fs::remove_dir_all(root.join(dir));
+        }
+        remove_phase2(&root);
+    }
+}
+
+fn write_app_configs(root: &Path, t: &Tones) {
+    let config = dirs::config_dir();
+    write(&root.join("kitty").join("kitty.conf"), &kitty_conf(config.as_deref(), t));
+    write(&root.join("mpv").join("mpv.conf"), &mpv_conf(config.as_deref()));
+    write(&root.join("mpv").join("script-opts").join("osc.conf"), &osc_conf(t));
+    write(&root.join("yazi").join("theme.toml"), &yazi_theme(t));
+    if let Some(config) = config.as_deref() {
+        // Yazi reads its config files from the same directory.
+        for name in ["yazi.toml", "keymap.toml", "vfs.toml"] {
+            symlink_if_exists(&config.join("yazi").join(name), &root.join("yazi").join(name));
+        }
+        // Keep the user's scripts and fonts when MPV_HOME is redirected;
+        // script-opts is ours (the OSC palette).
+        for name in ["scripts", "fonts", "input.conf", "watch_later"] {
+            symlink_if_exists(&config.join("mpv").join(name), &root.join("mpv").join(name));
+        }
+    }
+}
+
+fn symlink_if_exists(src: &Path, dst: &Path) {
+    if !src.exists() || dst.exists() { return; }
+    if let Some(dir) = dst.parent() { let _ = std::fs::create_dir_all(dir); }
+    let _ = std::os::unix::fs::symlink(src, dst);
+}
+
+/// kitty: our file includes the user's, then overrides the colours.
+fn kitty_conf(config: Option<&Path>, t: &Tones) -> String {
+    let mut out = String::new();
+    if let Some(user) = config.map(|dir| dir.join("kitty").join("kitty.conf")) {
+        if user.exists() {
+            out.push_str(&format!("include {}\n", user.display()));
+        }
+    }
+    out.push_str(&format!(
+        "background {}\n\
+         foreground {}\n\
+         selection_background {}\n\
+         selection_foreground {}\n\
+         cursor {}\n\
+         cursor_text_color {}\n\
+         active_tab_background {}\n\
+         active_tab_foreground {}\n\
+         inactive_tab_background {}\n\
+         inactive_tab_foreground {}\n\
+         tab_bar_background {}\n",
+        t.panel_bg, t.panel_fg, t.sensor_hover_bg, t.sensor_hover_fg,
+        t.sensor_hover_bg, t.panel_bg, t.sensor_bg, t.sensor_fg,
+        t.panel_bg, t.panel_fg_dim, t.panel_bg
+    ));
+    out
+}
+
+/// mpv: our config includes the user's; the OSC colours live in
+/// script-opts/osc.conf (ours, inside the redirected MPV_HOME).
+fn mpv_conf(config: Option<&Path>) -> String {
+    let mut out = String::from("# generated by piuma — do not edit\n");
+    if let Some(user) = config.map(|dir| dir.join("mpv").join("mpv.conf")) {
+        if user.exists() {
+            out.push_str(&format!("include={}\n", user.display()));
+        }
+    }
+    out
+}
+
+fn osc_conf(t: &Tones) -> String {
     format!(
-        "{QT_BEGIN}\nhl.env(\"GTK_THEME\", \"Piuma\")\nhl.env(\"QT_QPA_PLATFORMTHEME\", \"kde\")\nhl.env(\"QT_STYLE_OVERRIDE\", \"Fusion\")\n{QT_END}\n"
+        "fg_color={}\nbg_color={}\ntooltip_border_color={}\nseekbarfg_color={}\nseekbarbg_color={}\n",
+        t.panel_fg, t.panel_bg, t.sensor_hover_bg, t.sensor_hover_bg, t.sensor_bg
     )
 }
 
-fn qt_applied(existing: &str, enabled: bool) -> Option<String> {
-    if !enabled && !existing.contains(QT_BEGIN) { return None; }
+fn yazi_theme(t: &Tones) -> String {
+    format!(
+        r#"[app]
+overall = {{ bg = "{bg}" }}
+
+[mgr]
+cwd = {{ fg = "{hover}", bold = true }}
+border_style = {{ fg = "{sensor}" }}
+
+[status]
+overall = {{ fg = "{fg}", bg = "{sensor}" }}
+
+[mode]
+normal_main = {{ fg = "{bgon}", bg = "{hover}", bold = true }}
+normal_alt = {{ fg = "{fg}", bg = "{sensor}" }}
+
+[tabs]
+active = {{ fg = "{fg}", bg = "{sensor}", bold = true }}
+inactive = {{ fg = "{dim}", bg = "{bg}" }}
+"#,
+        bg = t.panel_bg, fg = t.panel_fg, hover = t.sensor_hover_bg,
+        sensor = t.sensor_bg, bgon = t.panel_bg, dim = t.panel_fg_dim
+    )
+}
+
+fn write_phase2(root: &Path, t: &Tones) {
+    let Some(config) = dirs::config_dir() else { return };
+
+    apply_marked(
+        &config.join("foot").join("foot.ini"),
+        true,
+        INI_BEGIN,
+        INI_END,
+        &foot_ini(t),
+    );
+
+    write(&root.join("piuma.rasi"), &rofi_rasi(t));
+    apply_marked(
+        &config.join("rofi").join("config.rasi"),
+        true,
+        RASI_BEGIN,
+        RASI_END,
+        &format!("@theme \"{}\"\n", root.join("piuma.rasi").display()),
+    );
+
+    apply_btop(root, t, true);
+    apply_alacritty(root, t, true);
+}
+
+fn remove_phase2(root: &Path) {
+    if let Some(config) = dirs::config_dir() {
+        apply_marked(&config.join("foot").join("foot.ini"), false, INI_BEGIN, INI_END, "");
+        apply_marked(&config.join("rofi").join("config.rasi"), false, RASI_BEGIN, RASI_END, "");
+    }
+    apply_btop(root, &Tones::default(), false);
+    apply_alacritty(root, &Tones::default(), false);
+    for name in ["piuma.rasi", "alacritty.toml"] {
+        let _ = std::fs::remove_file(root.join(name));
+    }
+}
+
+/// foot 1.28 takes `[colors-dark]`; a second section later in the file
+/// overrides the user's keys, and `include` would be top-level only.
+fn foot_ini(t: &Tones) -> String {
+    let hex = |c: &str| c.trim_start_matches('#').to_string();
+    format!(
+        "[colors-dark]\nbackground={}\nforeground={}\nselection-background={}\nselection-foreground={}\ncursor={} {}\n",
+        hex(&t.panel_bg), hex(&t.panel_fg), hex(&t.sensor_hover_bg),
+        hex(&t.sensor_hover_fg), hex(&t.panel_bg), hex(&t.sensor_hover_bg)
+    )
+}
+
+fn rofi_rasi(t: &Tones) -> String {
+    format!(
+        r#"* {{
+    background-color: {bg};
+    text-color: {fg};
+    border-color: {hover};
+}}
+window {{ background-color: {bg}; border: 1px; border-color: {hover}; }}
+inputbar {{ background-color: {sensor}; text-color: {fg}; }}
+listview {{ background-color: {bg}; }}
+element selected {{ background-color: {hover}; text-color: {hoverfg}; }}
+element urgent {{ text-color: {dim}; }}
+"#,
+        bg = t.panel_bg, fg = t.panel_fg, hover = t.sensor_hover_bg,
+        sensor = t.sensor_bg, hoverfg = t.sensor_hover_fg, dim = t.panel_fg_dim
+    )
+}
+
+fn btop_theme(t: &Tones) -> String {
+    let keys: &[(&str, &str)] = &[
+        ("main_bg", &t.panel_bg), ("main_fg", &t.panel_fg), ("title", &t.panel_fg),
+        ("hi_fg", &t.sensor_hover_bg), ("selected_bg", &t.sensor_bg),
+        ("selected_fg", &t.sensor_fg), ("inactive_fg", &t.panel_fg_dim),
+        ("proc_misc", &t.sensor_fg), ("cpu_box", &t.sensor_hover_bg),
+        ("mem_box", &t.sensor_hover_bg), ("net_box", &t.sensor_hover_bg),
+        ("proc_box", &t.sensor_hover_bg), ("div_line", &t.sensor_hover_bg),
+        ("temp_start", &t.section_fg), ("temp_mid", &t.sensor_fg), ("temp_end", &t.sensor_hover_fg),
+        ("cpu_start", &t.section_fg), ("cpu_mid", &t.sensor_fg), ("cpu_end", &t.sensor_hover_fg),
+        ("free_start", &t.section_fg), ("free_mid", &t.sensor_fg), ("free_end", &t.sensor_hover_fg),
+        ("cached_start", &t.section_fg), ("cached_mid", &t.sensor_fg), ("cached_end", &t.sensor_hover_fg),
+        ("available_start", &t.section_fg), ("available_mid", &t.sensor_fg), ("available_end", &t.sensor_hover_fg),
+        ("used_start", &t.section_fg), ("used_mid", &t.sensor_fg), ("used_end", &t.sensor_hover_fg),
+        ("download_start", &t.section_fg), ("download_mid", &t.sensor_fg), ("download_end", &t.sensor_hover_fg),
+        ("upload_start", &t.section_fg), ("upload_mid", &t.sensor_fg), ("upload_end", &t.sensor_hover_fg),
+        ("process_start", &t.section_fg), ("process_mid", &t.sensor_fg), ("process_end", &t.sensor_hover_fg),
+    ];
+    let mut out = String::from("# generated by piuma — do not edit\n");
+    for (key, value) in keys {
+        out.push_str(&format!("theme[{key}]=\"{value}\"\n"));
+    }
+    out
+}
+
+fn alacritty_colors(t: &Tones) -> String {
+    format!(
+        "[colors.primary]\nbackground = \"{}\"\nforeground = \"{}\"\n\n[colors.cursor]\ntext = \"{}\"\ncursor = \"{}\"\n\n[colors.selection]\ntext = \"{}\"\nbackground = \"{}\"\n",
+        t.panel_bg, t.panel_fg, t.panel_bg, t.sensor_hover_bg,
+        t.sensor_hover_fg, t.sensor_hover_bg
+    )
+}
+
+/// btop: a theme file in the user's themes dir plus the `color_theme`
+/// line rewritten in place; the previous name is kept for the restore.
+fn apply_btop(root: &Path, t: &Tones, enabled: bool) {
+    let Some(config) = dirs::config_dir() else { return };
+    let conf = config.join("btop").join("btop.conf");
+    let theme = config.join("btop").join("themes").join("piuma.theme");
+    let state = root.join("btop.theme.previous");
+    if enabled {
+        write(&theme, &btop_theme(t));
+        let Ok(text) = std::fs::read_to_string(&conf) else { return };
+        if !state.exists() {
+            if let Some(line) = text.lines().find(|l| l.trim_start().starts_with("color_theme")) {
+                if let Some(value) = line.split_once('=') {
+                    write(&state, value.1.trim().trim_matches('"'));
+                }
+            }
+        }
+        rewrite_line(&conf, &text, "color_theme", "color_theme = \"piuma\"");
+    } else {
+        let _ = std::fs::remove_file(&theme);
+        let Ok(previous) = std::fs::read_to_string(&state) else { return };
+        if let Ok(text) = std::fs::read_to_string(&conf) {
+            rewrite_line(&conf, &text, "color_theme", &format!("color_theme = \"{}\"", previous.trim()));
+        }
+        let _ = std::fs::remove_file(&state);
+    }
+}
+
+/// alacritty: colours in an imported file, our path added to the
+/// `[general] import` array; the original line is kept for the restore.
+fn apply_alacritty(root: &Path, t: &Tones, enabled: bool) {
+    let Some(config) = dirs::config_dir() else { return };
+    let conf = config.join("alacritty").join("alacritty.toml");
+    let colors = root.join("alacritty.toml");
+    let state = root.join("alacritty.import.previous");
+    let marker = colors.display().to_string();
+    if enabled {
+        write(&colors, &alacritty_colors(t));
+        let Ok(text) = std::fs::read_to_string(&conf) else { return };
+        if text.contains(&marker) { return; }
+        let Some((index, line)) = text
+            .lines()
+            .enumerate()
+            .find(|(_, l)| { let l = l.trim(); l.starts_with("import") && l.contains('[') && l.contains(']') })
+        else {
+            eprintln!("[piuma] alacritty: no single-line import array, colours not applied");
+            return;
+        };
+        write(&state, line);
+        let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+        let head = lines[index].trim_end().trim_end_matches(']').trim_end();
+        lines[index] = format!("{head}, \"{marker}\"]");
+        write(&conf, &format!("{}\n", lines.join("\n")));
+    } else {
+        let _ = std::fs::remove_file(&colors);
+        let Ok(previous) = std::fs::read_to_string(&state) else { return };
+        if let Ok(text) = std::fs::read_to_string(&conf) {
+            let lines: Vec<String> = text
+                .lines()
+                .map(|l| if l.contains(&marker) { previous.clone() } else { l.to_string() })
+                .collect();
+            write(&conf, &format!("{}\n", lines.join("\n")));
+        }
+        let _ = std::fs::remove_file(&state);
+    }
+}
+
+/// Rewrite the first line whose key matches, keeping the rest untouched.
+fn rewrite_line(file: &Path, text: &str, key: &str, value: &str) {
+    let lines: Vec<String> = text
+        .lines()
+        .map(|l| if l.trim_start().starts_with(key) { value.to_string() } else { l.to_string() })
+        .collect();
+    write(file, &format!("{}\n", lines.join("\n")));
+}
+
+const QT_BEGIN: &str = "-- generated by piuma (Qt theme bridge) — do not edit";
+const QT_END: &str = "-- end piuma Qt theme bridge";
+
+/// The Hyprland env block: GTK theme, Qt platform theme and the config
+/// dirs of the apps that read a palette from an environment variable.
+fn env_block(theme_root: Option<&Path>) -> String {
+    let mut out = format!("{QT_BEGIN}\n");
+    out.push_str("hl.env(\"GTK_THEME\", \"Piuma\")\n");
+    out.push_str("hl.env(\"QT_QPA_PLATFORMTHEME\", \"kde\")\n");
+    out.push_str("hl.env(\"QT_STYLE_OVERRIDE\", \"Fusion\")\n");
+    if let Some(root) = theme_root {
+        for (var, dir) in [
+            ("KITTY_CONFIG_DIRECTORY", "kitty"),
+            ("MPV_HOME", "mpv"),
+            ("YAZI_CONFIG_HOME", "yazi"),
+        ] {
+            out.push_str(&format!(
+                "hl.env(\"{var}\", \"{}\")\n",
+                root.join(dir).display()
+            ));
+        }
+    }
+    out.push_str(QT_END);
+    out.push('\n');
+    out
+}
+
+fn env_applied(existing: &str, block: Option<&str>) -> Option<String> {
+    if block.is_none() && !existing.contains(QT_BEGIN) { return None; }
     let base: String = {
         let mut out = String::new();
         let mut skipping = false;
@@ -731,7 +1063,10 @@ fn qt_applied(existing: &str, enabled: bool) -> Option<String> {
         }
         out
     };
-    let target = if enabled { format!("{base}{}", qt_block()) } else { base };
+    let target = match block {
+        Some(block) => format!("{base}{block}"),
+        None => base,
+    };
     (target != existing).then_some(target)
 }
 
@@ -860,17 +1195,17 @@ mod tests {
         let file = dir.join("gtk.css");
         std::fs::write(&file, "@define-color window_bg_color #131317;\n").expect("user css");
 
-        apply_block(&file, Some("@define-color window_bg_color #011432;\n"));
+        apply_marked(&file, true, CSS_BEGIN, CSS_END, "@define-color window_bg_color #011432;\n");
         let css = std::fs::read_to_string(&file).unwrap();
         assert!(css.starts_with("@define-color window_bg_color #131317;"), "user rules kept: {css}");
         assert!(css.contains(CSS_BEGIN) && css.contains(CSS_END), "markers: {css}");
         assert!(css.trim_end().ends_with(CSS_END), "block appended last: {css}");
 
-        apply_block(&file, Some("@define-color window_bg_color #011432;\n"));
+        apply_marked(&file, true, CSS_BEGIN, CSS_END, "@define-color window_bg_color #011432;\n");
         let once = std::fs::read_to_string(&file).unwrap();
         assert_eq!(once.matches(CSS_BEGIN).count(), 1, "idempotent: {once}");
 
-        apply_block(&file, None);
+        apply_marked(&file, false, CSS_BEGIN, CSS_END, "");
         assert_eq!(
             std::fs::read_to_string(&file).unwrap(),
             "@define-color window_bg_color #131317;\n",
@@ -898,8 +1233,67 @@ mod tests {
     }
 
     #[test]
-    fn qt_block_selects_the_kde_platform_theme() {
-        let block = qt_block();
+    fn app_generators_carry_the_palette() {
+        let t = tones(&config::default_config().panel, None);
+        let kitty = kitty_conf(None, &t);
+        assert!(kitty.contains(&format!("background {}", t.panel_bg)), "kitty bg: {kitty}");
+        assert!(kitty.contains(&format!("cursor {}", t.sensor_hover_bg)), "kitty cursor: {kitty}");
+
+        let foot = foot_ini(&t);
+        assert!(foot.starts_with("[colors-dark]"), "foot section: {foot}");
+        assert!(!foot.contains('#'), "foot wants bare hex: {foot}");
+        assert!(foot.contains(&format!("background={}", t.panel_bg.trim_start_matches('#'))));
+
+        assert!(rofi_rasi(&t).contains(&format!("background-color: {};", t.panel_bg)));
+        assert!(btop_theme(&t).contains(&format!("theme[main_bg]=\"{}\"", t.panel_bg)));
+        assert!(yazi_theme(&t).contains(&format!("bg = \"{}\"", t.panel_bg)));
+        assert!(alacritty_colors(&t).contains("[colors.primary]"));
+        assert!(osc_conf(&t).contains(&format!("bg_color={}", t.panel_bg)));
+    }
+
+    #[test]
+    fn env_block_points_the_apps_at_piuma_dirs() {
+        let block = env_block(Some(Path::new("/tmp/piuma/theme")));
+        for var in ["KITTY_CONFIG_DIRECTORY", "MPV_HOME", "YAZI_CONFIG_HOME"] {
+            assert!(block.contains(var), "{var} in {block}");
+        }
+        assert!(block.contains("/tmp/piuma/theme/kitty"), "kitty dir: {block}");
+    }
+
+    #[test]
+    fn ini_include_is_appended_and_stripped() {
+        let dir = std::env::temp_dir().join(format!("piuma-ini-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file = dir.join("foot.ini");
+        std::fs::write(&file, "shell=fish\n").expect("user ini");
+
+        apply_marked(&file, true, INI_BEGIN, INI_END, "include=/tmp/piuma/foot.ini\n");
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.starts_with("shell=fish\n"), "user line kept: {text}");
+        assert!(text.contains("include=/tmp/piuma/foot.ini"), "include added: {text}");
+
+        apply_marked(&file, false, INI_BEGIN, INI_END, "");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "shell=fish\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rewrite_line_changes_only_the_key() {
+        let dir = std::env::temp_dir().join(format!("piuma-kv-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file = dir.join("btop.conf");
+        let text = "theme_background = True\ncolor_theme = \"noctalia\"\nother = 1\n";
+        rewrite_line(&file, text, "color_theme", "color_theme = \"piuma\"");
+        let out = std::fs::read_to_string(&file).unwrap();
+        assert!(out.contains("color_theme = \"piuma\""), "key rewritten: {out}");
+        assert!(out.contains("theme_background = True"), "other keys kept: {out}");
+        assert!(out.contains("other = 1"), "trailing keys kept: {out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn env_block_selects_the_kde_platform_theme() {
+        let block = env_block(None);
         assert!(block.contains("GTK_THEME"), "GTK_THEME in block: {block}");
         assert!(block.contains("\"QT_QPA_PLATFORMTHEME\", \"kde\""), "Qt platform theme: {block}");
         assert!(block.contains("\"QT_STYLE_OVERRIDE\", \"Fusion\""), "palette-driven style: {block}");
