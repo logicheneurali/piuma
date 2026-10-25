@@ -861,13 +861,15 @@ fn write_phase2(root: &Path, t: &Tones, panel: &config::PanelConfig) {
         &foot_ini(t),
     );
 
-    write(&root.join("piuma.rasi"), &rofi_rasi(t, panel));
+    // Inline, not `@theme`: a second top-level @theme in config.rasi drops
+    // the structural properties of the user's theme (children, lines,
+    // content), which made rofi repeat the prompt in every row.
     apply_marked(
         &config.join("rofi").join("config.rasi"),
         true,
         RASI_BEGIN,
         RASI_END,
-        &format!("@theme \"{}\"\n", root.join("piuma.rasi").display()),
+        &rofi_rasi(t, panel),
     );
 
     apply_btop(root, t, true);
@@ -902,13 +904,14 @@ fn rofi_rasi(t: &Tones, panel: &config::PanelConfig) -> String {
     let sensor = panel.sensor_defaults.as_ref();
     let num = |value: Option<i32>, fallback: u32| config::style_num(value).unwrap_or(fallback);
     // Same character as the bar: family, size and weight from `panel`.
+    // The bar's 10px is unreadable in a launcher window, so floor it.
     let family = panel
         .font
         .as_deref()
         .filter(|f| !f.is_empty())
         .unwrap_or(crate::DEFAULT_FONT)
         .replace('"', "");
-    let size = panel.font_size.unwrap_or(crate::DEFAULT_FONT_SIZE);
+    let size = panel.font_size.unwrap_or(crate::DEFAULT_FONT_SIZE).max(12);
     let weight = if panel.bold.unwrap_or(false) { " Bold" } else { "" };
     let font = format!("{family}{weight} {size}px");
     // Window: the section border/radius; rows: the sensor one. piuma's
@@ -1372,18 +1375,18 @@ mod tests {
 
     #[test]
     fn rofi_does_not_paint_inner_widgets() {
-        let panel = config::default_config().panel;
+        let mut panel = config::default_config().panel;
+        panel.font_size = Some(10);
         let t = tones(&panel, None);
         let rasi = rofi_rasi(&t, &panel);
         // A global background on `*` would paint the input and the row
         // text zones over the inputbar/selection (two backgrounds).
         assert!(rasi.starts_with("* {\n    font:"), "no global background: {rasi}");
         let family = panel.font.clone().unwrap_or_default();
-        let size = panel.font_size.unwrap_or(0);
         let weight = if panel.bold.unwrap_or(false) { " Bold" } else { "" };
         assert!(
-            rasi.contains(&format!("font: \"{family}{weight} {size}px\";")),
-            "panel font: {rasi}"
+            rasi.contains(&format!("font: \"{family}{weight} 12px\";")),
+            "panel font floored at 12px: {rasi}"
         );
         assert!(
             rasi.contains("entry, prompt, case-indicator, element-text, element-icon, scrollbar {\n    background-color: transparent;"),
