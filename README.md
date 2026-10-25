@@ -454,19 +454,23 @@ no value at all — and the **first click creates it** with the current
 arrangement.
 
 A **click saves** the visible windows of the workspace you are on.
-Layouts are **named automatically**: the JSON encoding of the windows'
-(class, title) pairs sorted alphabetically — the same window set always
+Layouts are **named automatically** from their (class, workspace) pairs
+sorted alphabetically — titles are left out because a terminal follows
+its directory and a browser its tab. The same window set always
 produces the same name, so saving again replaces that layout instead of
-duplicating it, whatever the titles contain.
+duplicating it; a re-save also folds the title-keyed layouts written by
+older versions into the new entry.
 
 The bar **re-applies a saved layout automatically**, but only when a
 window is **created or closed**: the activation check runs on that
-event (never on a timer), the most specific saved layout whose windows
-are all open — by exact class + title match first, or, when a title
-changed, by the same classes with the titles still closest — fires
-once for that window set, and unrelated windows (another workspace's
-session, an unrelated app) never block it. Moving windows by hand in
-between is never fought.
+event (never on a timer). Matching is by **class**, so a changed title
+never blocks a layout. The most specific saved layout whose classes are
+all open fires once for that window set; windows of the same class are
+paired by exact title, then by the window already on the layout's
+workspace, then by title resemblance, then by position — so an app with
+several identical windows still restores. An extra window on the
+layout's own workspace keeps it unapplied (other workspaces never
+veto). Moving windows by hand in between is never fought.
 
 ```json
 { "name": "Layout", "source": { "type": "layout" } }

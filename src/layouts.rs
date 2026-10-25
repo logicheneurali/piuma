@@ -2,19 +2,20 @@
 //! file, `piuma-layouts.json` next to piuma.json — while the file is
 //! absent the layout system is ignored, and the first click on a
 //! `layout` sensor creates it with the current workspace's window
-//! arrangement. Layouts are named automatically: the JSON encoding of
-//! the (class, title) pairs sorted alphabetically — the same windows
+//! arrangement. Layouts are named automatically from the (class,
+//! workspace) pairs sorted alphabetically — titles are deliberately
+//! absent: a terminal follows its directory and a browser its tab, so
+//! keying on them multiplied near-duplicate layouts. The same windows
 //! always produce the same name, so re-saving replaces instead of
-//! duplicating, and any character a title carries is serializer-
-//! escaped. The activation check runs only when a window is created
-//! or closed (the address set differs from the last check): then the
-//! bar applies, once per window set, the saved layout whose windows
-//! are all open — exactly by (class, title) first, or, when a title
-//! changed, by the same window classes with the titles still closest
-//! (a clear winner only). A layout owns its workspaces exclusively:
-//! an extra window there keeps it unapplied; other workspaces never
-//! veto. Tiled sizes are restored through a measured probe; a window
-//! is never floated to force it.
+//! duplicating. The activation check runs only when a window is
+//! created or closed (the address set differs from the last check):
+//! then the bar applies, once per window set, the saved layout whose
+//! windows are all open. Matching is by class only — a title change
+//! never blocks a layout; titles guide the pairing of same-class
+//! windows (exact, then resemblance, then position). A layout owns its
+//! workspaces exclusively: an extra window there keeps it unapplied;
+//! other workspaces never veto. Tiled sizes are restored through a
+//! measured probe; a window is never floated to force it.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -28,9 +29,10 @@ use crate::windows::{self, WinRow};
 /// How long the sensor keeps showing "✓ saved" after a click.
 const FLASH: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// One saved window: identified by class + title (the match keys),
-/// placed by workspace and — for floating windows — by pixel
-/// geometry. The address is deliberately absent: it changes every run.
+/// One saved window: identified by its class (the match key), with the
+/// saved title kept for the pairing of same-class windows, placed by
+/// workspace and — for floating windows — by pixel geometry. The
+/// address is deliberately absent: it changes every run.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LayoutEntry {
     pub class: String,
@@ -89,19 +91,30 @@ fn file_path() -> Option<PathBuf> {
     Some(PathBuf::from(cfg).parent()?.join("piuma-layouts.json"))
 }
 
-/// The automatic layout name: the JSON encoding of the (class, title)
-/// pairs sorted alphabetically. The same windows in any position give
-/// the same name (a re-save replaces that layout), different windows
-/// give a different one, and every title character is escaped by the
-/// serializer — the key stays a valid, unique string whatever the
-/// windows are called.
+/// The automatic layout name: the JSON encoding of the (class,
+/// workspace) pairs sorted alphabetically. Titles are left out on
+/// purpose — they change with a terminal's directory or a browser's
+/// tab, and keying on them created near-duplicate layouts that then
+/// tied against each other. The same windows in any position give the
+/// same name (a re-save replaces that layout); a different window set
+/// gives a different one.
 fn auto_name(entries: &[LayoutEntry]) -> String {
     let mut keys: Vec<(&str, &str)> = entries
         .iter()
-        .map(|e| (e.class.as_str(), e.title.as_str()))
+        .map(|e| (e.class.as_str(), e.workspace.as_str()))
         .collect();
     keys.sort_unstable();
     serde_json::to_string(&keys).unwrap_or_default()
+}
+
+/// Store a layout under its class/workspace signature, dropping any
+/// older entry with the same signature: layouts saved by earlier
+/// versions were keyed by (class, title), so a retitled window left
+/// near-duplicates behind — the first re-save folds them back into one.
+fn insert_layout(file: &mut LayoutFile, entries: Vec<LayoutEntry>) {
+    let signature = auto_name(&entries);
+    file.retain(|key, existing| key == &signature || auto_name(existing) != signature);
+    file.insert(signature, entries);
 }
 
 /// Save the visible windows of the current workspace under their
@@ -123,7 +136,7 @@ pub fn save(
     let path = file_path().ok_or_else(|| "cannot locate the config directory".to_string())?;
     let count = entries.len();
     let mut file = state.file.take().unwrap_or_default();
-    file.insert(auto_name(&entries), entries);
+    insert_layout(&mut file, entries);
     // Text-only refresh: the sensor shows ✓ for the set just saved
     // without dispatching anything (the check itself only runs on a
     // window being created or closed).
@@ -181,95 +194,81 @@ fn window_set_changed(state: &mut LayoutState, rows: &[WinRow]) -> bool {
     true
 }
 
-/// The most specific saved layout whose windows are all open with the
-/// exact saved count: a subset loses to the layout saved from this
-/// very window set; a length tie keeps the earlier (sorted) name. An
-/// exact match always wins — the fuzzy pass only takes over when no
-/// saved title fits anymore.
+/// The saved layout that fits the open windows: its classes must all be
+/// available, and its own workspaces must hold no extra window. More
+/// windows win (the most specific layout); among layouts of the same
+/// size the one whose titles still fit the open windows best wins, and
+/// a tie keeps the first in file order. A tie is no longer a reason to
+/// do nothing: whenever a layout fits, one is applied.
 fn best_match<'a>(
     file: &'a LayoutFile,
     rows: &[WinRow],
 ) -> Option<(&'a String, &'a Vec<LayoutEntry>)> {
-    let mut best: Option<(&String, &Vec<LayoutEntry>)> = None;
+    let mut best: Option<(usize, f32, &String, &Vec<LayoutEntry>)> = None;
     for (name, entries) in file {
-        if matches(rows, entries) && best.map_or(true, |(_, b)| entries.len() > b.len()) {
-            best = Some((name, entries));
-        }
-    }
-    best.or_else(|| fuzzy_match(file, rows))
-}
-
-/// The fallback when no title matches exactly (a terminal followed its
-/// directory, a browser its tab): a layout with the very same window
-/// classes — same multiset on its own workspaces, so the extra-window
-/// veto holds by class too — competes on how much its saved titles
-/// still resemble the open ones. The strictly best score wins; a tie
-/// means no layout, never a guess — the file can hold several
-/// same-class layouts that only their titles tell apart.
-fn fuzzy_match<'a>(
-    file: &'a LayoutFile,
-    rows: &[WinRow],
-) -> Option<(&'a String, &'a Vec<LayoutEntry>)> {
-    let mut best: Option<(f32, &String, &Vec<LayoutEntry>)> = None;
-    let mut second = 0.0_f32;
-    for (name, entries) in file {
-        let Some(score) = fuzzy_score(rows, entries) else {
+        if !matches(rows, entries) {
             continue;
+        }
+        let score = match_score(rows, entries);
+        let better = match &best {
+            None => true,
+            Some((len, s, _, _)) => {
+                entries.len() > *len || (entries.len() == *len && score > *s)
+            }
         };
-        if score <= 0.0 {
-            continue;
-        }
-        if best.as_ref().map_or(true, |(s, _, _)| score > *s) {
-            second = best.as_ref().map_or(0.0, |(s, _, _)| *s);
-            best = Some((score, name, entries));
-        } else {
-            second = second.max(score);
+        if better {
+            best = Some((entries.len(), score, name, entries));
         }
     }
-    match best {
-        Some((score, name, entries)) if score > second => Some((name, entries)),
-        _ => None,
-    }
+    best.map(|(_, _, name, entries)| (name, entries))
 }
 
-/// `None` when the layout's classes differ from the open windows'
-/// (no candidate at all), else the summed title resemblance: 1.0 for
-/// an exactly saved title, otherwise the best same-class share of the
-/// saved title's words still found. Every candidate covers the same
-/// window count (equal multisets), so scores are comparable as they
-/// are.
-fn fuzzy_score(rows: &[WinRow], entries: &[LayoutEntry]) -> Option<f32> {
-    if entries.is_empty() {
-        return None;
-    }
+/// How well the assigned windows' titles still fit the saved ones — used
+/// only to choose between layouts of the same size: an exact title
+/// scores 1, a changed one the share of the saved words still present.
+fn match_score(rows: &[WinRow], entries: &[LayoutEntry]) -> f32 {
+    assign(rows, entries)
+        .map(|pairs| {
+            pairs
+                .iter()
+                .map(|(ri, ei)| title_resemble(&entries[*ei].title, &rows[*ri].title))
+                .sum()
+        })
+        .unwrap_or(0.0)
+}
+
+/// Pair saved entries with open windows: per class, each entry takes the
+/// unused window that fits it best — exact title first, then a window
+/// already on the layout's workspace (placement is more reliable than a
+/// title that follows a directory or a tab), then the saved title's
+/// words still present, then the closest saved position. This is what
+/// makes same-class apps usable: a changed title never blocks the
+/// layout, it only reorders the pairing.
+fn assign(rows: &[WinRow], entries: &[LayoutEntry]) -> Option<Vec<(usize, usize)>> {
     let layout_ws: HashSet<&str> = entries.iter().map(|e| e.workspace.as_str()).collect();
-    let mut saved: HashMap<&str, usize> = HashMap::new();
-    for e in entries {
-        *saved.entry(e.class.as_str()).or_insert(0) += 1;
+    let mut used = vec![false; rows.len()];
+    let mut pairs = Vec::with_capacity(entries.len());
+    for (ei, entry) in entries.iter().enumerate() {
+        let mut best: Option<((i32, i32, i32, i32), usize)> = None;
+        for (ri, row) in rows.iter().enumerate() {
+            if used[ri] || row.class != entry.class {
+                continue;
+            }
+            let key = (
+                i32::from(row.title == entry.title),
+                i32::from(layout_ws.contains(row.workspace.as_str())),
+                (title_resemble(&entry.title, &row.title) * 1000.0) as i32,
+                -((row.x - entry.x).abs() + (row.y - entry.y).abs()),
+            );
+            if best.map_or(true, |(b, _)| key > b) {
+                best = Some((key, ri));
+            }
+        }
+        let (_, ri) = best?;
+        used[ri] = true;
+        pairs.push((ri, ei));
     }
-    let mut cur: HashMap<&str, usize> = HashMap::new();
-    for r in rows
-        .iter()
-        .filter(|r| layout_ws.contains(r.workspace.as_str()))
-    {
-        *cur.entry(r.class.as_str()).or_insert(0) += 1;
-    }
-    if cur != saved {
-        return None;
-    }
-    Some(
-        entries
-            .iter()
-            .map(|e| {
-                rows.iter()
-                    .filter(|r| {
-                        layout_ws.contains(r.workspace.as_str()) && r.class == e.class
-                    })
-                    .map(|r| title_resemble(&e.title, &r.title))
-                    .fold(0.0_f32, f32::max)
-            })
-            .sum(),
-    )
+    Some(pairs)
 }
 
 /// How much an open title still resembles the saved one: 1.0 when
@@ -333,31 +332,36 @@ fn entries_for(rows: &[WinRow], active_workspace: &str) -> Vec<LayoutEntry> {
         .collect()
 }
 
-/// Exact count on the layout's own (class, title) keys: every saved
-/// window must be open, and no extra twin of it — and no unrelated
-/// window on the layout's own workspaces either: the layout describes
-/// that workspace's window set exclusively, so an extra window there
-/// keeps it unapplied. Windows on other workspaces never veto. An
-/// empty layout never matches (there is nothing to restore).
+/// A layout fits when every saved window has an open twin of its class
+/// (each entry is paired by `assign`) and its own workspaces hold no
+/// extra window: unrelated classes and extra same-class twins there
+/// veto. Same-class windows on other workspaces are allowed — they are
+/// simply not part of the pairing. An empty layout never matches.
 pub fn matches(rows: &[WinRow], entries: &[LayoutEntry]) -> bool {
     if entries.is_empty() {
         return false;
     }
-    let mut cur: HashMap<(&str, &str), usize> = HashMap::new();
-    for r in rows {
-        *cur.entry((&r.class, &r.title)).or_insert(0) += 1;
-    }
-    let mut saved: HashMap<(&str, &str), usize> = HashMap::new();
+    let mut saved: HashMap<&str, usize> = HashMap::new();
     for e in entries {
-        *saved.entry((&e.class, &e.title)).or_insert(0) += 1;
+        *saved.entry(e.class.as_str()).or_insert(0) += 1;
     }
-    if !saved.iter().all(|(key, n)| cur.get(key) == Some(n)) {
+    let mut open: HashMap<&str, usize> = HashMap::new();
+    for r in rows {
+        *open.entry(r.class.as_str()).or_insert(0) += 1;
+    }
+    if saved
+        .iter()
+        .any(|(class, n)| open.get(class).copied().unwrap_or(0) < *n)
+    {
         return false;
     }
     let layout_ws: HashSet<&str> = entries.iter().map(|e| e.workspace.as_str()).collect();
-    rows.iter()
-        .filter(|r| layout_ws.contains(r.workspace.as_str()))
-        .all(|r| saved.contains_key(&(&r.class, &r.title)))
+    let mut here: HashMap<&str, usize> = HashMap::new();
+    for r in rows.iter().filter(|r| layout_ws.contains(r.workspace.as_str())) {
+        *here.entry(r.class.as_str()).or_insert(0) += 1;
+    }
+    here.iter()
+        .all(|(class, n)| saved.get(class).is_some_and(|m| n <= m))
 }
 
 /// What to dispatch to re-apply `entries` to `rows`, in order. Pure —
@@ -369,26 +373,13 @@ pub fn matches(rows: &[WinRow], entries: &[LayoutEntry]) -> bool {
 /// touched at all; a fullscreen window gets no geometry (move/resize
 /// are ignored on it).
 pub fn plan(rows: &[WinRow], entries: &[LayoutEntry]) -> Vec<Action> {
-    let mut taken = vec![false; rows.len()];
+    let Some(pairs) = assign(rows, entries) else {
+        return Vec::new();
+    };
     let mut actions = Vec::new();
-    // Positional pairing: same (class, title) twins are matched by
-    // where they sit, not by array order (`clients -j` lists creation
-    // order, which can differ between the save and the re-apply).
-    let mut rows_order: Vec<usize> = (0..rows.len()).collect();
-    rows_order.sort_by_key(|&i| (rows[i].x, rows[i].y));
-    let mut wanted: Vec<&LayoutEntry> = entries.iter().collect();
-    wanted.sort_by_key(|e| (e.x, e.y));
-    for e in wanted {
-        let mut found = None;
-        for &i in &rows_order {
-            if !taken[i] && rows[i].class == e.class && rows[i].title == e.title {
-                found = Some(i);
-                break;
-            }
-        }
-        let Some(i) = found else { continue };
-        taken[i] = true;
+    for (i, ei) in pairs {
         let r = &rows[i];
+        let e = &entries[ei];
         if r.workspace != e.workspace {
             actions.push(Action::Move {
                 address: r.address.clone(),
@@ -663,13 +654,12 @@ mod tests {
         assert_eq!(status_text(&state), "✓ saved", "a save outranks an old apply");
     }
 
-    /// The trigger: every saved window (by class + title) open with the
-    /// exact saved count, no twin extra — and no unrelated window on
-    /// the layout's own workspace either (the layout describes that
-    /// workspace exclusively), while windows on other workspaces are
-    /// ignored.
+    /// The trigger: every saved window needs an open twin of its class,
+    /// and the layout's own workspaces must hold no extra window. The
+    /// title is no longer part of the key — a terminal that followed
+    /// its directory keeps its layout.
     #[test]
-    fn matches_requires_exact_counts_on_layout_keys() {
+    fn matches_requires_the_classes_and_a_clean_workspace() {
         let entries = vec![entry("kitty", "shell", "1", false), entry("firefox", "Home", "1", false)];
         let same = vec![
             row("0xA", "kitty", "shell", "2", false),
@@ -696,30 +686,118 @@ mod tests {
             row("0xD", "kitty", "shell", "1", false),
             same[1].clone(),
         ];
-        assert!(!matches(&twin, &entries), "a second twin blocks");
+        assert!(
+            matches(&twin, &entries),
+            "one same-class window on the layout's workspace fits the saved count"
+        );
+        let twins = vec![
+            same[0].clone(),
+            row("0xD", "kitty", "shell", "1", false),
+            row("0xE", "kitty", "shell", "1", false),
+            same[1].clone(),
+        ];
+        assert!(
+            !matches(&twins, &entries),
+            "more same-class windows than saved on the layout's workspace block"
+        );
         assert!(!matches(&same[..1], &entries), "a missing window blocks");
         let retitle = vec![row("0xA", "kitty", "vim", "1", false), same[1].clone()];
-        assert!(!matches(&retitle, &entries), "the title is part of the key");
+        assert!(matches(&retitle, &entries), "a changed title no longer blocks");
+        let twin_elsewhere = vec![
+            same[0].clone(),
+            row("0xD", "kitty", "other", "7", false),
+            same[1].clone(),
+        ];
+        assert!(
+            matches(&twin_elsewhere, &entries),
+            "a same-class window elsewhere is not part of the layout"
+        );
         assert!(!matches(&same, &[]), "an empty layout never matches");
     }
 
-    /// The automatic name depends only on the window set: saved in any
-    /// order it is the same string (a re-save replaces), and a title's
-    /// special characters stay inside the escaped JSON key.
+    /// Volatile titles in a multi-window app: the layout still applies
+    /// (the plan produces the geometry) instead of being dropped by a
+    /// tie between same-class windows.
     #[test]
-    fn auto_name_is_the_sorted_window_set() {
+    fn volatile_titles_do_not_block_a_multi_window_layout() {
+        let entries = vec![
+            LayoutEntry { x: 100, y: 0, w: 300, h: 400, ..entry("kitty", "~ - fish", "1", true) },
+            LayoutEntry { x: 500, y: 0, w: 300, h: 400, ..entry("kitty", "~/src - fish", "1", true) },
+        ];
+        let mut left = row("0xA", "kitty", "~/Documents - fish", "1", true);
+        left.x = 100;
+        let mut right = row("0xB", "kitty", "OC | something", "1", true);
+        right.x = 500;
+        assert!(matches(&[left.clone(), right.clone()], &entries), "the classes fit");
+        let actions = plan(&[left, right], &entries);
+        assert_eq!(actions.len(), 2, "both twins get their geometry");
+    }
+
+    /// Same-class windows pair by title when it is stable, then by the
+    /// saved position: the pairing always succeeds.
+    #[test]
+    fn assign_pairs_same_class_by_title_then_position() {
+        let entries = vec![
+            LayoutEntry { x: 500, ..entry("kitty", "~/src - fish", "1", true) },
+            LayoutEntry { x: 100, ..entry("kitty", "~ - fish", "1", true) },
+        ];
+        let rows = vec![
+            row("0xA", "kitty", "zzz", "1", true),
+            row("0xB", "kitty", "qqq", "1", true),
+        ];
+        let pairs = assign(&rows, &entries).expect("enough windows");
+        assert_eq!(pairs, vec![(0, 0), (1, 1)], "row order decides when titles are alien");
+        // The titles are stable: they pick the rows regardless of order.
+        let titled = vec![
+            row("0xA", "kitty", "~ - fish", "1", true),
+            row("0xB", "kitty", "~/src - fish", "1", true),
+        ];
+        let pairs = assign(&titled, &entries).expect("enough windows");
+        assert_eq!(pairs, vec![(1, 0), (0, 1)], "titles guide the pairing");
+        // All titles are volatile: the saved position breaks the tie.
+        let mut far = row("0xA", "kitty", "zzz", "1", true);
+        far.x = 490;
+        let mut near = row("0xB", "kitty", "qqq", "1", true);
+        near.x = 90;
+        let pairs = assign(&[near, far], &entries).expect("enough windows");
+        assert_eq!(pairs, vec![(1, 0), (0, 1)], "closest saved position wins");
+    }
+
+    /// A same-class window already on the layout's workspace is preferred
+    /// over one sitting elsewhere.
+    #[test]
+    fn extra_same_class_elsewhere_is_not_selected() {
+        let entries = vec![entry("kitty", "shell", "1", true)];
+        let mut elsewhere = row("0xB", "kitty", "other", "7", true);
+        elsewhere.x = 900;
+        let mut here = row("0xA", "kitty", "shell", "1", true);
+        here.x = 10;
+        let pairs = assign(&[elsewhere, here], &entries).expect("enough windows");
+        assert_eq!(pairs, vec![(1, 0)], "the window already there wins");
+    }
+
+    /// The automatic name is the (class, workspace) signature: titles do
+    /// not take part, so a retitled window re-saves the same layout
+    /// instead of creating a near-duplicate.
+    #[test]
+    fn auto_name_is_the_class_workspace_signature() {
         let a = entry("kitty", "shell", "1", false);
         let b = entry("firefox", "Home", "2", true);
         let name_ab = auto_name(&[a.clone(), b.clone()]);
         let name_ba = auto_name(&[b.clone(), a.clone()]);
         assert_eq!(name_ab, name_ba, "order must not matter");
-        let other = auto_name(&[entry("kitty", "shell", "1", true)]);
-        assert_ne!(name_ab, other, "different windows, different name");
-        // Special characters: the key is JSON, so quotes stay escaped
-        // and the set survives as a parseable list of pairs.
-        let weird = auto_name(&[entry("wm class", "a \"quoted\" title\nwith newline", "1", false)]);
+        let retitled = vec![
+            LayoutEntry { title: "~/src - fish".to_string(), ..a.clone() },
+            LayoutEntry { title: "Other tab".to_string(), ..b.clone() },
+        ];
+        assert_eq!(auto_name(&retitled), name_ab, "titles are not part of the name");
+        let other = auto_name(&[entry("kitty", "shell", "2", false)]);
+        assert_ne!(name_ab, other, "a different workspace is a different layout");
+        let more = auto_name(&[a.clone(), b.clone(), entry("kitty", "shell", "1", false)]);
+        assert_ne!(name_ab, more, "a different window count is a different layout");
+        let weird = auto_name(&[entry("wm class", "ignored", "1", false)]);
         let parsed: Vec<(String, String)> = serde_json::from_str(&weird).expect("key is valid JSON");
-        assert_eq!(parsed[0].1, "a \"quoted\" title\nwith newline");
+        assert_eq!(parsed[0].0, "wm class");
     }
 
     /// The most specific matching layout wins: a saved subset does not
@@ -749,12 +827,12 @@ mod tests {
         assert!(best_match(&file, &other).is_none());
     }
 
-    /// Fallback when no saved title fits anymore: with the very same
-    /// window classes the layout whose titles still resemble the open
-    /// ones wins — but only a strict winner; differing classes are no
-    /// candidate at all (the extra-window veto holds by class too).
+    /// Same classes, titles changed: both layouts fit by class, the one
+    /// whose titles still resemble the open windows wins; when neither
+    /// resembles, a layout is still applied — a tie no longer means
+    /// "do nothing".
     #[test]
-    fn best_match_falls_back_to_resembling_titles() {
+    fn best_match_uses_titles_only_to_choose_between_equal_layouts() {
         let mut file: LayoutFile = BTreeMap::new();
         file.insert(
             "fish".to_string(),
@@ -772,7 +850,6 @@ mod tests {
                 entry("kitty", "~: journalctl", "1", false),
             ],
         );
-        // Every title changed, the words still point at "fish".
         let open = vec![
             row("0xA", "kitty", "shell down", "1", false),
             row("0xB", "kitty", "~/Downloads - fish", "1", false),
@@ -783,14 +860,15 @@ mod tests {
             Some("fish"),
             "the layout whose titles still resemble wins"
         );
-        // Same classes, no resemblance on either side: no guess.
         let alien = vec![
             row("0xA", "kitty", "zzz", "1", false),
             row("0xB", "kitty", "qqq", "1", false),
             row("0xC", "kitty", "www", "1", false),
         ];
-        assert_eq!(best_match(&file, &alien).map(|(n, _)| n.as_str()), None);
-        // Another class on the layout's workspace: not a candidate.
+        assert!(
+            best_match(&file, &alien).is_some(),
+            "no resemblance still applies a fitting layout"
+        );
         let other_class = vec![
             row("0xA", "konsole", "shell down", "1", false),
             row("0xB", "konsole", "fish", "1", false),
@@ -1003,6 +1081,26 @@ mod tests {
         assert_eq!(actions.len(), 2);
         assert!(matches!(actions[0], Action::Geometry { ref address, x: 1, .. } if address == "0xA"));
         assert!(matches!(actions[1], Action::Geometry { ref address, x: 2, .. } if address == "0xB"));
+    }
+
+    /// Older layouts were keyed by (class, title): re-saving the same
+    /// windows folds those near-duplicates into the class/workspace
+    /// entry instead of adding another copy.
+    #[test]
+    fn insert_layout_folds_title_keyed_duplicates() {
+        let mut file: LayoutFile = BTreeMap::new();
+        file.insert(
+            "[[\"kitty\",\"~ - fish\"]]".to_string(),
+            vec![LayoutEntry { title: "~ - fish".to_string(), ..entry("kitty", "shell", "1", false) }],
+        );
+        file.insert(
+            "[[\"kitty\",\"~/src - fish\"]]".to_string(),
+            vec![LayoutEntry { title: "~/src - fish".to_string(), ..entry("kitty", "shell", "1", false) }],
+        );
+        insert_layout(&mut file, vec![entry("kitty", "anything", "1", false)]);
+        assert_eq!(file.len(), 1, "the old title-keyed copies are gone: {file:?}");
+        let (name, entries) = file.iter().next().unwrap();
+        assert_eq!(*name, auto_name(entries), "stored under the class/workspace key");
     }
 
     /// The save keeps only visible windows of the active workspace.
