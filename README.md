@@ -2,6 +2,34 @@
 
 Piuma is a lightweight system information panel for Hyprland/Wayland.
 
+## Why piuma
+
+Piuma was born from a simple need: a panel that shows what the machine is
+doing without turning into a desktop environment of its own.
+
+- **Lightweight**: one Rust binary. Readings come from the files the
+  kernel and the drivers already expose (`/proc`, `/sys`) and from
+  `hyprctl`; wallpapers, notifications, the tray and the taskbar are
+  handled in-process, so there is no second daemon to run.
+- **Simple to configure**: every option lives in a single `piuma.json`,
+  but nobody has to edit it by hand — `piuma-setup` is the graphical
+  front end (sections, sensors, colours, wallpaper palette, autostart,
+  app theme) and validates values exactly as the bar does on load, so a
+  mistake is reported before it is saved.
+- **Minimal requirements**: a Wayland session with a layer-shell
+  compositor (Hyprland) and `hyprctl`; every other tool is only needed
+  by the sensors that use it. Sensors that cannot read stay silent, and
+  the optional features (wallpaper, corners, theme integration) switch
+  off cleanly.
+- **Applications follow the bar**: the same palette is projected onto
+  GTK 3/4 (a complete Adwaita-schema theme), Qt 6 and KDE apps (KDE
+  platform theme and `kdeglobals`; Qt 5 keeps its own style), and other
+  common apps through their own hooks — kitty, mpv and yazi via an
+  environment-selected config directory, foot, rofi, btop and alacritty
+  through a marked include. Themes are regenerated when the wallpaper
+  palette changes and restored when `app_theme` is switched off or the
+  session ends, so a later Plasma/GNOME session is left untouched.
+
 ## Features
 
 ### Sensor Types
