@@ -158,7 +158,7 @@ pub(crate) fn wallpaper_settings(state: &PiumaSetup) -> Element<'_, Message> {
         column![
             text("Wallpaper").size(16).style(fg_text(pal)),
             toggler(cfg.enabled)
-                .label("Draw the wallpaper behind the desktop")
+                .label("Enable wallpaper")
                 .on_toggle(Message::WallpaperEnabled),
             // Runtime-only tones (see the save): the file keeps just
             // this switch, so turning it off restores the user's own

@@ -11,7 +11,7 @@
 
 use std::f32::consts::{FRAC_PI_2, PI};
 
-use crate::wallpaper_ui::wallpaper_plan;
+use crate::wallpaper_ui::{forget_closed, wallpaper_plan};
 use crate::{config, monitor_names, Message, Panel};
 use iced::mouse::Cursor;
 use iced::widget::canvas::{self, Frame, Geometry, Path, path::Arc};
@@ -111,7 +111,7 @@ pub(crate) fn sync_corners(panel: &mut Panel) -> Command<Message> {
     // Forget the closed masks in the same breath: a replugged output
     // (same name) must open fresh surfaces — the id kept here would
     // otherwise match the plan's "already placed" and never reopen.
-    panel.corners.retain(|(_, id)| !to_close.contains(id));
+    forget_closed(&mut panel.corners, &to_close);
     let mut cmds: Vec<Command<Message>> = to_close.into_iter().map(iced::window::close).collect();
     for key in to_open {
         let Some((output, corner, radius)) = parse_key(&key) else {

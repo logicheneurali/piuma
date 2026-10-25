@@ -32,6 +32,11 @@ pub(crate) fn sync_wallpaper(panel: &mut Panel) -> Command<Message> {
         .is_some_and(|w| w.enabled && !w.path.is_empty() && PathBuf::from(&w.path).is_file());
     let desired = if wanted { monitor_names() } else { Vec::new() };
     let (to_open, to_close) = wallpaper_plan(&panel.wallpaper, &desired);
+    // Forget the closed surfaces in the same breath (as the corner masks
+    // do): keeping the id would make the plan believe the surface is
+    // still placed, so toggling the wallpaper off and on again would
+    // never reopen it.
+    forget_closed(&mut panel.wallpaper, &to_close);
     let mut cmds: Vec<Command<Message>> = to_close.into_iter().map(iced::window::close).collect();
     for name in to_open {
         let (id, open) = Message::layershell_open(NewLayerShellSettings {
@@ -130,6 +135,13 @@ pub(crate) fn wallpaper_plan<T: Clone>(
     (to_open, to_close)
 }
 
+/// Drop the closed surfaces from the list, so a later plan can reopen a
+/// surface whose output (or whole feature) comes back: an id kept here
+/// would match the plan's "already placed" and never reopen.
+pub(crate) fn forget_closed<T: PartialEq>(current: &mut Vec<(String, T)>, closed: &[T]) {
+    current.retain(|(_, id)| !closed.contains(id));
+}
+
 /// The wallpaper surface: the configured image covering the whole output
 /// (cover fit keeps the aspect ratio and crops what spills over). The
 /// file is re-checked here — a path removed behind the config's back
@@ -162,6 +174,21 @@ mod tests {
     /// Roadmap2 #1: the sync plan opens one window per wanted output,
     /// keeps the ones already placed there and closes the rest — an
     /// empty wanted list (feature off) closes everything.
+    /// Toggling the wallpaper (or corners) off then on must reopen the
+    /// surfaces: the closed ids are forgotten, so the plan no longer
+    /// counts them as placed.
+    #[test]
+    fn closed_surfaces_are_forgotten_and_reopen() {
+        let mut current = vec![("HDMI-A-2".to_string(), 1u32)];
+        let (open, close) = wallpaper_plan(&current, &[]);
+        assert!(open.is_empty());
+        forget_closed(&mut current, &close);
+        assert!(current.is_empty(), "closed surface must leave the list");
+
+        let (open, _) = wallpaper_plan(&current, &["HDMI-A-2".to_string()]);
+        assert_eq!(open, vec!["HDMI-A-2"], "re-enabling reopens the surface");
+    }
+
     #[test]
     fn wallpaper_plan_opens_keeps_and_closes() {
         let current = vec![("HDMI-A-2".to_string(), 1u32), ("GONE-1".to_string(), 2u32)];
