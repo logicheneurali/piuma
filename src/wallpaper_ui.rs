@@ -96,6 +96,12 @@ pub(crate) fn sync_palette(panel: &mut Panel) -> Command<Message> {
             panel.palette = None;
             panel.palette_key = None;
             restyle(panel);
+            // The app themes derive from the same tones: re-render them
+            // with the configured colours, or they would keep the
+            // wallpaper palette after it was switched off.
+            if let Some(path) = crate::CONFIG_PATH.get() {
+                crate::app_theme::sync(std::path::Path::new(path), &panel.config.panel, None);
+            }
         }
         return Command::none();
     };
