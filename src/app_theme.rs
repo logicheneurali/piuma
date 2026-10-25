@@ -901,6 +901,16 @@ fn rofi_rasi(t: &Tones, panel: &config::PanelConfig) -> String {
     let section = panel.section_defaults.as_ref();
     let sensor = panel.sensor_defaults.as_ref();
     let num = |value: Option<i32>, fallback: u32| config::style_num(value).unwrap_or(fallback);
+    // Same character as the bar: family, size and weight from `panel`.
+    let family = panel
+        .font
+        .as_deref()
+        .filter(|f| !f.is_empty())
+        .unwrap_or(crate::DEFAULT_FONT)
+        .replace('"', "");
+    let size = panel.font_size.unwrap_or(crate::DEFAULT_FONT_SIZE);
+    let weight = if panel.bold.unwrap_or(false) { " Bold" } else { "" };
+    let font = format!("{family}{weight} {size}px");
     // Window: the section border/radius; rows: the sensor one. piuma's
     // border colour is often fully transparent, which rofi renders as no
     // border — the hover border is what marks the selected row.
@@ -925,6 +935,7 @@ fn rofi_rasi(t: &Tones, panel: &config::PanelConfig) -> String {
 
     format!(
         r#"* {{
+    font: "{font}";
     text-color: {fg};
     border-color: {border_color};
 }}
@@ -954,6 +965,10 @@ listview {{
 }}
 entry, prompt, case-indicator, element-text, element-icon, scrollbar {{
     background-color: transparent;
+    font: inherit;
+}}
+inputbar {{
+    font: inherit;
 }}
 element {{
     background-color: transparent;
@@ -1362,7 +1377,14 @@ mod tests {
         let rasi = rofi_rasi(&t, &panel);
         // A global background on `*` would paint the input and the row
         // text zones over the inputbar/selection (two backgrounds).
-        assert!(rasi.starts_with("* {\n    text-color:"), "no global background: {rasi}");
+        assert!(rasi.starts_with("* {\n    font:"), "no global background: {rasi}");
+        let family = panel.font.clone().unwrap_or_default();
+        let size = panel.font_size.unwrap_or(0);
+        let weight = if panel.bold.unwrap_or(false) { " Bold" } else { "" };
+        assert!(
+            rasi.contains(&format!("font: \"{family}{weight} {size}px\";")),
+            "panel font: {rasi}"
+        );
         assert!(
             rasi.contains("entry, prompt, case-indicator, element-text, element-icon, scrollbar {\n    background-color: transparent;"),
             "inner widgets transparent: {rasi}"
