@@ -247,7 +247,7 @@ Other applications. Two mechanisms, both reverted on exit:
   symlinked).
 - **Marked includes in your files** — reverted from the same markers:
   foot (`[colors-dark]` block; foot 1.28 has no top-level include at
-  the end), rofi (rules inline in `config.rasi`: a second `@theme` would drop the user theme's structure; font, size (floored at 12px) and weight come from the panel, border width/radius and the hover border from piuma, and the selected row uses the hover tone), btop (`color_theme = "piuma"` with a
+  the end), rofi (rules inline in `config.rasi`: a second `@theme` would drop the user theme's structure; font, size (floored at 12px) and weight come from the panel, border width/radius from piuma (collapsed to 0 when the configured border colour is transparent, as the bar has no hover border), and the selected row uses the hover tone), btop (`color_theme = "piuma"` with a
   generated theme file and the previous name restored), alacritty (the
   palette file is added to `[general] import`; the original line is
   kept and put back).

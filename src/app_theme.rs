@@ -914,23 +914,21 @@ fn rofi_rasi(t: &Tones, panel: &config::PanelConfig) -> String {
     let size = panel.font_size.unwrap_or(crate::DEFAULT_FONT_SIZE).max(12);
     let weight = if panel.bold.unwrap_or(false) { " Bold" } else { "" };
     let font = format!("{family}{weight} {size}px");
-    // Window: the section border/radius; rows: the sensor one. piuma's
-    // border colour is often fully transparent, which rofi renders as no
-    // border — the hover border is what marks the selected row.
+    // Window: the section border/radius; rows: the sensor one. The bar's
+    // border colours are fully transparent, and the piuma hover border
+    // (`border_color_hover`) is not rendered by the bar at all — the
+    // selection is marked by the hover background, so no border is drawn
+    // when the colour is transparent (a 0px border keeps the rows aligned).
     let radius = num(section.and_then(|d| d.border_radius), 12);
-    let border = num(section.and_then(|d| d.border_width), 1);
-    let border_color = section
-        .and_then(|d| d.border_color.as_deref())
-        .and_then(color)
-        .map(hex_alpha)
-        .unwrap_or_else(|| "transparent".to_string());
+    let (border, border_color) = rofi_border(
+        section.and_then(|d| d.border_color.as_deref()),
+        num(section.and_then(|d| d.border_width), 1),
+    );
     let row_radius = num(sensor.and_then(|d| d.border_radius), 8);
-    let row_border = num(sensor.and_then(|d| d.border_width), 2);
-    let row_border_color = sensor
-        .and_then(|d| d.border_color_hover.as_deref())
-        .and_then(color)
-        .map(hex_alpha)
-        .unwrap_or_else(|| t.sensor_hover_bg.clone());
+    let (row_border, row_border_color) = rofi_border(
+        sensor.and_then(|d| d.border_color.as_deref()),
+        num(sensor.and_then(|d| d.border_width), 2),
+    );
     let pad = num(sensor.and_then(|d| d.padding), 4);
     let main_pad = pad + 6;
     let row_v = pad + 2;
@@ -1006,6 +1004,15 @@ element normal.active {{
         row_h = row_h,
         gap = pad + 4,
     )
+}
+
+/// A border only when the colour actually shows: a transparent border
+/// would still inset the content by its width.
+fn rofi_border(value: Option<&str>, width: u32) -> (u32, String) {
+    match value.and_then(color) {
+        Some(c) if c.a > 0.001 => (width, hex_alpha(c)),
+        _ => (0, "transparent".to_string()),
+    }
 }
 
 /// `#rrggbbaa` when translucent, `#rrggbb` otherwise (rofi's colour syntax).
@@ -1392,6 +1399,30 @@ mod tests {
             rasi.contains("entry, prompt, case-indicator, element-text, element-icon, scrollbar {\n    background-color: transparent;"),
             "inner widgets transparent: {rasi}"
         );
+    }
+
+    #[test]
+    fn rofi_ignores_the_unused_hover_border() {
+        let mut panel = config::default_config().panel;
+        panel.sensor_defaults = Some(config::SensorDefaults {
+            text_color: None,
+            bg_color: None,
+            text_color_hover: None,
+            bg_color_hover: None,
+            border_color: Some("#dddddd00".to_string()),
+            border_color_hover: Some("#00ffff".to_string()),
+            border_width: Some(2),
+            border_width_hover: None,
+            border_radius: None,
+            border_type: None,
+            padding: None,
+        });
+        let t = tones(&panel, None);
+        let rasi = rofi_rasi(&t, &panel);
+        // The bar's border is transparent and it never draws the hover
+        // border, so the selection must not invent a cyan outline.
+        assert!(!rasi.contains("#00ffff"), "no hover border: {rasi}");
+        assert!(rasi.contains("border: 0px;"), "transparent border collapses: {rasi}");
     }
 
     #[test]
