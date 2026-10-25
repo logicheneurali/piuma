@@ -461,16 +461,19 @@ produces the same name, so saving again replaces that layout instead of
 duplicating it; a re-save also folds the title-keyed layouts written by
 older versions into the new entry.
 
-The bar **re-applies a saved layout automatically**, but only when a
-window is **created or closed**: the activation check runs on that
-event (never on a timer). Matching is by **class**, so a changed title
-never blocks a layout. The most specific saved layout whose classes are
-all open fires once for that window set; windows of the same class are
-paired by exact title, then by the window already on the layout's
-workspace, then by title resemblance, then by position — so an app with
-several identical windows still restores. An extra window on the
-layout's own workspace keeps it unapplied (other workspaces never
-veto). Moving windows by hand in between is never fought.
+The bar **re-applies a saved layout automatically** when a window is
+**created, closed or moved to another workspace**: the activation check
+runs on those events (never on a timer). Matching is by **class**, so a
+changed title never blocks a layout. The most specific saved layout
+whose classes are all open fires once for that window set; windows of
+the same class are paired by exact title, then by the window already on
+the layout's workspace, then by title resemblance, then by position —
+so an app with several identical windows still restores. A workspace
+move only re-evaluates the match: a layout already applied for the
+current window set is **not** applied again, so dragging a window
+between workspaces is never undone. An extra window on the layout's own
+workspace keeps it unapplied (other workspaces never veto). Moving
+windows by hand in between is never fought.
 
 ```json
 { "name": "Layout", "source": { "type": "layout" } }

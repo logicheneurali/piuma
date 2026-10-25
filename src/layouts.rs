@@ -7,15 +7,17 @@
 //! absent: a terminal follows its directory and a browser its tab, so
 //! keying on them multiplied near-duplicate layouts. The same windows
 //! always produce the same name, so re-saving replaces instead of
-//! duplicating. The activation check runs only when a window is
-//! created or closed (the address set differs from the last check):
-//! then the bar applies, once per window set, the saved layout whose
-//! windows are all open. Matching is by class only — a title change
-//! never blocks a layout; titles guide the pairing of same-class
-//! windows (exact, then resemblance, then position). A layout owns its
-//! workspaces exclusively: an extra window there keeps it unapplied;
-//! other workspaces never veto. Tiled sizes are restored through a
-//! measured probe; a window is never floated to force it.
+//! duplicating. The activation check runs when a window is created or
+//! closed, or moved to another workspace: then the bar applies, once
+//! per window set, the saved layout whose windows are all open.
+//! Matching is by class only — a title change never blocks a layout;
+//! titles guide the pairing of same-class windows (exact, then
+//! resemblance, then position). A workspace move only re-evaluates the
+//! match: a layout already applied for the current window set is never
+//! re-applied, so moving windows by hand is never fought. A layout
+//! owns its workspaces exclusively: an extra window there keeps it
+//! unapplied; other workspaces never veto. Tiled sizes are restored
+//! through a measured probe; a window is never floated to force it.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -72,17 +74,24 @@ pub struct LayoutState {
     /// Set when the one-time load has run, so an absent file is not
     /// re-read (and a broken one not re-logged) on every pass.
     loaded: bool,
-    /// Window addresses at the last check: a differing set (a window
-    /// was created or closed) is the only event that re-runs it.
-    set: HashSet<String>,
+    /// Address + workspace of every window at the last check: a window
+    /// created or closed, or moved to another workspace, re-runs the
+    /// check (manual resizes, raises and workspace switches do not).
+    arrangement: HashSet<(String, String)>,
+    /// Addresses at the last check, to tell a create/close from a mere
+    /// workspace move: only the former starts a new window set.
+    addresses: HashSet<String>,
     /// Whether the last check found a matching layout — the text
     /// between checks (`✓`/`⋯`).
     matched: bool,
+    /// The layout applied for the current address set: a later manual
+    /// move may change the match, but the same layout is not applied
+    /// again — moving windows by hand is never fought.
+    applied_layout: Option<String>,
     /// Last save, for the "✓ saved" flash.
     flash: Option<Instant>,
-    /// Last apply, for the "✓ applied" flash — set by `tick` the same
-    /// way the save flash is, whenever a check matches and runs.
-    applied: Option<Instant>,
+    /// Last apply, for the "✓ applied" flash.
+    applied_flash: Option<Instant>,
 }
 
 /// `~/.config/piuma/piuma-layouts.json`, next to piuma.json.
@@ -140,7 +149,9 @@ pub fn save(
     // Text-only refresh: the sensor shows ✓ for the set just saved
     // without dispatching anything (the check itself only runs on a
     // window being created or closed).
-    state.matched = best_match(&file, rows).is_some();
+    let matched = best_match(&file, rows).map(|(name, _)| name.clone());
+    state.matched = matched.is_some();
+    state.applied_layout = matched;
     // tmp + rename so a crash can never leave a half-written file; the
     // in-memory copy is kept even when the disk write fails.
     let written = serde_json::to_string_pretty(&file)
@@ -168,13 +179,22 @@ pub fn tick(state: &mut LayoutState, rows: &[WinRow]) -> String {
         state.loaded = true;
         state.file = load();
     }
-    if window_set_changed(state, rows) {
+    if let Some(trigger) = arrangement_trigger(state, rows) {
+        if trigger == Trigger::CreatedOrClosed {
+            // A new window set: the previous apply no longer shields it.
+            state.applied_layout = None;
+        }
         match state.file.as_ref().and_then(|f| best_match(f, rows)) {
             Some((name, entries)) => {
-                eprintln!("[piuma] layout applied: {name}");
                 state.matched = true;
-                state.applied = Some(Instant::now());
-                apply(rows, entries);
+                // A workspace move that still fits the layout already
+                // applied for this set must not undo the manual move.
+                if applies(state, name) {
+                    eprintln!("[piuma] layout applied: {name}");
+                    state.applied_flash = Some(Instant::now());
+                    state.applied_layout = Some(name.clone());
+                    apply(rows, entries);
+                }
             }
             None => state.matched = false,
         }
@@ -182,16 +202,42 @@ pub fn tick(state: &mut LayoutState, rows: &[WinRow]) -> String {
     status_text(state)
 }
 
-/// Whether a window was created or closed since the last check: the
-/// only event that makes the check run — manual moves, resizes and
-/// workspace switches change no address.
-fn window_set_changed(state: &mut LayoutState, rows: &[WinRow]) -> bool {
-    let set: HashSet<String> = rows.iter().map(|r| r.address.clone()).collect();
-    if set == state.set {
-        return false;
+/// What changed since the last check. A create/close starts a new window
+/// set (the applied layout may fire again); a mere workspace move keeps
+/// the set, so an already applied layout is not re-applied.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Trigger {
+    CreatedOrClosed,
+    WorkspaceOnly,
+}
+
+/// Whether the arrangement (address + workspace) differs from the last
+/// check — the only event that re-runs it. Manual resizes, raises and
+/// workspace switches change neither address nor workspace.
+fn arrangement_trigger(state: &mut LayoutState, rows: &[WinRow]) -> Option<Trigger> {
+    let addresses: HashSet<String> = rows.iter().map(|r| r.address.clone()).collect();
+    let arrangement: HashSet<(String, String)> = rows
+        .iter()
+        .map(|r| (r.address.clone(), r.workspace.clone()))
+        .collect();
+    if arrangement == state.arrangement {
+        return None;
     }
-    state.set = set;
-    true
+    let trigger = if addresses == state.addresses {
+        Trigger::WorkspaceOnly
+    } else {
+        Trigger::CreatedOrClosed
+    };
+    state.addresses = addresses;
+    state.arrangement = arrangement;
+    Some(trigger)
+}
+
+/// Whether this layout still needs applying for the current window set:
+/// the one already applied is left alone (manual moves are not undone),
+/// a different one (or none yet) may fire.
+fn applies(state: &LayoutState, name: &str) -> bool {
+    state.applied_layout.as_deref() != Some(name)
 }
 
 /// The saved layout that fits the open windows: its classes must all be
@@ -302,7 +348,7 @@ fn status_text(state: &LayoutState) -> String {
             return "✓ saved".to_string();
         }
     }
-    if let Some(at) = &state.applied {
+    if let Some(at) = &state.applied_flash {
         if at.elapsed() < FLASH {
             return "✓ applied".to_string();
         }
@@ -618,24 +664,55 @@ mod tests {
         }
     }
 
-    /// The trigger of the check: it runs when a window is created or
-    /// closed (the address set differs) and never otherwise — manual
-    /// moves, resizes and workspace switches change no address. `tick`
-    /// itself is not tested here: it dispatches real `hyprctl` calls,
-    /// and the pure pieces it composes (`window_set_changed`,
-    /// `best_match`, `plan`) are covered individually.
+    /// The trigger of the check: a window created or closed starts a new
+    /// window set, a window moved to another workspace keeps it and still
+    /// re-runs the check (the workspace veto depends on placement).
+    /// Manual resizes, raises and workspace switches change no address
+    /// and no workspace, so nothing runs. `tick` itself is not tested
+    /// here: it dispatches real `hyprctl` calls, and the pure pieces it
+    /// composes (`arrangement_trigger`, `applies`, `best_match`, `plan`)
+    /// are covered individually.
     #[test]
-    fn check_runs_only_when_a_window_is_created_or_closed() {
+    fn check_runs_on_creation_closure_or_workspace_move() {
         let mut state = LayoutState::default();
         let a = row("0xA", "kitty", "shell", "1", false);
-        assert!(window_set_changed(&mut state, &[a.clone()]), "the first set is a change");
-        assert!(!window_set_changed(&mut state, &[a.clone()]), "same windows: no check");
-        let switched = row("0xA", "kitty", "shell", "2", false);
-        assert!(!window_set_changed(&mut state, &[switched]), "a workspace switch changes no address");
+        assert_eq!(
+            arrangement_trigger(&mut state, &[a.clone()]),
+            Some(Trigger::CreatedOrClosed),
+            "the first set is a change"
+        );
+        assert_eq!(arrangement_trigger(&mut state, &[a.clone()]), None, "same windows: no check");
+        let moved = row("0xA", "kitty", "shell", "2", false);
+        assert_eq!(
+            arrangement_trigger(&mut state, &[moved.clone()]),
+            Some(Trigger::WorkspaceOnly),
+            "a workspace move re-runs the check"
+        );
+        assert_eq!(arrangement_trigger(&mut state, &[moved]), None, "same workspace: no check");
         let b = row("0xB", "firefox", "Home", "1", false);
-        assert!(window_set_changed(&mut state, &[a.clone(), b.clone()]), "a new window is an event");
-        assert!(window_set_changed(&mut state, &[b.clone()]), "a closed window is an event");
-        assert!(!window_set_changed(&mut state, &[b.clone()]), "same set again: quiet");
+        assert_eq!(
+            arrangement_trigger(&mut state, &[a.clone(), b.clone()]),
+            Some(Trigger::CreatedOrClosed),
+            "a new window is an event"
+        );
+        assert_eq!(
+            arrangement_trigger(&mut state, &[b.clone()]),
+            Some(Trigger::CreatedOrClosed),
+            "a closed window is an event"
+        );
+        assert_eq!(arrangement_trigger(&mut state, &[b]), None, "same set again: quiet");
+    }
+
+    /// The applied layout is not fired again for the same window set: a
+    /// manual move may change the match, but it is never undone. A
+    /// different layout (or none applied yet) may fire.
+    #[test]
+    fn an_already_applied_layout_is_not_reapplied() {
+        let mut state = LayoutState::default();
+        assert!(applies(&state, "A"), "nothing applied yet");
+        state.applied_layout = Some("A".to_string());
+        assert!(!applies(&state, "A"), "the same layout is left alone");
+        assert!(applies(&state, "B"), "another layout may apply");
     }
 
     /// The applied flash: `✓ applied` for the `FLASH` window after an
@@ -646,9 +723,9 @@ mod tests {
         let mut state = LayoutState::default();
         state.file = Some(BTreeMap::new());
         state.matched = true;
-        state.applied = Some(Instant::now());
+        state.applied_flash = Some(Instant::now());
         assert_eq!(status_text(&state), "✓ applied", "fresh apply");
-        state.applied = Some(Instant::now() - FLASH);
+        state.applied_flash = Some(Instant::now() - FLASH);
         assert_eq!(status_text(&state), "✓", "the flash fades to the match sign");
         state.flash = Some(Instant::now());
         assert_eq!(status_text(&state), "✓ saved", "a save outranks an old apply");
