@@ -1,5 +1,9 @@
 # Piuma - System Information Panel for Hyprland
 
+<a href="https://youtu.be/0rrx60NHr0M">
+  <img src="docs/thumbnail.jpg" alt="Piuma video overview" width="640">
+</a>
+
 Piuma is a lightweight system information panel for Hyprland/Wayland.
 
 ## Why piuma
