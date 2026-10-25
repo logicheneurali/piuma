@@ -925,7 +925,6 @@ fn rofi_rasi(t: &Tones, panel: &config::PanelConfig) -> String {
 
     format!(
         r#"* {{
-    background-color: {bg};
     text-color: {fg};
     border-color: {border_color};
 }}
@@ -936,6 +935,7 @@ window {{
     border-radius: {radius}px;
 }}
 mainbox {{
+    background-color: {bg};
     spacing: {gap}px;
     padding: {main_pad}px;
 }}
@@ -948,9 +948,12 @@ inputbar {{
     margin: 0px 0px {gap}px 0px;
 }}
 listview {{
-    background-color: transparent;
+    background-color: {bg};
     padding: 0px;
     border: 0px;
+}}
+entry, prompt, case-indicator, element-text, element-icon, scrollbar {{
+    background-color: transparent;
 }}
 element {{
     background-color: transparent;
@@ -1350,6 +1353,20 @@ mod tests {
         assert!(yazi_theme(&t).contains(&format!("bg = \"{}\"", t.panel_bg)));
         assert!(alacritty_colors(&t).contains("[colors.primary]"));
         assert!(osc_conf(&t).contains(&format!("bg_color={}", t.panel_bg)));
+    }
+
+    #[test]
+    fn rofi_does_not_paint_inner_widgets() {
+        let panel = config::default_config().panel;
+        let t = tones(&panel, None);
+        let rasi = rofi_rasi(&t, &panel);
+        // A global background on `*` would paint the input and the row
+        // text zones over the inputbar/selection (two backgrounds).
+        assert!(rasi.starts_with("* {\n    text-color:"), "no global background: {rasi}");
+        assert!(
+            rasi.contains("entry, prompt, case-indicator, element-text, element-icon, scrollbar {\n    background-color: transparent;"),
+            "inner widgets transparent: {rasi}"
+        );
     }
 
     #[test]
