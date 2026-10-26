@@ -193,7 +193,10 @@ impl Tones {
         // tone is always generated opaque.
         let mut panel_bg = crate::styles::panel_bg(panel, pal);
         panel_bg.a = 1.0;
-        let panel_fg = crate::styles::default_text(panel, pal);
+        // The panel background is forced opaque above, so the text has to
+        // be flattened over it too: apps read these as plain hex (kitty
+        // rejects rgba()), and GTK would otherwise blend the alpha twice.
+        let panel_fg = solid(crate::styles::default_text(panel, pal), panel_bg);
         let section = panel.section_defaults.as_ref();
         let sensor = panel.sensor_defaults.as_ref();
 
@@ -914,16 +917,15 @@ fn rofi_rasi(t: &Tones, panel: &config::PanelConfig) -> String {
     let size = panel.font_size.unwrap_or(crate::DEFAULT_FONT_SIZE).max(12);
     let weight = if panel.bold.unwrap_or(false) { " Bold" } else { "" };
     let font = format!("{family}{weight} {size}px");
-    // Window: the section border/radius; rows: the sensor one. The bar's
-    // border colours are fully transparent, and the piuma hover border
-    // (`border_color_hover`) is not rendered by the bar at all — the
-    // selection is marked by the hover background, so no border is drawn
-    // when the colour is transparent (a 0px border keeps the rows aligned).
+    // Window: the section border/radius, with a subtle fallback when the
+    // configured border is transparent — otherwise the launcher melts into
+    // the identically coloured application windows. Rows: the sensor one;
+    // the piuma hover border (`border_color_hover`) is not rendered by the
+    // bar at all — the selection is marked by the hover background, so no
+    // border is drawn when the colour is transparent (a 0px border keeps
+    // the rows aligned).
     let radius = num(section.and_then(|d| d.border_radius), 12);
-    let (border, border_color) = rofi_border(
-        section.and_then(|d| d.border_color.as_deref()),
-        num(section.and_then(|d| d.border_width), 1),
-    );
+    let (border, border_color) = rofi_window_border(t, section);
     let row_radius = num(sensor.and_then(|d| d.border_radius), 8);
     let (row_border, row_border_color) = rofi_border(
         sensor.and_then(|d| d.border_color.as_deref()),
@@ -1004,6 +1006,24 @@ element normal.active {{
         row_h = row_h,
         gap = pad + 4,
     )
+}
+
+/// Window border: a visible section border wins; a transparent one (the
+/// bar's default) still gets a 1px outline mixed from the text and panel
+/// tones, so the launcher separates from same-toned application windows.
+fn rofi_window_border(t: &Tones, section: Option<&config::SectionDefaults>) -> (u32, String) {
+    let width = config::style_num(section.and_then(|d| d.border_width)).unwrap_or(1);
+    if width == 0 {
+        return (0, "transparent".to_string());
+    }
+    if let Some(c) = section.and_then(|d| d.border_color.as_deref()).and_then(color) {
+        if c.a > 0.001 {
+            return (width, hex_alpha(c));
+        }
+    }
+    let fg = color(&t.panel_fg).unwrap_or(Color::from_rgb(0.88, 0.88, 0.88));
+    let bg = color(&t.panel_bg).unwrap_or(Color::from_rgb(0.08, 0.12, 0.25));
+    (1, hex_alpha(solid(Color { a: 0.24, ..fg }, bg)))
 }
 
 /// A border only when the colour actually shows: a transparent border
@@ -1314,6 +1334,20 @@ mod tests {
     }
 
     #[test]
+    fn translucent_panel_text_is_flattened_for_app_themes() {
+        let mut panel = config::default_config().panel;
+        panel.default_text_color = Some("#eeeeeeee".to_string());
+        let t = tones(&panel, None);
+        assert!(t.panel_fg.starts_with('#'), "panel text flattened: {}", t.panel_fg);
+        let kitty = kitty_conf(None, &t);
+        assert!(
+            kitty.lines().any(|line| line.starts_with("foreground #")),
+            "hex foreground: {kitty}"
+        );
+        assert!(!kitty.contains("rgba"), "kitty only accepts hex: {kitty}");
+    }
+
+    #[test]
     fn block_is_appended_last_and_removed_cleanly() {
         let dir = std::env::temp_dir().join(format!("piuma-css-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
@@ -1423,6 +1457,29 @@ mod tests {
         // border, so the selection must not invent a cyan outline.
         assert!(!rasi.contains("#00ffff"), "no hover border: {rasi}");
         assert!(rasi.contains("border: 0px;"), "transparent border collapses: {rasi}");
+    }
+
+    /// The section border is transparent by default (the bar does not
+    /// draw one); the launcher still needs a hairline against the app
+    /// windows, so the window gets a subtle mixed fallback.
+    #[test]
+    fn rofi_window_gets_a_fallback_border() {
+        let mut panel = config::default_config().panel;
+        panel.section_defaults = Some(config::SectionDefaults {
+            bg_color: None,
+            text_color: None,
+            border_color: Some("#ffffff00".to_string()),
+            border_width: Some(1),
+            border_radius: None,
+            border_type: None,
+            respect_screen_edges: None,
+        });
+        let t = tones(&panel, None);
+        let rasi = rofi_rasi(&t, &panel);
+        let window = rasi.split("window {").nth(1).expect("window block");
+        let block = window.split('}').next().expect("closed window block");
+        assert!(block.contains("border: 1px;"), "{block}");
+        assert!(!block.contains("border-color: transparent"), "{block}");
     }
 
     #[test]
