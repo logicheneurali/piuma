@@ -36,6 +36,17 @@ doing without turning into a desktop environment of its own.
 
 ## Features
 
+### Wallpaper
+
+`panel.wallpaper` draws the desktop background in-process. `mode` is
+`image` (the default) or `color`: an image uses a cover fit — it fills
+each output, keeps its aspect ratio and crops the overhang, so different
+aspect ratios crop differently per monitor — while `color` paints a
+solid colour. Both are selected in `piuma-setup`'s Wallpaper tab, which
+also has a switch for Hyprland's own 8K default wallpaper/logo (it edits
+the `misc.disable_hyprland_logo` and `misc.force_default_wallpaper`
+values in the Hyprland config and reloads it).
+
 ### Sensor Types
 
 Sensor `type` values follow a naming convention by category:

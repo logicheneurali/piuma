@@ -150,16 +150,27 @@ pub struct PanelConfig {
 /// `panel.wallpaper`: the desktop background the bar draws on the
 /// background layer — no external wallpaper tool is involved. Every
 /// field defaults so a partial block (or none at all) keeps old
-/// configs working: disabled, no path, no window.
+/// configs working: disabled, image mode, no path/colour, no window.
 #[derive(Deserialize, serde::Serialize, Clone)]
 pub struct WallpaperConfig {
     /// Whether the bar shows the wallpaper at all.
     #[serde(default)]
     pub enabled: bool,
+    /// `"image"` (default) or `"color"`: which background the bar draws.
+    #[serde(default = "default_wallpaper_mode")]
+    pub mode: String,
     /// Absolute path of the image, drawn with a cover fit over the
     /// whole output.
     #[serde(default)]
     pub path: String,
+    /// Solid colour painted over the whole output when `mode` is
+    /// `"color"`. Parsed with the same rules as every other colour.
+    #[serde(default)]
+    pub color: String,
+}
+
+fn default_wallpaper_mode() -> String {
+    "image".to_string()
 }
 
 /// `panel.screen_corners`: a square mask per screen corner making the
@@ -606,6 +617,23 @@ pub fn validate_config(cfg: &Config) -> Vec<ConfigError> {
     // Panel-level typed values.
     err_color(&mut errors, "panel.default_bg_color", p.default_bg_color.as_deref());
     err_color(&mut errors, "panel.default_text_color", p.default_text_color.as_deref());
+    if let Some(w) = &p.wallpaper {
+        err_one_of(&mut errors, "panel.wallpaper.mode", Some(&w.mode), &["image", "color"]);
+        if w.mode == "color" {
+            if w.color.trim().is_empty() {
+                if w.enabled {
+                    errors.push(ConfigError {
+                        path: "panel.wallpaper.color".to_string(),
+                        message: "solid colour mode needs a colour".to_string(),
+                    });
+                }
+            } else {
+                err_color(&mut errors, "panel.wallpaper.color", Some(&w.color));
+            }
+        } else if !w.color.trim().is_empty() {
+            err_color(&mut errors, "panel.wallpaper.color", Some(&w.color));
+        }
+    }
     err_one_of(
         &mut errors,
         "panel.anchor",
@@ -855,17 +883,21 @@ mod tests {
     /// per-field defaults every older config relies on.
     #[test]
     fn wallpaper_keys_parse_and_roundtrip() {
-        let json = r#"{"panel":{"wallpaper":{"enabled":true,"path":"/tmp/a.png"},"sections":[]}}"#;
+        let json = r##"{"panel":{"wallpaper":{"enabled":true,"mode":"color","path":"/tmp/a.png","color":"#112233"},"sections":[]}}"##;
         let cfg: Config = serde_json::from_str(json).expect("wallpaper must be valid");
         let wp = cfg.panel.wallpaper.as_ref().expect("block present");
         assert!(wp.enabled);
+        assert_eq!(wp.mode, "color");
         assert_eq!(wp.path, "/tmp/a.png");
+        assert_eq!(wp.color, "#112233");
         // A partial block falls back per field…
         let cfg: Config =
             serde_json::from_str(r#"{"panel":{"wallpaper":{},"sections":[]}}"#).expect("partial ok");
         let wp = cfg.panel.wallpaper.as_ref().expect("block present");
         assert!(!wp.enabled);
+        assert_eq!(wp.mode, "image");
         assert!(wp.path.is_empty());
+        assert!(wp.color.is_empty());
         // …and an absent block stays absent (old configs: disabled).
         let cfg: Config =
             serde_json::from_str(r#"{"panel":{"sections":[]}}"#).expect("absent ok");
@@ -875,6 +907,31 @@ mod tests {
         let out = serde_json::to_string(&cfg).expect("config must serialize");
         let back: Config = serde_json::from_str(&out).expect("reparse must work");
         assert!(back.panel.wallpaper.is_none());
+    }
+
+    #[test]
+    fn wallpaper_validation_names_bad_mode_and_colour() {
+        let cfg: Config = serde_json::from_str(
+            r##"{"panel":{"wallpaper":{"enabled":true,"mode":"solid","color":"nope"},"sections":[]}}"##,
+        )
+        .expect("config must parse");
+        let errors = validate_config(&cfg);
+        let paths: Vec<&str> = errors.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, vec!["panel.wallpaper.mode", "panel.wallpaper.color"]);
+
+        let cfg: Config = serde_json::from_str(
+            r#"{"panel":{"wallpaper":{"enabled":true,"mode":"color","color":""},"sections":[]}}"#,
+        )
+        .expect("config must parse");
+        let errors = validate_config(&cfg);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].path, "panel.wallpaper.color");
+
+        let cfg: Config = serde_json::from_str(
+            r##"{"panel":{"wallpaper":{"enabled":true,"mode":"color","color":"#112233"},"sections":[]}}"##,
+        )
+        .expect("config must parse");
+        assert!(validate_config(&cfg).is_empty());
     }
 
     /// Roadmap angoli-schermo: `panel.screen_corners` parses whole,

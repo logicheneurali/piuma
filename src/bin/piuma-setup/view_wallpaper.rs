@@ -2,11 +2,11 @@
 //! plus its card, and the autostart tab listing the launchers that start
 //! with the session.
 use iced::widget::{button, column, container, scrollable, text, toggler, Row};
-use iced::{Alignment, Border, Element, Length, Theme};
+use iced::{Alignment, Background, Border, Element, Length, Theme};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::controls::input;
+use crate::controls::{color_control, input, picklist};
 use crate::style::*;
 use crate::model::{PiumaConfig, WallpaperCfg};
 use crate::state::{Message, PiumaSetup};
@@ -100,72 +100,148 @@ fn collect_images(dir: &Path, out: &mut Vec<PathBuf>, depth: u8) {
 pub(crate) fn wallpaper_set(config: &mut PiumaConfig, edit: impl FnOnce(&mut WallpaperCfg)) {
     let w = config.wallpaper.get_or_insert_with(WallpaperCfg::default);
     edit(w);
-    if !w.enabled && w.path.is_empty() {
+    if !w.enabled && w.path.is_empty() && w.color.is_empty() {
         config.wallpaper = None;
     }
 }
 
-/// The `panel.wallpaper` editor (roadmap2 #1): the bar draws the image
-/// itself, so this tab only chooses it — enable toggle, the images found
-/// in the freedesktop folders (list + preview) and a hand-typed path.
-/// Saving is the global Save; the bar applies the change on its tick.
+/// The `panel.wallpaper` editor (roadmap2 #1): the bar draws the
+/// background itself — an image (cover fit) or a solid colour. The
+/// Hyprland switch below edits Hyprland's own config and applies
+/// immediately; the piuma.json side follows the global Save.
 pub(crate) fn wallpaper_settings(state: &PiumaSetup) -> Element<'_, Message> {
     let cfg = state.config.wallpaper.clone().unwrap_or_default();
     let current = cfg.path.clone();
     let pal = palette(&state.config);
+    let color_mode = cfg.mode == "color";
+    // Borrow the field from the state, not the cloned `cfg`: the colour
+    // control's element lives as long as `state`, not this stack frame.
+    let color_value = state
+        .config
+        .wallpaper
+        .as_ref()
+        .map(|w| w.color.as_str())
+        .unwrap_or_default();
 
-    // The scanned images as a pickable list; the current path is marked.
-    let mut files = column![].spacing(2).width(Length::Fill);
-    for file in &state.wallpaper_files {
-        let label = file.to_string_lossy().to_string();
-        let selected = current == label;
-        files = files.push(
-            button(
-                text(if selected {
-                    format!("• {label}")
-                } else {
-                    label.clone()
+    // The image preview uses the same Cover fit as the bar: it fills the
+    // box and crops, so it never promises letterboxing that does not
+    // happen. Colour mode simply shows the painted output.
+    let preview: Element<Message> = if color_mode {
+        match crate::config::parse_color(&cfg.color) {
+            Ok(color) => container(text(""))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(move |_| container::Style {
+                    background: Some(Background::Color(color)),
+                    ..container::Style::default()
                 })
-                .size(BODY),
-            )
-            .on_press(Message::WallpaperPathChanged(label))
-            .style(move |t, s| {
-                if selected {
-                    btn_primary(pal, t, s)
-                } else {
-                    btn_secondary(pal, t, s)
-                }
-            })
-            .width(Length::Fill),
-        );
-    }
-    let list = scrollable(files).height(Length::Fixed(240.0)).width(Length::Fill);
-
-    // Preview of the current path: the image when the file is there, a
-    // placeholder otherwise (a typed path may not exist yet).
-    let preview: Element<Message> = if !current.is_empty() && PathBuf::from(&current).is_file() {
+                .into(),
+            Err(_) => text("No colour — type a valid value").size(BODY).into(),
+        }
+    } else if !current.is_empty() && PathBuf::from(&current).is_file() {
         iced::widget::image(iced::widget::image::Handle::from_path(current.clone()))
             .width(Length::Fill)
             .height(Length::Fill)
-            .content_fit(iced::ContentFit::Contain)
+            .content_fit(iced::ContentFit::Cover)
             .into()
     } else {
         text("No preview — pick an image or check the path").size(BODY).into()
     };
 
-    card(
-        pal,
-        column![
-            text("Wallpaper").size(16).style(fg_text(pal)),
-            toggler(cfg.enabled)
-                .label("Enable wallpaper")
-                .on_toggle(Message::WallpaperEnabled),
-            // Runtime-only tones (see the save): the file keeps just
-            // this switch, so turning it off restores the user's own
-            // configured colours.
+    let mode = picklist(
+        vec!["Image".to_string(), "Solid colour".to_string()],
+        Some(if color_mode { "Solid colour" } else { "Image" }.to_string()),
+        |label: String| {
+            Message::WallpaperModeChanged(if label == "Solid colour" {
+                "color".to_string()
+            } else {
+                "image".to_string()
+            })
+        },
+    )
+    .width(Length::Fill);
+
+    let mut content = column![
+        text("Wallpaper").size(16).style(fg_text(pal)),
+        toggler(cfg.enabled)
+            .label("Enable wallpaper")
+            .on_toggle(Message::WallpaperEnabled),
+        Row::new()
+            .push(text("Mode").size(BODY).width(Length::Fixed(80.0)))
+            .push(mode)
+            .align_y(Alignment::Center)
+            .spacing(10)
+            .width(Length::Fill),
+    ]
+    .spacing(10)
+    .width(Length::Fill);
+
+    if color_mode {
+        content = content.push(
+            Row::new()
+                .push(text("Background colour").size(BODY).width(Length::Fixed(160.0)))
+                .push(color_control(
+                    color_value,
+                    state.field_err("panel.wallpaper.color"),
+                    Message::WallpaperColorChanged,
+                ))
+                .align_y(Alignment::Center)
+                .spacing(10)
+                .width(Length::Fill),
+        );
+        content = content.push(
+            text("Solid colour fills each output; no image is decoded, so the bar palette stays as configured.")
+                .size(BODY),
+        );
+        content = content.push(
+            container(preview)
+                .width(Length::Fill)
+                .height(Length::Fixed(240.0))
+                .style(move |_t: &Theme| container::Style {
+                    border: Border {
+                        color: pal.card_border,
+                        width: 1.0,
+                        radius: 4.0.into(),
+                    },
+                    ..container::Style::default()
+                }),
+        );
+    } else {
+        // The scanned images as a pickable list; the current path is marked.
+        let mut files = column![].spacing(2).width(Length::Fill);
+        for file in &state.wallpaper_files {
+            let label = file.to_string_lossy().to_string();
+            let selected = current == label;
+            files = files.push(
+                button(
+                    text(if selected {
+                        format!("• {label}")
+                    } else {
+                        label.clone()
+                    })
+                    .size(BODY),
+                )
+                .on_press(Message::WallpaperPathChanged(label))
+                .style(move |t, s| {
+                    if selected {
+                        btn_primary(pal, t, s)
+                    } else {
+                        btn_secondary(pal, t, s)
+                    }
+                })
+                .width(Length::Fill),
+            );
+        }
+        let list = scrollable(files).height(Length::Fixed(240.0)).width(Length::Fill);
+
+        // Runtime-only tones (see the save): the file keeps just this
+        // switch, so turning it off restores the user's own colours.
+        content = content.push(
             toggler(state.config.wallpaper_palette.unwrap_or(false))
                 .label("Bar colours from the wallpaper")
                 .on_toggle(Message::PaletteFromWallpaper),
+        );
+        content = content.push(
             Row::new()
                 .push(list)
                 .push(
@@ -183,19 +259,39 @@ pub(crate) fn wallpaper_settings(state: &PiumaSetup) -> Element<'_, Message> {
                 )
                 .spacing(10)
                 .width(Length::Fill),
+        );
+        content = content.push(
             input(
                 "/path/to/image.png",
                 state.config.wallpaper.as_ref().map(|w| w.path.as_str()).unwrap_or_default(),
                 Message::WallpaperPathChanged,
             )
             .width(Length::Fill),
-            text("Searched: $XDG_DATA_HOME/wallpapers, $XDG_DATA_DIRS/wallpapers and your pictures folder (freedesktop).")
+        );
+        content = content.push(
+            text("Searched: $XDG_DATA_HOME/wallpapers, $XDG_DATA_DIRS/wallpapers and your pictures folder (freedesktop).\n\
+                  Cover fills each output and crops the overhang when the image aspect differs; each monitor is covered separately.")
                 .size(BODY),
-        ]
-        .spacing(10)
-        .width(Length::Fill),
-    )
-    .into()
+        );
+    }
+
+    if let Some(disabled) = state.hypr_wallpaper_disabled {
+        content = content.push(
+            toggler(disabled)
+                .label("Disable Hyprland wallpaper/logo (8K, saves memory)")
+                .on_toggle(Message::HyprWallpaperToggled),
+        );
+        content = content.push(
+            text("Applies immediately with hyprctl reload; edits only the wallpaper/logo options in the Hyprland config.")
+                .size(BODY),
+        );
+    } else {
+        content = content.push(
+            text("Hyprland config not found (hyprland.lua / hyprland.conf).").size(BODY),
+        );
+    }
+
+    card(pal, content).into()
 }
 
 /// The dedicated "Autostart apps" tab (roadmap2 #2): the global launch

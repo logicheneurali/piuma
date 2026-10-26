@@ -13,11 +13,21 @@ use crate::state::{config_dir, PiumaSetup};
 
 
 /// The `panel.wallpaper` block (roadmap2 #1): whether the bar draws the
-/// desktop background itself and which image covers the output.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// desktop background itself, and whether it is an image (cover fit) or
+/// a solid colour.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WallpaperCfg {
     pub enabled: bool,
+    pub mode: String,
     pub path: String,
+    pub color: String,
+}
+
+impl Default for WallpaperCfg {
+    fn default() -> Self {
+        // Absent fields fall back exactly like the bar's serde defaults.
+        Self { enabled: false, mode: "image".to_string(), path: String::new(), color: String::new() }
+    }
 }
 
 /// The `panel.screen_corners` block (roadmap angoli-schermo): the
@@ -365,7 +375,11 @@ impl PiumaSetup {
         if let Some(w) = &self.config.wallpaper {
             let mut wp = Map::new();
             wp.insert("enabled".to_string(), JsonValue::Bool(w.enabled));
+            wp.insert("mode".to_string(), JsonValue::String(w.mode.clone()));
             wp.insert("path".to_string(), JsonValue::String(w.path.clone()));
+            if !w.color.is_empty() {
+                wp.insert("color".to_string(), JsonValue::String(w.color.clone()));
+            }
             panel.insert("wallpaper".to_string(), JsonValue::Object(wp));
         }
         // The corners block follows the same rule (roadmap angoli).
@@ -739,7 +753,13 @@ impl PiumaSetup {
         self.config.wallpaper = panel.get("wallpaper").and_then(|v| {
             v.as_object().map(|o| WallpaperCfg {
                 enabled: o.get("enabled").and_then(JsonValue::as_bool).unwrap_or(false),
+                mode: o
+                    .get("mode")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or("image")
+                    .to_string(),
                 path: o.get("path").and_then(JsonValue::as_str).unwrap_or_default().to_string(),
+                color: o.get("color").and_then(JsonValue::as_str).unwrap_or_default().to_string(),
             })
         });
         // Absent `screen_corners` stays `None`: the bar draws no corner

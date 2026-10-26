@@ -35,6 +35,12 @@ pub enum Message {
     /// Wallpaper image path, from the scanned list or a hand-typed
     /// custom path (roadmap2 #1); one destination for both sources.
     WallpaperPathChanged(String),
+    /// Wallpaper background mode, `"image"` or `"color"`.
+    WallpaperModeChanged(String),
+    /// Solid background colour (colour mode).
+    WallpaperColorChanged(String),
+    /// Toggle Hyprland's own default wallpaper/logo in its config.
+    HyprWallpaperToggled(bool),
     /// Wallpaper-palette switch (runtime tones from the wallpaper image).
     PaletteFromWallpaper(bool),
     /// Rounded screen corners (roadmap angoli-schermo): enable toggle,
@@ -288,6 +294,9 @@ pub struct PiumaSetup {
     /// Images found under the freedesktop wallpaper folders (roadmap2 #1),
     /// scanned once at startup for the Wallpaper tab's list.
     pub(crate) wallpaper_files: Vec<PathBuf>,
+    /// Whether Hyprland's own default wallpaper/logo is currently off in
+    /// its config; `None` when no Hyprland config was found.
+    pub(crate) hypr_wallpaper_disabled: Option<bool>,
     /// Autostart `.desktop` files found under the freedesktop dirs
     /// (roadmap2 #2), scanned once at startup for the "Autostart apps"
     /// tab and re-read after every switch — the switches show the spec
@@ -317,6 +326,7 @@ impl PiumaSetup {
             modal: None,
             validation: Vec::new(),
             wallpaper_files: scan_wallpaper_dirs(&wallpaper_dirs()),
+            hypr_wallpaper_disabled: crate::hyprland_wallpaper::read_disabled(),
             autostart_apps: Vec::new(),
             layouts: Vec::new(),
         };

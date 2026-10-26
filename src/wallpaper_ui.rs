@@ -1,41 +1,74 @@
 //! The wallpaper surface: sync between config and runtime (plan,
 //! view, palette extraction kick-off).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use crate::config::{self, WallpaperConfig};
 use crate::palette;
 use crate::{monitor_names, restyle};
 use crate::{Message, Panel};
 use iced::widget::image::Image;
 use iced::widget::{container, text};
-use iced::{Element, Length, Task as Command};
+use iced::{Background, Element, Length, Task as Command};
 use iced_exwlshell::reexport::{
     Anchor, KeyboardInteractivity, Layer, NewLayerShellSettings, OutputOption,
 };
 use iced_exwlshell::settings::LayerSize;
-/// Open or close the wallpaper surface (roadmap2 #1) so it matches the
-/// config: the window exists while `panel.wallpaper` is enabled with an
-/// existing file and closes otherwise. Called on every tick — the
-/// comparison is cheap, and the first tick materializes the setting
-/// after startup (the daemon's init closure cannot open windows).
-/// One wallpaper surface per active output: a layer surface lives on a
-/// single output, so the window set tracks the monitor list. Runs on
-/// every tick — the output query only executes while something must be
-/// shown (the disabled case costs nothing), a monitor plugged later
-/// joins within a tick, and a removed one closes its surface.
+
+/// The background the active mode selects. The mode is explicit: an
+/// image path is ignored in colour mode and a colour is ignored in image
+/// mode, so the setup switch always means what it says.
+enum WallpaperBackground<'a> {
+    Image(&'a str),
+    Color(iced::Color),
+}
+
+fn background(w: &WallpaperConfig) -> Option<WallpaperBackground<'_>> {
+    match w.mode.as_str() {
+        "image" => {
+            let path = w.path.trim();
+            (!path.is_empty() && Path::new(path).is_file())
+                .then_some(WallpaperBackground::Image(path))
+        }
+        "color" => config::parse_color(&w.color).ok().map(WallpaperBackground::Color),
+        _ => None,
+    }
+}
+
+fn blank<'a>() -> Element<'a, Message> {
+    container(text("")).width(Length::Fill).height(Length::Fill).into()
+}
+
+/// Open the wallpaper surface (roadmap2 #1) so it matches the config and
+/// hide it when the feature is off. The window stays alive while off: a
+/// closed wallpaper window makes the renderer/driver retain the decoded
+/// image (~8 MB per output), so only the view goes empty. Called on
+/// every tick — the comparison is cheap, and the first tick materializes
+/// the setting after startup (the daemon's init closure cannot open
+/// windows). One wallpaper surface per active output: a layer surface
+/// lives on a single output, so the window set tracks the monitor list;
+/// the output query only runs while the wallpaper is enabled, a monitor
+/// plugged later joins within a tick, and a removed one closes its
+/// surface (the only close left, for a surface whose output is gone).
 pub(crate) fn sync_wallpaper(panel: &mut Panel) -> Command<Message> {
     let wanted = panel
         .config
         .panel
         .wallpaper
         .as_ref()
-        .is_some_and(|w| w.enabled && !w.path.is_empty() && PathBuf::from(&w.path).is_file());
-    let desired = if wanted { monitor_names() } else { Vec::new() };
+        .is_some_and(|w| w.enabled && background(w).is_some());
+    if !wanted {
+        // Closing a wallpaper window makes the renderer/driver keep the
+        // decoded image (~8 MB per output). Keep the windows alive and
+        // empty their view instead: re-enabling reuses the same texture.
+        panel.wallpaper_hidden = panel.wallpaper.iter().map(|(_, id)| *id).collect();
+        return Command::none();
+    }
+    panel.wallpaper_hidden.clear();
+    let desired = monitor_names();
     let (to_open, to_close) = wallpaper_plan(&panel.wallpaper, &desired);
-    // Forget the closed surfaces in the same breath (as the corner masks
-    // do): keeping the id would make the plan believe the surface is
-    // still placed, so toggling the wallpaper off and on again would
-    // never reopen it.
+    // Only an output that disappeared is closed now; the feature being
+    // off keeps its windows hidden (see above).
     forget_closed(&mut panel.wallpaper, &to_close);
     let mut cmds: Vec<Command<Message>> = to_close.into_iter().map(iced::window::close).collect();
     for name in to_open {
@@ -79,7 +112,9 @@ pub(crate) fn sync_palette(panel: &mut Panel) -> Command<Message> {
         .then_some(cfg.wallpaper.as_ref())
         .flatten()
         .filter(|w| w.enabled)
-        .filter(|w| !w.path.is_empty())
+        // The palette is extracted from an image only; colour mode drops
+        // it and the configured app colours are resolved again.
+        .filter(|w| matches!(background(w), Some(WallpaperBackground::Image(_))))
         .and_then(|w| {
             let mtime = std::fs::metadata(&w.path)
                 .ok()
@@ -122,8 +157,8 @@ pub(crate) fn sync_palette(panel: &mut Panel) -> Command<Message> {
 }
 
 /// Pure part of the wallpaper sync: outputs that still need a window
-/// and windows to close (their output is gone, or the whole feature
-/// switched off — an empty wanted list then closes everything).
+/// and windows to close because their output is gone. The feature
+/// toggle hides the windows instead of calling this with an empty list.
 pub(crate) fn wallpaper_plan<T: Clone>(
     current: &[(String, T)],
     desired: &[String],
@@ -142,8 +177,8 @@ pub(crate) fn wallpaper_plan<T: Clone>(
 }
 
 /// Drop the closed surfaces from the list, so a later plan can reopen a
-/// surface whose output (or whole feature) comes back: an id kept here
-/// would match the plan's "already placed" and never reopen.
+/// surface whose output comes back: an id kept here would match the
+/// plan's "already placed" and never reopen.
 pub(crate) fn forget_closed<T: PartialEq>(current: &mut Vec<(String, T)>, closed: &[T]) {
     current.retain(|(_, id)| !closed.contains(id));
 }
@@ -151,26 +186,38 @@ pub(crate) fn forget_closed<T: PartialEq>(current: &mut Vec<(String, T)>, closed
 /// The wallpaper surface: the configured image covering the whole output
 /// (cover fit keeps the aspect ratio and crops what spills over). The
 /// file is re-checked here — a path removed behind the config's back
-/// renders the surface empty instead of breaking the window.
-pub(crate) fn wallpaper_view(panel: &Panel) -> Element<'_, Message> {
-    let path = panel
-        .config
-        .panel
-        .wallpaper
-        .as_ref()
-        .map(|w| w.path.as_str())
-        .unwrap_or_default();
-    if path.is_empty() || !PathBuf::from(path).is_file() {
-        return container(text(""))
+/// renders the surface empty instead of breaking the window. Hidden
+/// while the feature is off, so the window (and its image cache) lives.
+pub(crate) fn wallpaper_view(panel: &Panel, window: iced::window::Id) -> Element<'_, Message> {
+    // Hidden while the feature is off: keep the renderer (and its image
+    // cache) alive, draw nothing.
+    let Some(w) = panel.config.panel.wallpaper.as_ref() else {
+        return blank();
+    };
+    if panel.wallpaper_hidden.contains(&window) {
+        return blank();
+    }
+    match background(w) {
+        // Cover is the wallpaper fit: fill the output, keep the aspect
+        // ratio and crop the overhang. Each output is covered on its own,
+        // so a 16:9 and a 16:10 screen crop differently — by design.
+        Some(WallpaperBackground::Image(path)) => {
+            Image::new(iced::widget::image::Handle::from_path(path))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .content_fit(iced::ContentFit::Cover)
+                .into()
+        }
+        Some(WallpaperBackground::Color(color)) => container(text(""))
             .width(Length::Fill)
             .height(Length::Fill)
-            .into();
+            .style(move |_| container::Style {
+                background: Some(Background::Color(color)),
+                ..container::Style::default()
+            })
+            .into(),
+        None => blank(),
     }
-    Image::new(iced::widget::image::Handle::from_path(path))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .content_fit(iced::ContentFit::Cover)
-        .into()
 }
 
 #[cfg(test)]
@@ -178,11 +225,11 @@ mod tests {
     use super::*;
 
     /// Roadmap2 #1: the sync plan opens one window per wanted output,
-    /// keeps the ones already placed there and closes the rest — an
-    /// empty wanted list (feature off) closes everything.
-    /// Toggling the wallpaper (or corners) off then on must reopen the
-    /// surfaces: the closed ids are forgotten, so the plan no longer
-    /// counts them as placed.
+    /// keeps the ones already placed there and closes a surface whose
+    /// output disappeared. When the output comes back the plan reopens
+    /// it — the closed ids are forgotten, so it no longer counts them as
+    /// placed. (The feature toggle hides the windows instead, so this
+    /// path is only for a lost output.)
     #[test]
     fn closed_surfaces_are_forgotten_and_reopen() {
         let mut current = vec![("HDMI-A-2".to_string(), 1u32)];
@@ -206,5 +253,37 @@ mod tests {
         let (open, close) = wallpaper_plan(&current, &[]);
         assert!(open.is_empty());
         assert_eq!(close, vec![1, 2]);
+    }
+
+    /// The mode is explicit: image mode ignores the colour, colour mode
+    /// ignores the path, and a missing file makes image mode empty.
+    #[test]
+    fn background_respects_the_mode() {
+        let dir = std::env::temp_dir().join(format!("piuma-wall-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let image = dir.join("image.png");
+        std::fs::write(&image, b"not decoded here").expect("temp image");
+
+        let mut w = WallpaperConfig {
+            enabled: true,
+            mode: "image".to_string(),
+            path: "/definitely/missing.png".to_string(),
+            color: "#112233".to_string(),
+        };
+        assert!(background(&w).is_none(), "image mode does not fall back to colour");
+
+        w.mode = "color".to_string();
+        assert!(matches!(background(&w), Some(WallpaperBackground::Color(_))));
+
+        w.mode = "image".to_string();
+        w.path = image.to_string_lossy().to_string();
+        assert!(matches!(background(&w), Some(WallpaperBackground::Image(_))));
+
+        // In colour mode the (valid) image path is ignored.
+        w.mode = "color".to_string();
+        assert!(matches!(background(&w), Some(WallpaperBackground::Color(_))));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

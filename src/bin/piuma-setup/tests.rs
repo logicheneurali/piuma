@@ -116,6 +116,7 @@ fn fixture() -> PiumaSetup {
         modal: None,
         validation: Vec::new(),
         wallpaper_files: Vec::new(),
+        hypr_wallpaper_disabled: None,
         autostart_apps: Vec::new(),
         layouts: Vec::new(),
     }
@@ -598,14 +599,18 @@ fn notifications_style_defaults_resolve_on_load() {
 fn wallpaper_key_roundtrip() {
     let mut state = fixture();
     state
-        .load_from_json(r#"{"panel":{"wallpaper":{"enabled":true,"path":"/tmp/a.png"}}}"#)
+        .load_from_json(r##"{"panel":{"wallpaper":{"enabled":true,"mode":"color","path":"/tmp/a.png","color":"#112233"}}}"##)
         .expect("wallpaper block must parse");
     let wp = state.config.wallpaper.as_ref().expect("block present");
     assert!(wp.enabled);
+    assert_eq!(wp.mode, "color");
     assert_eq!(wp.path, "/tmp/a.png");
+    assert_eq!(wp.color, "#112233");
     let out: JsonValue = serde_json::from_str(&state.serialize().expect("serialize")).expect("json");
     assert_eq!(out["panel"]["wallpaper"]["enabled"], true);
+    assert_eq!(out["panel"]["wallpaper"]["mode"], "color");
     assert_eq!(out["panel"]["wallpaper"]["path"], "/tmp/a.png");
+    assert_eq!(out["panel"]["wallpaper"]["color"], "#112233");
 
     // A partial block falls back per field…
     let mut state = fixture();
@@ -614,7 +619,9 @@ fn wallpaper_key_roundtrip() {
         .expect("partial block must parse");
     let wp = state.config.wallpaper.as_ref().expect("block present");
     assert!(!wp.enabled);
+    assert_eq!(wp.mode, "image");
     assert!(wp.path.is_empty());
+    assert!(wp.color.is_empty());
 
     // …and an absent block stays absent (no key is ever written).
     let mut state = fixture();

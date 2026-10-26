@@ -31,6 +31,7 @@ mod autostart;
 mod icons;
 
 mod controls;
+mod hyprland_wallpaper;
 mod model;
 mod modal;
 mod state;

@@ -381,9 +381,13 @@ pub(crate) struct Panel {
     /// state, `None` while hidden.
     pub(crate) calendar: Option<CalendarPopup>,
     /// Wallpaper windows (roadmap2 #1): one background surface per
-    /// active output, keyed by the compositor's output name; empty
-    /// while the wallpaper is off.
+    /// active output, keyed by the compositor's output name. They stay
+    /// open when the wallpaper is switched off (see `wallpaper_hidden`).
     pub(crate) wallpaper: Vec<(String, iced::window::Id)>,
+    /// Wallpaper surfaces hidden while the feature is off: closing them
+    /// makes the renderer/driver retain the decoded image (~8 MB per
+    /// output), so the window stays alive and only its view goes empty.
+    pub(crate) wallpaper_hidden: Vec<iced::window::Id>,
     /// Rounded-screen-corner masks (roadmap angoli-schermo): one square
     /// overlay surface per output corner, keyed "output:corner:radius";
     /// empty while the feature is off.
@@ -1919,7 +1923,7 @@ pub(crate) static FONT_NAMES: std::sync::Mutex<Vec<(&'static str, String)>> =
 fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> {
     // Side windows render their own trees; only bar calls feed BAR_ID.
     if panel.wallpaper.iter().any(|(_, id)| *id == window) {
-        return wallpaper_view(panel);
+        return wallpaper_view(panel, window);
     }
     if panel.corners.iter().any(|(_, id)| *id == window) {
         return corners_view(panel, window);
@@ -2924,6 +2928,7 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         graph_link: None,
                         calendar: None,
                         wallpaper: Vec::new(),
+                        wallpaper_hidden: Vec::new(),
                         corners: Vec::new(),
                         palette: None,
                         palette_key: None,

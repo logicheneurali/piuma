@@ -74,6 +74,38 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
             // checks existence itself, so a not-yet-there path is fine.
             wallpaper_set(&mut state.config, |w| w.path = path);
         }
+        Message::WallpaperModeChanged(mode) => {
+            wallpaper_set(&mut state.config, |w| {
+                w.mode = mode;
+                // Give the colour mode a usable starting colour; the
+                // user can edit it right away.
+                if w.mode == "color" && w.color.trim().is_empty() {
+                    w.color = "#152040".to_string();
+                }
+            });
+        }
+        Message::WallpaperColorChanged(color) => {
+            wallpaper_set(&mut state.config, |w| w.color = color);
+        }
+        Message::HyprWallpaperToggled(disabled) => {
+            // This one edits Hyprland's config, not piuma.json, and
+            // applies now (hyprctl reload); the wallpaper card's Save
+            // does not own it.
+            match crate::hyprland_wallpaper::set_disabled(disabled) {
+                Ok(()) => {
+                    state.hypr_wallpaper_disabled = Some(disabled);
+                    state.set_status(
+                        if disabled {
+                            "Hyprland wallpaper/logo disabled".to_string()
+                        } else {
+                            "Hyprland wallpaper/logo restored".to_string()
+                        },
+                        false,
+                    );
+                }
+                Err(err) => state.set_status(err, true),
+            }
+        }
         Message::PaletteFromWallpaper(value) => {
             // On = explicit true; off drops back to absent (≈ false):
             // a save never injects the key, and the extracted tones
