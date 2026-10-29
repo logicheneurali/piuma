@@ -74,6 +74,7 @@ fn is_percent(source: &SensorSource) -> bool {
             | SensorSource::PercBattery {}
             | SensorSource::PercBacklight {}
             | SensorSource::PercVolume { .. }
+            | SensorSource::VolumeMeter { .. }
     )
 }
 
@@ -148,6 +149,7 @@ pub fn run(source: &SensorSource, hypr: Option<&crate::hypr::Snapshot>) -> Read 
         SensorSource::PercBattery {} => optional(sensors::battery_perc(), source),
         SensorSource::PercBacklight {} => optional(sensors::backlight_perc(), source),
         SensorSource::PercVolume { device } => optional(sensors::audio_volume(device), source),
+        SensorSource::VolumeMeter { device } => optional(sensors::audio_volume(device), source),
         // used_ — numeric consumption (graphs plot percent-of-total)
         SensorSource::UsedMem {} => optional(sensors::mem_used(), source),
         SensorSource::UsedSwap {} => optional(sensors::swap_used(), source),
@@ -184,6 +186,8 @@ pub fn run(source: &SensorSource, hypr: Option<&crate::hypr::Snapshot>) -> Read 
         // of their own (see `hypr.rs`).
         SensorSource::Window {} => plain(sensors::window_title(hypr)),
         SensorSource::Workspace {} => plain(sensors::workspace_name(hypr)),
+        // The dots carry no text: the view draws them from the snapshot.
+        SensorSource::WorkspaceDots { .. } => plain(String::new()),
         // Tray items carry no text: the icons come from the shared tray
         // state (see `tray.rs`), rendered by the view directly.
         SensorSource::Tray {} => plain(String::new()),
@@ -219,6 +223,7 @@ pub fn read_all(sources: &[SensorSource]) -> Reads {
             s,
             SensorSource::Window {}
                 | SensorSource::Workspace {}
+                | SensorSource::WorkspaceDots { .. }
                 | SensorSource::Taskbar {}
                 // The layout engine matches and saves against the same
                 // snapshot `apply_read` receives.

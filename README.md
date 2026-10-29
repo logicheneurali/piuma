@@ -60,8 +60,8 @@ Sensor `type` values follow a naming convention by category:
 - **`detail_`** – used/total ratio: `detail_mem`, `detail_swap`, `detail_disk`
 - **`temp_`** – temperature: `temp_cpu`
 - **no prefix** – not numeric: `net_state`, `uptime`, `clock`, `window`,
-  `workspace`, `command`, `env_var`, `static_text`, `tray`, `notifications`,
-  `taskbar`, `layout`
+  `workspace`, `workspace_dots`, `command`, `env_var`, `static_text` (Text/Icon),
+  `volume_meter`, `tray`, `notifications`, `taskbar`, `layout`
 
 The old names (`ProcCpu`, `NvidiaGpu`, `ProcMem`, `ProcDisk`, `Audio`,
 `Network`, `Uptime`, `Clock`, `Window`, `Workspace`, `Command`, `EnvVar`,
@@ -346,6 +346,7 @@ Each sensor's `source` object has a `type` plus the parameters listed
 | `perc_battery`   | battery charge percentage (`80%`)                            | —                                                                       |
 | `perc_backlight` | backlight brightness percentage (`31%`)                      | —                                                                       |
 | `perc_volume`    | mixer volume percentage (`50%`)                              | `device` (default `Master`; auto fallback `amixer` → `wpctl` → `pactl`) |
+| `volume_meter`   | graphical volume bar: scroll/click, percentage on hover      | `device` (default `Master`)                                             |
 | `used_mem`       | RAM used (`14353 MB`)                                        | —                                                                       |
 | `used_swap`      | swap used (`0 MB`)                                           | —                                                                       |
 | `used_disk`      | root fs used (`619G`)                                        | —                                                                       |
@@ -365,9 +366,10 @@ Each sensor's `source` object has a `type` plus the parameters listed
 | `clock`          | time (`10:12:42`); `format: "date"` = date only              | `format`                                                                |
 | `window`         | focused window title (cut at 80 chars + `...`)               | —                                                                       |
 | `workspace`      | current workspace                                            | —                                                                       |
+| `workspace_dots` | graphical workspace dots: active filled, others outlined     | `count` (default 10, 1–50)                                               |
 | `command`        | shell command stdout                                         | `command`                                                               |
 | `env_var`        | environment variable value                                   | `env_var`                                                               |
-| `static_text`    | fixed text                                                   | `static_text`                                                           |
+| `static_text`    | text/icon: fixed text, or just the sensor `icon` when the text is empty | `static_text` (optional with an `icon`)                        |
 | `tray`           | system tray icons (StatusNotifierItem)                       | —                                                                       |
 | `notifications`  | newest active notification (`N6 newest (5)`)                 | —                                                                       |
 
@@ -578,12 +580,13 @@ Sensor sources use the smallest practical set of tools:
   `amixer` (ALSA) → `wpctl` (PipeWire) → `pactl` (PulseAudio) and sticks
   to the first that works — and so does the mouse wheel over the sensor,
   which raises/lowers the volume by 5% per notch (clamped 0–100%);
+  `volume_meter` uses the same backend and offers a clickable bar;
   `perc_gpu` tries
   `nvidia-smi` (NVIDIA) → the
   amdgpu sysfs counter (AMD), `N/A` on other GPUs.
 - **Hyprland** (`hyprctl`): `window`, `workspace` — the only
   compositor-specific sensors, by design.
-- **Yours**: `command` (any POSIX shell), `env_var`, `static_text`.
+- **Yours**: `command` (any POSIX shell), `env_var`, `static_text` (Text/Icon).
 
 ## Usage
 

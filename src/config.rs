@@ -360,7 +360,12 @@ pub enum SensorSource {
     #[serde(rename = "env_var", alias = "EnvVar")]
     EnvVar { env_var: String },
     #[serde(rename = "static_text", alias = "StaticText")]
-    StaticText { static_text: String },
+    StaticText {
+        /// Fixed text. Empty is valid when the sensor has an icon: the
+        /// source is the "text/icon" sensor, either content fits.
+        #[serde(default)]
+        static_text: String,
+    },
     #[serde(rename = "perc_cpu", alias = "ProcCpu")]
     PercCpu {},
     #[serde(rename = "perc_gpu", alias = "NvidiaGpu")]
@@ -377,6 +382,13 @@ pub enum SensorSource {
     PercBacklight {},
     #[serde(rename = "perc_volume", alias = "Audio")]
     PercVolume { device: String },
+    /// Graphical volume meter: the same mixer reading as `perc_volume`,
+    /// rendered as a bar with click/wheel control instead of text.
+    #[serde(rename = "volume_meter")]
+    VolumeMeter {
+        #[serde(default)]
+        device: String,
+    },
     #[serde(rename = "used_mem")]
     UsedMem {},
     #[serde(rename = "used_swap")]
@@ -419,6 +431,13 @@ pub enum SensorSource {
     Window {},
     #[serde(rename = "workspace", alias = "Workspace")]
     Workspace {},
+    /// Purely graphical workspace indicator: `count` numbered circles,
+    /// the active one filled and the others outlined.
+    #[serde(rename = "workspace_dots")]
+    WorkspaceDots {
+        #[serde(default = "default_workspace_count")]
+        count: u32,
+    },
     /// System tray (StatusNotifierItem): renders the tray icons; the
     /// rendering and the whole D-Bus side live in `tray.rs`.
     #[serde(rename = "tray")]
@@ -445,6 +464,12 @@ pub enum SensorSource {
 }
 
 // ── defaults ────────────────────────────────────────────────────────
+
+/// Workspace circles shown by a `workspace_dots` sensor when the config
+/// omits the count.
+fn default_workspace_count() -> u32 {
+    10
+}
 
 pub fn default_config() -> Config {
     let section = SectionConfig {
@@ -760,6 +785,30 @@ pub fn validate_config(cfg: &Config) -> Vec<ConfigError> {
             if let Some(rules) = &sensor.color_rules {
                 for (k, rule) in rules.iter().enumerate() {
                     err_color(&mut errors, &format!("{spath}.color_rules[{k}].color"), Some(&rule.color));
+                }
+            }
+            // Text/icon sensor: either half may carry it. An icon name is
+            // enough (the bar renders it even with an empty value); no
+            // text and no icon leaves a sensor with nothing to draw.
+            if let SensorSource::StaticText { static_text } = &sensor.source {
+                let has_text = !static_text.trim().is_empty();
+                let has_icon = sensor
+                    .icon
+                    .as_deref()
+                    .is_some_and(|icon| !icon.trim().is_empty());
+                if !has_text && !has_icon {
+                    errors.push(ConfigError {
+                        path: format!("{spath}.source"),
+                        message: "text/icon sensor needs text or an icon".to_string(),
+                    });
+                }
+            }
+            if let SensorSource::WorkspaceDots { count } = &sensor.source {
+                if !(1..=50).contains(count) {
+                    errors.push(ConfigError {
+                        path: format!("{spath}.source.count"),
+                        message: format!("{count}: expected 1..=50"),
+                    });
                 }
             }
         }
@@ -1229,6 +1278,78 @@ mod tests {
     #[test]
     fn default_config_validates_clean() {
         assert_eq!(validate_config(&default_config()), Vec::new());
+    }
+
+    /// The graphical volume meter shares the volume backend and keeps
+    /// its device through a save/load roundtrip.
+    #[test]
+    fn volume_meter_parses_roundtrips_and_is_percent() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[{"sensors":[{"source":{"type":"volume_meter"}}]}]}}"#,
+        )
+        .expect("volume meter must parse");
+        assert!(matches!(
+            &cfg.panel.sections[0].sensors[0].source,
+            SensorSource::VolumeMeter { device } if device.is_empty()
+        ));
+        assert!(validate_config(&cfg).is_empty());
+        let cfg: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[{"sensors":[{"source":{"type":"volume_meter","device":"Speaker"}}]}]}}"#,
+        )
+        .expect("volume meter must parse");
+        let out = serde_json::to_string(&cfg).expect("config must serialize");
+        assert!(out.contains(r#""volume_meter""#), "got: {out}");
+        assert!(out.contains(r#""device":"Speaker""#), "got: {out}");
+    }
+
+    /// The graphical workspace sensor carries its circle count and
+    /// rejects a count no workspace can fill.
+    #[test]
+    fn workspace_dots_parse_roundtrip_and_validate_count() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[{"sensors":[{"source":{"type":"workspace_dots","count":12}}]}]}}"#,
+        )
+        .expect("workspace dots must parse");
+        assert!(matches!(
+            &cfg.panel.sections[0].sensors[0].source,
+            SensorSource::WorkspaceDots { count: 12 }
+        ));
+        assert!(validate_config(&cfg).is_empty());
+        let out = serde_json::to_string(&cfg).expect("config must serialize");
+        assert!(out.contains(r#""workspace_dots""#), "got: {out}");
+        assert!(out.contains(r#""count":12"#), "got: {out}");
+
+        let bad: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[{"sensors":[{"source":{"type":"workspace_dots","count":0}}]}]}}"#,
+        )
+        .expect("count 0 still parses");
+        let errors = validate_config(&bad);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].path, "panel.sections[0].sensors[0].source.count");
+    }
+
+    /// Text/Icon sensors: the text is optional when the sensor carries a
+    /// (non-empty) icon; neither leaves nothing to render.
+    #[test]
+    fn static_text_accepts_an_icon_without_text() {
+        let parse = |sensor: &str| {
+            serde_json::from_str::<Config>(&format!(
+                r#"{{"panel":{{"sections":[{{"sensors":[{sensor}]}}]}}}}"#
+            ))
+            .expect("sensor must parse")
+        };
+        let icon_only = parse(r#"{"icon":"folder","source":{"type":"static_text"}}"#);
+        assert!(matches!(
+            &icon_only.panel.sections[0].sensors[0].source,
+            SensorSource::StaticText { static_text } if static_text.is_empty()
+        ));
+        assert_eq!(validate_config(&icon_only), Vec::new());
+        assert_eq!(validate_config(&parse(
+            r#"{"source":{"type":"static_text","static_text":"Menu"}}"#
+        )), Vec::new());
+        let empty = validate_config(&parse(r#"{"source":{"type":"static_text"}}"#));
+        assert_eq!(empty.len(), 1, "{empty:?}");
+        assert_eq!(empty[0].path, "panel.sections[0].sensors[0].source");
     }
 
     /// An unparsable colour, an unknown `border_type` and an out-of-range

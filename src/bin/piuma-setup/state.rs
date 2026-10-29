@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 use crate::autostart;
 use crate::config;
+use crate::controls;
+use crate::icons;
 use crate::modal::Modal;
 use crate::model::*;
 use crate::view_wallpaper::{scan_wallpaper_dirs, wallpaper_dirs};
@@ -377,6 +379,41 @@ impl PiumaSetup {
 
     /// Recomputes the invalid-value list from the config as edited right
     /// now: serialized, parsed with piuma's real schema, walked by the
+    /// The config's value validation plus the editor-only icon check: a
+    /// text/icon sensor with no text is valid only if its icon resolves
+    /// in the same theme and at the same size the bar draws. The bar
+    /// itself accepts any non-empty name; this is the human-facing guard.
+    fn validation_errors(&self, parsed: &config::Config) -> Vec<config::ConfigError> {
+        let mut errors = config::validate_config(parsed);
+        let theme = controls::icon_theme_of(&self.config);
+        for (i, section) in self.config.sections.iter().enumerate() {
+            for (j, sensor) in section.sensors.iter().enumerate() {
+                if canonical_type(&sensor.source_type) != "static_text"
+                    || !sensor
+                        .source_config
+                        .static_text
+                        .as_deref()
+                        .unwrap_or("")
+                        .trim()
+                        .is_empty()
+                {
+                    continue;
+                }
+                let Some(icon) = sensor.icon.as_deref().filter(|name| !name.trim().is_empty()) else {
+                    continue; // config::validate_config reports "no text, no icon"
+                };
+                let size = controls::sensor_icon_size(&self.config, section, sensor);
+                if icons::resolve(theme, icon, size).is_none() {
+                    errors.push(config::ConfigError {
+                        path: format!("panel.sections[{i}].sensors[{j}].icon"),
+                        message: format!("{icon:?}: not found in icon theme {theme:?}"),
+                    });
+                }
+            }
+        }
+        errors
+    }
+
     /// same `config::validate_config` the bar logs at load. A schema-
     /// broken config leaves the list empty — the schema check on save
     /// reports that separately.
@@ -385,7 +422,7 @@ impl PiumaSetup {
             .serialize()
             .ok()
             .and_then(|json| serde_json::from_str::<config::Config>(&json).ok())
-            .map(|cfg| config::validate_config(&cfg))
+            .map(|cfg| self.validation_errors(&cfg))
             .unwrap_or_default();
     }
 
@@ -505,7 +542,7 @@ impl PiumaSetup {
         // Then the values themselves (same list the bar logs at load): a
         // colour or range piuma would silently ignore must not reach the
         // file — the fields are highlighted and the modal lists them.
-        let errors = config::validate_config(&parsed);
+        let errors = self.validation_errors(&parsed);
         self.validation = errors.clone();
         if !errors.is_empty() {
             return Err(format!(

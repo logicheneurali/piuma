@@ -456,6 +456,7 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                         "command" => sensor.source_config.command = if value.is_empty() { None } else { Some(value) },
                         "env_var" => sensor.source_config.env_var = if value.is_empty() { None } else { Some(value) },
                         "text" => sensor.source_config.static_text = if value.is_empty() { None } else { Some(value) },
+                        "count" => sensor.source_config.count = value.parse::<u32>().ok(),
                         _ => {}
                     }
                 }

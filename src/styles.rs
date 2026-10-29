@@ -145,7 +145,11 @@ pub(crate) fn resolve_styles(
                         ),
                         u32::from(padding),
                     );
-                    let icon = match (icon_theme, s.icon.as_deref()) {
+                    let icon_name = s.icon.as_deref().or_else(|| {
+                        matches!(s.source, config::SensorSource::VolumeMeter { .. })
+                            .then_some(icons::VOLUME_ICON)
+                    });
+                    let icon = match (icon_theme, icon_name) {
                         (Some(theme), Some(icon_name)) => {
                             icons::resolve(theme, icon_name, icon_size)
                         }

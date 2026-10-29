@@ -156,11 +156,15 @@ pub(crate) fn modal_card(state: &PiumaSetup) -> Element<'_, Message> {
         Some(Modal::AddSensor { kind, name, .. }) => {
             // Type combo of the canonical list, plus an optional name; the
             // muted line under the fields explains what the type does.
+            let types: Vec<String> = available_source_types(kind)
+                .into_iter()
+                .map(|value| source_field_display(&value))
+                .collect();
             let body = column![
                 form_cell("Type", picklist(
-                    available_source_types(kind),
-                    Some(kind.clone()),
-                    Message::ModalTypeChanged,
+                    types,
+                    Some(source_field_display(kind)),
+                    |value: String| Message::ModalTypeChanged(source_type_from_display(&value)),
                 ).width(Length::Fill).into()),
                 form_cell("Name", input("optional", name, Message::ModalTextChanged)
                     .width(Length::Fill)
@@ -214,7 +218,10 @@ pub(crate) fn modal_card(state: &PiumaSetup) -> Element<'_, Message> {
                 .layouts
                 .iter()
                 .find(|l| l.key == *key)
-                .map(|l| l.label.clone())
+                .map(|l| {
+                    let summary = l.class_summary();
+                    if summary.is_empty() { l.key.clone() } else { summary }
+                })
                 .unwrap_or_else(|| key.clone());
             dialog_frame(
                 pal,

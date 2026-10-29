@@ -22,10 +22,19 @@ pub(crate) const MENU_MIN_W: u32 = 120;
 
 pub(crate) const MENU_MAX_W: u32 = 420;
 
+/// Rows a tray menu shows at once; the rest scrolls by wheel. The load
+/// path may lower this further to fit the output height.
+pub(crate) const MENU_MAX_ROWS: usize = 20;
+
 /// Vertical rhythm of one menu row: the text line (~1.2× the font)
 /// plus a little air, so centered rows never clip at any font size.
 pub(crate) fn menu_row_h(font_size: u32) -> u32 {
     font_size + font_size / 2 + 4
+}
+
+/// Height of the top/bottom scroll-arrow band in a tray menu.
+pub(crate) fn menu_arrow_h(font_size: u32) -> u32 {
+    (font_size + 4).max(14)
 }
 
 /// Surface size for `entries`: the height is exact (one `menu_row_h`
@@ -52,6 +61,27 @@ pub(crate) fn menu_size(
         .saturating_add(4 * MENU_PAD)
         .clamp(MENU_MIN_W, MENU_MAX_W);
     let h = entries.len() as u32 * menu_row_h(font_size) + 2 * MENU_PAD;
+    (w, h)
+}
+
+/// Surface size for a tray menu that shows at most `visible` rows: the
+/// width still measures every label (a scrolled row must not re-wrap or
+/// jump), the height only the rows actually drawn. The remaining rows
+/// are reached by the wheel offset.
+pub(crate) fn menu_size_shown(
+    entries: &[dbusmenu::MenuEntry],
+    font: &Font,
+    font_size: u32,
+    visible: usize,
+    arrows: bool,
+) -> (u32, u32) {
+    let (w, _) = menu_size(entries, font, font_size);
+    let rows = visible.min(entries.len()) as u32;
+    let arrows_h = if arrows { 2 * menu_arrow_h(font_size) } else { 0 };
+    let h = rows
+        .saturating_mul(menu_row_h(font_size))
+        .saturating_add(arrows_h)
+        .saturating_add(2 * MENU_PAD);
     (w, h)
 }
 
@@ -147,8 +177,43 @@ pub(crate) fn tray_menu_view(panel: &Panel) -> Element<'_, Message> {
     // hover would be invisible, so the feedback is an underline bar under
     // the label (plus a hand pointer on the row itself).
     let underline_hover = st.text_hover == st.text && st.bg_hover == st.bg;
+    // The surface height is exact for the visible slice; the wheel moves
+    // this offset and the remaining entries stay reachable instead of
+    // the menu being clamped at the screen edge with its head cut off.
+    let visible = menu.visible.max(1);
+    let offset = menu.offset as usize;
+    let scrollable = menu.entries.len() > visible;
+    let arrow_h = menu_arrow_h(font_size) as f32;
+    let arrow = |up: bool, visible: bool| -> Element<'_, Message> {
+        if !visible {
+            return container(text(""))
+                .width(Length::Fill)
+                .height(Length::Fixed(arrow_h))
+                .into();
+        }
+        MouseArea::new(
+            container(
+                text(if up { "▲" } else { "▼" })
+                    .size(font_size.saturating_sub(2))
+                    .color(st.text)
+                    .font(font.clone()),
+            )
+            .width(Length::Fill)
+            .height(Length::Fixed(arrow_h))
+            .center_x(Length::Fill)
+            .align_y(Alignment::Center),
+        )
+        .on_press(Message::TrayMenuArrow(up))
+        .interaction(iced::mouse::Interaction::Pointer)
+        .into()
+    };
+    let top_visible = scrollable && offset > 0;
+    let bottom_visible = scrollable && offset + visible < menu.entries.len();
     let mut list: Column<'_, Message> = Column::new();
-    for entry in &menu.entries {
+    if scrollable {
+        list = list.push(arrow(true, top_visible));
+    }
+    for entry in menu.entries.iter().skip(offset).take(visible) {
         let padding = iced::Padding {
             top: 0.0,
             right: MENU_PAD as f32,
@@ -243,6 +308,9 @@ pub(crate) fn tray_menu_view(panel: &Panel) -> Element<'_, Message> {
         };
         list = list.push(row);
     }
+    if scrollable {
+        list = list.push(arrow(false, bottom_visible));
+    }
     let surface = styled_box(
         container(list)
             .width(Length::Fill)
@@ -262,6 +330,12 @@ pub(crate) fn tray_menu_view(panel: &Panel) -> Element<'_, Message> {
     );
     MouseArea::new(surface)
         .on_exit(Message::TrayMenuClosed)
+        .on_scroll(move |delta| match delta {
+            iced::mouse::ScrollDelta::Pixels { y, .. } if y != 0.0 => {
+                Message::TrayMenuScrolled(y)
+            }
+            _ => Message::TrayMenuScrolled(0.0),
+        })
         .into()
 }
 
@@ -390,6 +464,35 @@ mod tests {
         let (w, _) = menu_size(&[entry(0, &"l".repeat(400))], &font, 14);
         assert_eq!(w, MENU_MAX_W);
     }
+    /// The shown-rows size keeps the full-width measurement but caps the
+    /// height: scrolled rows cannot change the surface width, and the
+    /// first rows are never cut off by an over-tall surface.
+    #[test]
+    fn menu_size_shown_caps_height_but_not_width() {
+        let font = Font::with_name("Noto Sans");
+        let entries: Vec<dbusmenu::MenuEntry> = (0..5)
+            .map(|n| dbusmenu::MenuEntry {
+                id: n,
+                label: format!("row {n} with a label"),
+                enabled: true,
+                toggle: 0,
+                depth: 0,
+                kind: dbusmenu::EntryKind::Item,
+            })
+            .collect();
+        let (w_all, h_all) = menu_size(&entries, &font, 14);
+        let (w_cap, h_cap) = menu_size_shown(&entries, &font, 14, 2, false);
+        assert_eq!(w_cap, w_all);
+        assert_eq!(h_cap, 2 * menu_row_h(14) + 2 * MENU_PAD);
+        assert!(h_cap < h_all);
+        // Asking for more rows than exist still sizes the real list.
+        let (_, h_all_again) = menu_size_shown(&entries, &font, 14, 99, false);
+        assert_eq!(h_all_again, h_all);
+        // Scrollable menus reserve both arrow bands.
+        let (_, h_arrows) = menu_size_shown(&entries, &font, 14, 2, true);
+        assert_eq!(h_arrows, h_cap + 2 * menu_arrow_h(14));
+    }
+
     /// Labels are cut to their row budget inside the finished surface (the
     /// toggle glyph measures with them and comes back stripped off), while
     /// short labels pass through untouched.

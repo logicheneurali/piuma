@@ -2,7 +2,7 @@
 //! rides the bar's anchor (size, placement, dismiss) and the toggleable
 //! list the notification sensor opens (rows, scroll, view).
 
-use crate::menus::{menu_row_h, MENU_PAD};
+use crate::menus::{menu_arrow_h, menu_row_h, MENU_PAD};
 use crate::notifications;
 use crate::text_width;
 use crate::{
@@ -11,7 +11,7 @@ use crate::{
 };
 use iced::font::Font;
 use iced::widget::image::Image;
-use iced::widget::{container, scrollable, text, Column, MouseArea, Row};
+use iced::widget::{container, scrollable, stack, text, Column, MouseArea, Row, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Task as Command};
 use iced::widget::scrollable::{AutoScroll, Rail, Scroller};
 use iced_exwlshell::reexport::{
@@ -281,53 +281,93 @@ pub(crate) fn popup_view(panel: &Panel) -> Element<'_, Message> {
             })
             .width(Length::Fill)
             .align_y(Alignment::Center);
+        let scroll_id = iced::widget::Id::from(format!("notif-card-{}", card.id));
         let text_area = scrollable(lines.width(Length::Fill))
+            .id(scroll_id)
+            .on_scroll(move |viewport| {
+                let offset = viewport.absolute_offset().y;
+                let max = (viewport.content_bounds().height - viewport.bounds().height).max(0.0);
+                Message::NotifCardScrolled(card.id, offset, max)
+            })
             .width(Length::Fill)
-            // Stays one line shorter than the card's 8, so the rail never
-            // hugs the top/bottom edges — that 1 line of gap grows with
-            // font_size and keeps the rail inset as the popup grows.
             .height(Length::Fixed((7 * st.font_size) as f32))
             .style(move |_, _| scrollable::Style {
                 container: container::Style::default(),
+                // No rail: the two centre arrows replace the scrollbar.
                 vertical_rail: Rail {
-                    background: Some(Background::Color(st.bg)),
+                    background: None,
                     border: Border::default(),
                     scroller: Scroller {
-                        background: Background::Color(st.border),
+                        background: Background::Color(Color::TRANSPARENT),
                         border: Border::default(),
                     },
                 },
                 horizontal_rail: Rail {
-                    background: Some(Background::Color(st.bg)),
+                    background: None,
                     border: Border::default(),
                     scroller: Scroller {
-                        background: Background::Color(st.border),
+                        background: Background::Color(Color::TRANSPARENT),
                         border: Border::default(),
                     },
                 },
                 gap: None,
                 auto_scroll: AutoScroll {
-                    background: Background::Color(st.bg),
+                    background: Background::Color(Color::TRANSPARENT),
                     border: Border::default(),
-                    shadow: iced::Shadow {
-                        color: Color::BLACK.scale_alpha(0.7),
-                        offset: iced::Vector::ZERO,
-                        blur_radius: 2.0,
-                    },
-                    icon: st.text,
+                    shadow: iced::Shadow::default(),
+                    icon: Color::TRANSPARENT,
                 },
             });
+        let (offset, max) = panel.notif_scroll.get(&card.id).copied().unwrap_or((0.0, 0.0));
+        let arrow_h = (st.font_size + 2) as f32;
+        let arrow = |up: bool, visible: bool| -> Element<'_, Message> {
+            if !visible {
+                return container(text(""))
+                    .width(Length::Fill)
+                    .height(Length::Fixed(arrow_h))
+                    .into();
+            }
+            MouseArea::new(
+                container(
+                    text(if up { "▲" } else { "▼" })
+                        .size(st.font_size.saturating_sub(2))
+                        .color(fg)
+                        .font(font.clone()),
+                )
+                .width(Length::Fill)
+                .height(Length::Fixed(arrow_h))
+                .center_x(Length::Fill)
+                .align_y(Alignment::Center)
+                .style(move |_| container::Style {
+                    background: Some(Background::Color(bg)),
+                    ..container::Style::default()
+                }),
+            )
+            .on_press(Message::NotifCardArrow(card.id, up))
+            .interaction(iced::mouse::Interaction::Pointer)
+            .into()
+        };
+        let nav = Column::new()
+            .push(arrow(true, offset > 0.5))
+            .push(Space::new().height(Length::Fill))
+            .push(arrow(false, max > 0.5 && offset < max - 0.5))
+            .width(Length::Fill)
+            .height(Length::Fill);
+        let text_area = stack![
+            MouseArea::new(text_area)
+                .on_press(Message::PopupCardClicked(card.id))
+                .on_enter(Message::PopupCardEnter(card.id))
+                .on_exit(Message::PopupCardLeave),
+            nav
+        ]
+        .width(Length::Fill)
+        .height(Length::Fixed((7 * st.font_size) as f32));
         let content = content.push(text_area).width(Length::Fill);
         let card_row: Row<'_, Message> = Row::new()
             .spacing(8)
             .align_y(Alignment::Center)
             .width(Length::Fill)
-            .push(
-                MouseArea::new(content)
-                    .on_press(Message::PopupCardClicked(card.id))
-                    .on_enter(Message::PopupCardEnter(card.id))
-                    .on_exit(Message::PopupCardLeave),
-            )
+            .push(content)
             // The ✕ gets 8px of padding: a small glyph alone is too small
             // a target, and its MouseArea must not overlap the card's.
             .push(
@@ -396,8 +436,14 @@ pub(crate) fn notif_list_size(
         .saturating_add(2 * MENU_PAD)
         .min(NOTIF_LIST_W_MAX.saturating_add(2 * MENU_PAD));
     let shown = rows.len().min(NOTIF_LIST_ROWS) as u32;
+    let arrows_h = if rows.len() > NOTIF_LIST_ROWS {
+        2 * menu_arrow_h(font_size)
+    } else {
+        0
+    };
     let h = shown
         .saturating_mul(notif_list_row_h(font_size))
+        .saturating_add(arrows_h)
         .saturating_add(2 * MENU_PAD);
     (w, h)
 }
@@ -452,9 +498,37 @@ pub(crate) fn notif_list_view(panel: &Panel) -> Element<'_, Message> {
     let row_h = notif_list_row_h(font_size) as f32;
     let dim = Color::from_rgba(st.text.r, st.text.g, st.text.b, 0.45);
     let dim_closed = Color::from_rgba(st.text.r, st.text.g, st.text.b, 0.30);
-    let mut list: Column<'_, Message> = Column::new().spacing(2.0);
     // Bound so the rows outlive the loop (the elements borrow them).
     let rows = notifications::history_rows(NOTIF_LIST_MAX);
+    let scrollable = rows.len() > NOTIF_LIST_ROWS;
+    let arrow_h = menu_arrow_h(font_size) as f32;
+    let arrow = |up: bool, visible: bool| -> Element<'_, Message> {
+        if !visible {
+            return container(text(""))
+                .width(Length::Fill)
+                .height(Length::Fixed(arrow_h))
+                .into();
+        }
+        MouseArea::new(
+            container(
+                text(if up { "▲" } else { "▼" })
+                    .size(font_size.saturating_sub(2))
+                    .color(st.text)
+                    .font(font),
+            )
+            .width(Length::Fill)
+            .height(Length::Fixed(arrow_h))
+            .center_x(Length::Fill)
+            .align_y(Alignment::Center),
+        )
+        .on_press(Message::NotifListArrow(up))
+        .interaction(iced::mouse::Interaction::Pointer)
+        .into()
+    };
+    let mut list: Column<'_, Message> = Column::new().spacing(2.0);
+    if scrollable {
+        list = list.push(arrow(true, state.offset > 0));
+    }
     for row in rows
         .iter()
         .skip(state.offset as usize)
@@ -489,6 +563,12 @@ pub(crate) fn notif_list_view(panel: &Panel) -> Element<'_, Message> {
                 .on_press(Message::NotifListClicked(row.id))
                 .interaction(iced::mouse::Interaction::Pointer),
         );
+    }
+    if scrollable {
+        list = list.push(arrow(
+            false,
+            state.offset as usize + NOTIF_LIST_ROWS < rows.len(),
+        ));
     }
     let surface = styled_box(
         container(list)
@@ -612,8 +692,8 @@ mod tests {
         let (w, h) = notif_list_size(&rows, &font, 14);
         assert_eq!(
             h,
-            8 * notif_list_row_h(14) + 2 * MENU_PAD,
-            "only NOTIF_LIST_ROWS rows are shown"
+            8 * notif_list_row_h(14) + 2 * menu_arrow_h(14) + 2 * MENU_PAD,
+            "only NOTIF_LIST_ROWS rows are shown, plus both arrow bands"
         );
         assert!(
             w <= NOTIF_LIST_W_MAX + 2 * MENU_PAD,

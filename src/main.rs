@@ -5,6 +5,7 @@
 //! Configuration is loaded from a JSON file (CLI arg or default path).
 //! See `src/config.rs` for the config schema.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
 
@@ -52,6 +53,7 @@ mod text_util;
 mod text_width;
 mod tooltip;
 mod tray;
+mod volume_ui;
 mod wallpaper_ui;
 mod windows;
 mod workspace;
@@ -60,8 +62,8 @@ use corners::{corners_view, sync_corners};
 use fill_sections::FillSections;
 use geometry::{corner_radius, panel_anchor, panel_size, panel_thickness, placement_rect};
 use menus::{
-    fit_menu_labels, menu_placement, menu_size, taskbar_menu_size, taskbar_menu_view,
-    tray_menu_view,
+    fit_menu_labels, menu_arrow_h, menu_placement, menu_row_h, menu_size_shown,
+    taskbar_menu_size, taskbar_menu_view, tray_menu_view, MENU_MAX_ROWS, MENU_PAD,
 };
 use popup_calendar::{
     calendar_hover_sync, calendar_page, calendar_popup_view, reap_abandoned_calendar,
@@ -340,6 +342,13 @@ pub(crate) struct Panel {
     pub(crate) popup_cards: usize,
     /// Card under the cursor (`hover_*` style fields), `None` outside.
     pub(crate) popup_hover: Option<u32>,
+    /// Per-card scroll viewport (absolute offset, max offset) of the
+    /// notification body; drives the two nav arrows instead of a rail.
+    pub(crate) notif_scroll: HashMap<u32, (f32, f32)>,
+    /// Volume meter under a drag: (section, sensor, target percent).
+    /// The sink is written only on release, so a tick in between must
+    /// not replace the bar with the old reading.
+    pub(crate) volume_drag: Option<(usize, usize, f32)>,
     /// Open tray DBusMenu window: id + the menu it renders, `None`
     /// while hidden (see `dbusmenu`).
     pub(crate) tray_menu: Option<(iced::window::Id, TrayMenu)>,
@@ -419,6 +428,10 @@ pub(crate) struct TrayMenu {
     pub(crate) path: String,
     pub(crate) menu_path: String,
     pub(crate) entries: Vec<dbusmenu::MenuEntry>,
+    /// First visible entry; the wheel moves it.
+    pub(crate) offset: u32,
+    /// Rows the surface shows at once (bounded by the output height).
+    pub(crate) visible: usize,
 }
 
 /// The open notification list popup (the notifications sensor's click):
@@ -538,9 +551,17 @@ pub(crate) enum Message {
     /// Wheel scrolled over a sensor: (section_index, sensor_index, up);
     /// `None` for scroll events that carry no usable delta.
     SensorScrolled(usize, usize, Option<bool>),
+    /// The graphical volume meter moved (click/drag): update the local
+    /// percentage now; the mixer waits for the release.
+    VolumeChanged(usize, usize, f32),
+    /// The graphical volume meter was released: write its displayed
+    /// percentage to the sink.
+    VolumeCommitted(usize, usize),
     /// Wheel over the notification list popup: signed pixel delta-y
     /// (positive = towards the newest rows).
     NotifListScrolled(f32),
+    /// Top/bottom arrow of the notification list: one row up/down.
+    NotifListArrow(bool),
     /// Row clicked in the notification list popup: run that entry's
     /// spec `default` action and close the popup.
     NotifListClicked(u32),
@@ -612,6 +633,10 @@ pub(crate) enum Message {
     },
     /// A menu row was clicked: report it to the app and close the menu.
     TrayMenuClicked(i32),
+    /// Wheel over the menu: pixel delta, whole rows move `offset`.
+    TrayMenuScrolled(f32),
+    /// Top/bottom arrow clicked: move the offset by one row.
+    TrayMenuArrow(bool),
     /// Cursor entered/left a clickable menu row (hover styling).
     TrayMenuEnter(i32),
     TrayMenuLeave(i32),
@@ -638,6 +663,10 @@ pub(crate) enum Message {
     PopupCardEnter(u32),
     /// Cursor left the popup card under it.
     PopupCardLeave,
+    /// Notification body scrolled: (card id, absolute offset, max offset).
+    NotifCardScrolled(u32, f32, f32),
+    /// Notification body arrow: (card id, up/down).
+    NotifCardArrow(u32, bool),
 }
 
 // ── namespace ───────────────────────────────────────────────────────
@@ -1015,6 +1044,14 @@ fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<Command<Mess
                         value = t.clone();
                     }
                 }
+                // A dragged volume meter has not written the sink yet:
+                // keep the local target across this tick, or the bar
+                // would snap back to the old reading every second.
+                if let Some((drag_section, drag_sensor, percent)) = panel.volume_drag {
+                    if (drag_section, drag_sensor) == (section_idx, sensor_idx) {
+                        value = format!("{percent:.0}%");
+                    }
+                }
                 // Tray sensors render icons from the shared tray state
                 // (tray.rs) instead of text.
                 let tray_icons =
@@ -1207,6 +1244,7 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             // The calendar popup goes with it: its month came from the
             // previous config's sensor.
             if config_reloaded {
+                panel.volume_drag = None;
                 if let Some(gp) = panel.graph_popup.take() {
                     cmds.push(iced::window::close(gp.id));
                 }
@@ -1382,6 +1420,20 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             panel.popup_hover = None;
             Command::none()
         }
+        Message::NotifCardScrolled(id, offset, max) => {
+            panel.notif_scroll.insert(id, (offset, max));
+            Command::none()
+        }
+        Message::NotifCardArrow(id, up) => {
+            let step = popup_style(&panel.config, panel.palette.as_ref()).font_size as f32 * 3.0;
+            iced_runtime::widget::operation::scroll_by::<Message>(
+                iced::widget::Id::from(format!("notif-card-{id}")),
+                iced::widget::scrollable::AbsoluteOffset {
+                    x: 0.0,
+                    y: if up { -step } else { step },
+                },
+            )
+        }
         Message::TrayIconPressed(bus, path, button) => {
             // Foreground thread only queues the D-Bus work (tray.rs /
             // dbusmenu spawn their own threads), so the UI never blocks
@@ -1474,11 +1526,30 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             }
             let font = panel_font(&panel.config);
             let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
-            let (w, h) = menu_size(&entries, &font, font_size);
+            let (sw, sh) = unsafe { (SCREEN_WIDTH as i32, SCREEN_HEIGHT as i32) };
+            // Cap the visible rows by both the private maximum and the
+            // output height, so an over-long menu (a 116-row update menu)
+            // scrolls instead of opening with its first rows off-screen.
+            // A scrollable menu reserves one arrow band above and one
+            // below; the arrow itself is drawn only in that direction.
+            let row_h = menu_row_h(font_size).max(1);
+            let arrow_h = menu_arrow_h(font_size);
+            let screen_rows = ((sh.max(0) as u32).saturating_sub(2 * MENU_PAD) / row_h)
+                .max(1) as usize;
+            let scrollable = entries.len() > MENU_MAX_ROWS || entries.len() > screen_rows;
+            let visible = if scrollable {
+                let rows_with_arrows = ((sh.max(0) as u32)
+                    .saturating_sub(2 * MENU_PAD + 2 * arrow_h)
+                    / row_h)
+                    .max(1) as usize;
+                entries.len().min(MENU_MAX_ROWS).min(rows_with_arrows)
+            } else {
+                entries.len()
+            };
+            let (w, h) = menu_size_shown(&entries, &font, font_size, visible, scrollable);
             // The surface width is final now: overlong labels are cut to
             // their row budget (single line + ellipsis in the view).
             fit_menu_labels(&mut entries, w, &font, font_size);
-            let (sw, sh) = unsafe { (SCREEN_WIDTH as i32, SCREEN_HEIGHT as i32) };
             let (anchor, margin) = menu_placement(at.0, at.1, w, h, sw, sh);
             let (id, open) = Message::layershell_open(NewLayerShellSettings {
                 size: LayerSize::px(w, h),
@@ -1500,6 +1571,8 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                     path,
                     menu_path,
                     entries,
+                    offset: 0,
+                    visible,
                 },
             ));
             open
@@ -1512,6 +1585,30 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             } else {
                 Command::none()
             }
+        }
+        Message::TrayMenuScrolled(delta_y) => {
+            // Wheel over the menu: whole rows, clamped to what is left.
+            // The hover id belongs to the old slice, so clear it.
+            if let Some((_, menu)) = panel.tray_menu.as_mut() {
+                let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
+                let row_h = menu_row_h(font_size).max(1) as f32;
+                let rows = (-delta_y / row_h).round() as i32;
+                menu.offset = scroll_rows(menu.offset, rows, menu.entries.len(), menu.visible);
+                panel.tray_menu_hover = None;
+            }
+            Command::none()
+        }
+        Message::TrayMenuArrow(up) => {
+            if let Some((_, menu)) = panel.tray_menu.as_mut() {
+                menu.offset = scroll_rows(
+                    menu.offset,
+                    if up { -1 } else { 1 },
+                    menu.entries.len(),
+                    menu.visible,
+                );
+                panel.tray_menu_hover = None;
+            }
+            Command::none()
         }
         Message::TrayMenuEnter(entry_id) => {
             panel.tray_menu_hover = Some(entry_id);
@@ -1634,8 +1731,12 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                     }
                     return Command::none();
                 }
-                if let Some(config::SensorSource::PercVolume { device }) = source {
-                    let device = device.clone();
+                let volume_device = match source {
+                    Some(config::SensorSource::PercVolume { device })
+                    | Some(config::SensorSource::VolumeMeter { device }) => Some(device.clone()),
+                    _ => None,
+                };
+                if let Some(device) = volume_device {
                     // Reflect the change on the bar right away (same math as
                     // the backend adjust); the next tick confirms it.
                     if let Some(sensor_value) = panel
@@ -1652,6 +1753,48 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             }
             Command::none()
         }
+        Message::VolumeChanged(section_index, sensor_index, percent) => {
+            let percent = percent.clamp(0.0, 100.0);
+            panel.volume_drag = Some((section_index, sensor_index, percent));
+            if let Some(sensor_value) = panel
+                .sections
+                .get_mut(section_index)
+                .and_then(|sec| sec.sensors.get_mut(sensor_index))
+            {
+                sensor_value.value = format!("{percent:.0}%");
+            }
+            Command::none()
+        }
+        Message::VolumeCommitted(section_index, sensor_index) => {
+            let device = panel
+                .config
+                .panel
+                .sections
+                .get(section_index)
+                .and_then(|section| section.sensors.get(sensor_index))
+                .and_then(|sensor| match &sensor.source {
+                    config::SensorSource::VolumeMeter { device } => Some(device.clone()),
+                    _ => None,
+                });
+            let percent = panel
+                .volume_drag
+                .filter(|(section, sensor, _)| {
+                    *section == section_index && *sensor == sensor_index
+                })
+                .map(|(_, _, percent)| percent)
+                .or_else(|| {
+                    panel
+                        .sections
+                        .get(section_index)
+                        .and_then(|section| section.sensors.get(sensor_index))
+                        .and_then(|sensor| sensors::leading_number(&sensor.value))
+                });
+            panel.volume_drag = None;
+            if let (Some(device), Some(percent)) = (device, percent) {
+                std::thread::spawn(move || sensors::set_volume(&device, percent));
+            }
+            Command::none()
+        }
         Message::NotifListScrolled(delta_y) => {
             // Wheel over the list: whole rows per notch (the surface
             // height is exact, so the math matches the layout).
@@ -1661,6 +1804,18 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                 let rows = (-delta_y / row_h).round() as i32;
                 let len = notifications::history_rows(NOTIF_LIST_MAX).len();
                 state.offset = scroll_rows(state.offset, rows, len, NOTIF_LIST_ROWS);
+            }
+            Command::none()
+        }
+        Message::NotifListArrow(up) => {
+            if let Some((_, state)) = panel.notif_list.as_mut() {
+                let len = notifications::history_rows(NOTIF_LIST_MAX).len();
+                state.offset = scroll_rows(
+                    state.offset,
+                    if up { -1 } else { 1 },
+                    len,
+                    NOTIF_LIST_ROWS,
+                );
             }
             Command::none()
         }
@@ -1854,7 +2009,10 @@ pub(crate) fn icons_theme(config: &config::Config) -> Option<&str> {
         .sections
         .iter()
         .flat_map(|section| section.sensors.iter())
-        .any(|sensor| sensor.icon.is_some());
+        .any(|sensor| {
+            sensor.icon.is_some()
+                || matches!(sensor.source, config::SensorSource::VolumeMeter { .. })
+        });
     if !declares_icon {
         return None;
     }
@@ -2049,7 +2207,8 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
                         .map(|(_, c)| *c)
                 })
                 .unwrap_or(sensor_text_color);
-            let text_color = if panel.hovered == Some((section_idx, sensor_idx)) {
+            let is_hovered = panel.hovered == Some((section_idx, sensor_idx));
+            let text_color = if is_hovered {
                 s.text_color_hover.unwrap_or(ruled)
             } else {
                 ruled
@@ -2116,6 +2275,25 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
                 unsafe { SCREEN_WIDTH }
             })
             .saturating_sub(2 * (u32::from(SECTION_CONTENT_PAD) + u32::from(pad_h)));
+            let is_volume_meter = panel
+                .config
+                .panel
+                .sections
+                .get(section_idx)
+                .and_then(|section| section.sensors.get(sensor_idx))
+                .is_some_and(|sensor| {
+                    matches!(sensor.source, config::SensorSource::VolumeMeter { .. })
+                });
+            let workspace_dots = panel
+                .config
+                .panel
+                .sections
+                .get(section_idx)
+                .and_then(|section| section.sensors.get(sensor_idx))
+                .and_then(|sensor| match &sensor.source {
+                    config::SensorSource::WorkspaceDots { count } => Some(*count),
+                    _ => None,
+                });
             let main: Element<'a, Message> = if let Some(icons) = &s.tray {
                 let per_line =
                     icons::icons_per_line(icon_room, tray::slot_width(), u32::from(tray::ROW_GAP));
@@ -2173,6 +2351,41 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
                     u32::from(windows::ROW_GAP),
                 );
                 windows::row(slots, panel.taskbar_hover.as_deref(), &row_style, per_line).into()
+            } else if is_volume_meter {
+                // Graphical volume meter: speaker, optional name and the
+                // click/drag bar. The percentage is added only while the
+                // sensor is hovered, which widens the box on demand.
+                let mut row = Row::new().spacing(6).align_y(Alignment::Center);
+                if let Some(path) = &s.icon {
+                    row = row.push(icons::widget(path, s.icon_size as f32));
+                }
+                if !s.name.is_empty() {
+                    row = row.push(
+                        text(&s.name)
+                            .color(text_color)
+                            .size(font_size)
+                            .font(font_obj),
+                    );
+                }
+                row = row.push(volume_ui::bar(
+                    section_idx,
+                    sensor_idx,
+                    &s.value,
+                    text_color,
+                ));
+                if is_hovered {
+                    row = row.push(volume_ui::percent(
+                        &s.value,
+                        text_color,
+                        font_obj,
+                        font_size,
+                    ));
+                }
+                row.into()
+            } else if let Some(count) = workspace_dots {
+                // Purely graphical workspace switch: one circle per
+                // numbered workspace, the active one filled.
+                workspace::dots(panel.hypr.as_ref(), count, text_color, font_size)
             } else {
                 // Icon first when the sensor declares one (roadmap N1), then
                 // the optional name, then the value: an empty name still
@@ -2185,24 +2398,41 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
                 if let Some(path) = &s.icon {
                     row = row.push(icons::widget(path, s.icon_size as f32));
                 }
+                // An icon-only text/icon sensor has both an empty name and
+                // an empty value: pushing that empty text would still add
+                // the row's 6px gap, making the box wider than the icon and
+                // shifting it left of centre. Omit empty values (unless a
+                // fixed width pins the slot for jitter-free readings).
+                let show_value = !s.value.is_empty() || s.fixed_width.is_some();
                 if s.name.is_empty() {
-                    row = row.push(value_widget);
+                    if show_value {
+                        row = row.push(value_widget);
+                    }
                 } else {
                     let name_text = text(&s.name)
                         .color(text_color)
                         .size(font_size)
                         .font(font_obj);
                     if vertical {
-                        row = row.push(Column::new().push(name_text).push(value_widget).spacing(2));
+                        let mut col = Column::new().push(name_text);
+                        if show_value {
+                            col = col.push(value_widget);
+                        }
+                        row = row.push(col.spacing(2));
                     } else {
-                        row = row.push(name_text).push(value_widget);
+                        row = row.push(name_text);
+                        if show_value {
+                            row = row.push(value_widget);
+                        }
                     }
                 }
                 row.into()
             };
 
             let desc_str: String = s.description.clone();
-            let has_desc = !desc_str.is_empty();
+            // The dots sensor is purely graphical: a configured description
+            // must not put text back into its box.
+            let has_desc = !desc_str.is_empty() && workspace_dots.is_none();
             let desc_value = desc_str.clone();
 
             let content: Element<'a, Message> = if has_desc {
@@ -2216,7 +2446,6 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
             };
 
             // Determine colors: hover when the cursor is over this sensor.
-            let is_hovered = panel.hovered == Some((section_idx, sensor_idx));
             let bg_color = if is_hovered {
                 s.bg_color_hover.or(s.bg_color)
             } else {
@@ -2260,16 +2489,12 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
                 return Some(styled_container.into());
             }
 
-            // Wrap in MouseArea to deliver hover + click for this specific sensor.
-            Some(
-                MouseArea::new(styled_container)
+            // Wrap in MouseArea to deliver hover + click for this specific
+            // sensor. The volume meter's bar owns its press/drag, so only
+            // its hover and wheel ride the outer area.
+            let area = MouseArea::new(styled_container)
                 .on_enter(Message::SensorHovered(section_idx, sensor_idx, true))
                 .on_exit(Message::SensorHovered(section_idx, sensor_idx, false))
-                .on_press(Message::SensorPressed(
-                    section_idx,
-                    sensor_idx,
-                    s.action.clone(),
-                ))
                 // Wheel over a volume sensor adjusts it (positive y = wheel
                 // up, verified on this stack). Per notch the stack sends a
                 // pixel delta, a zero delta (axis_source) and the same delta
@@ -2283,8 +2508,17 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
                     };
                     Message::SensorScrolled(section_idx, sensor_idx, up)
                 })
-                .interaction(iced::mouse::Interaction::Pointer)
-                .into()
+                .interaction(iced::mouse::Interaction::Pointer);
+            if is_volume_meter || workspace_dots.is_some() {
+                return Some(area.into());
+            }
+            Some(
+                area.on_press(Message::SensorPressed(
+                    section_idx,
+                    sensor_idx,
+                    s.action.clone(),
+                ))
+                .into(),
             )
         }).collect();
 
@@ -2915,6 +3149,8 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         popup: None,
                         popup_cards: 0,
                         popup_hover: None,
+                        notif_scroll: HashMap::new(),
+                        volume_drag: None,
                         tray_menu: None,
                         tray_menu_hover: None,
                         tray_menu_gen: 0,

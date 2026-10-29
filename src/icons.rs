@@ -127,6 +127,11 @@ pub(crate) fn cache_len() -> usize {
         .sum()
 }
 
+/// Static speaker shown by a `volume_meter` unless the sensor declares
+/// its own icon. Deliberately not level-dependent: the bar already
+/// carries the level.
+pub const VOLUME_ICON: &str = "audio-volume-high";
+
 // ── icon sizing: one formula for tray, sensor rows and the setup preview ──
 
 /// Padding the section content Row/Column adds on every side: the layout

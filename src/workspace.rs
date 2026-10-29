@@ -6,8 +6,9 @@
 //! the sensor box stays bare.
 
 use crate::Message;
-use iced::widget::{text, Column, MouseArea, Row};
-use iced::{Alignment, Color, Element, Font, Length};
+use iced::widget::{container, text, Column, MouseArea, Row, Space};
+use iced::{Alignment, Background, Border, Color, Element, Font, Length};
+use std::collections::HashSet;
 
 /// Gap between buttons and between wrapped lines (mirrors the tray's).
 pub const ROW_GAP: u16 = 4;
@@ -131,6 +132,107 @@ pub fn row<'a>(
     col.into()
 }
 
+/// The three visual states of a `workspace_dots` circle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DotState {
+    /// The active workspace: filled circle.
+    Active,
+    /// Inactive but holding at least one window: outlined circle with
+    /// a smaller filled dot in the middle.
+    Occupied,
+    /// Inactive and empty: outlined circle.
+    Empty,
+}
+
+/// One circle per numbered workspace. Clicking a circle focuses that
+/// workspace, reusing the workspace sensor's dispatch.
+pub fn dots<'a>(
+    snap: Option<&crate::hypr::Snapshot>,
+    count: u32,
+    color: Color,
+    font_size: u32,
+) -> Element<'a, Message> {
+    let dot = (font_size as f32 * 0.65).clamp(6.0, 10.0);
+    let gap = (dot * 0.5).max(2.0);
+    let inner = (dot * 0.4).max(2.0);
+    let active = snap.and_then(|s| s.active_workspace.as_deref());
+    let occupied: Vec<&str> = snap
+        .and_then(|s| s.clients.as_ref())
+        .map(|rows| rows.iter().map(|row| row.workspace.as_str()).collect())
+        .unwrap_or_default();
+    let mut row = Row::new().spacing(gap).align_y(Alignment::Center);
+    for (index, state) in dot_states(active, &occupied, count).into_iter().enumerate() {
+        let content: Element<'a, Message> = match state {
+            DotState::Active | DotState::Empty => Space::new()
+                .width(Length::Fixed(dot))
+                .height(Length::Fixed(dot))
+                .into(),
+            DotState::Occupied => container(
+                container(
+                    Space::new()
+                        .width(Length::Fixed(inner))
+                        .height(Length::Fixed(inner)),
+                )
+                .width(Length::Fixed(inner))
+                .height(Length::Fixed(inner))
+                .style(move |_| container::Style {
+                    background: Some(Background::Color(color)),
+                    border: Border {
+                        radius: (inner / 2.0).into(),
+                        ..Border::default()
+                    },
+                    ..container::Style::default()
+                }),
+            )
+            .width(Length::Fixed(dot))
+            .height(Length::Fixed(dot))
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center)
+            .into(),
+        };
+        let filled = state == DotState::Active;
+        let circle = container(content)
+            .width(Length::Fixed(dot))
+            .height(Length::Fixed(dot))
+            .style(move |_| container::Style {
+                background: filled.then_some(Background::Color(color)),
+                border: Border {
+                    width: 1.0,
+                    color,
+                    radius: (dot / 2.0).into(),
+                },
+                ..container::Style::default()
+            });
+        row = row.push(
+            MouseArea::new(circle)
+                .on_press(Message::WorkspaceClicked((index + 1).to_string()))
+                .interaction(iced::mouse::Interaction::Pointer),
+        );
+    }
+    row.into()
+}
+
+/// Classify `1..=count`: active wins over occupied; both compare only
+/// numeric workspace names (`special:*` and named workspaces fall out).
+pub(crate) fn dot_states(active: Option<&str>, occupied: &[&str], count: u32) -> Vec<DotState> {
+    let active = active.and_then(|name| name.parse::<u32>().ok());
+    let occupied: HashSet<u32> = occupied
+        .iter()
+        .filter_map(|name| name.parse::<u32>().ok())
+        .collect();
+    (1..=count)
+        .map(|index| {
+            if active == Some(index) {
+                DotState::Active
+            } else if occupied.contains(&index) {
+                DotState::Occupied
+            } else {
+                DotState::Empty
+            }
+        })
+        .collect()
+}
+
 // The row itself is a widget composition (covered by the bar's E2E);
 // the parse is the logic worth pinning down.
 #[cfg(test)]
@@ -183,5 +285,28 @@ mod tests {
         ];
         assert_eq!(crate::workspace::slot_width(&short, 12, 4), 16);
         assert_eq!(crate::workspace::slot_width(&long, 12, 4), 23);
+    }
+
+    /// Dots: active wins, an inactive occupied workspace gets the inner
+    /// dot, everything else is empty; named/special names are ignored.
+    #[test]
+    fn dot_states_distinguish_active_occupied_and_empty() {
+        use DotState::*;
+        assert_eq!(
+            dot_states(Some("2"), &["3", "5"], 5),
+            vec![Empty, Active, Occupied, Empty, Occupied]
+        );
+        assert_eq!(
+            dot_states(Some("2"), &["2", "3"], 3),
+            vec![Empty, Active, Occupied],
+            "the active circle stays filled even with windows"
+        );
+        assert_eq!(dot_states(Some("9"), &["3"], 3), vec![Empty, Empty, Occupied]);
+        assert_eq!(
+            dot_states(Some("special:scratchpad"), &["2"], 3),
+            vec![Empty, Occupied, Empty]
+        );
+        assert_eq!(dot_states(None, &[], 3), vec![Empty; 3]);
+        assert!(dot_states(Some("1"), &["1"], 0).is_empty());
     }
 }

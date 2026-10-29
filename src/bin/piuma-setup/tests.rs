@@ -187,8 +187,8 @@ fn wallpaper_palette_toggle_roundtrips() {
 }
 
 /// Save must fail with the serde reason — before touching any file —
-/// for a config piuma would reject (the fixture holds sensors with a
-/// required parameter missing: command and static_text).
+/// for a config piuma would reject (the fixture holds a command sensor
+/// without its required parameter).
 #[test]
 fn save_refuses_config_piuma_would_reject() {
     let mut state = fixture();
@@ -197,6 +197,130 @@ fn save_refuses_config_piuma_would_reject() {
     assert!(err.contains("Save rejected") && err.contains("missing field"),
         "error must state the rejection and its reason, got: {}", err);
     assert!(!file_path("never-written.json").exists(), "no file may be written");
+}
+
+/// A Text/Icon sensor may carry the icon alone: the empty text is a
+/// valid source and the saved JSON must pass the bar's schema.
+#[test]
+fn text_icon_sensor_saves_with_only_an_icon() {
+    let json = r##"{
+  "panel": {
+    "sections": [ {
+      "name": "sys",
+      "sensors": [ { "icon": "folder", "source": { "type": "static_text" } } ]
+    } ]
+  }
+}"##;
+    let mut state = fixture();
+    state.load_from_json(json).expect("text/icon config must load");
+    let saved = state.serialize().expect("serialize must succeed");
+    let out: JsonValue = serde_json::from_str(&saved).expect("saved JSON must parse");
+    assert_eq!(out["panel"]["sections"][0]["sensors"][0]["icon"], "folder");
+    serde_json::from_str::<config::Config>(&saved)
+        .expect("piuma must accept the icon-only text/icon sensor");
+    assert!(
+        config::validate_config(&serde_json::from_str(&saved).unwrap()).is_empty(),
+        "text or icon is enough"
+    );
+}
+
+/// With no text, the icon must actually resolve: a typo is blocked
+/// before a file is written (the bar would render nothing).
+#[test]
+fn text_icon_sensor_without_text_needs_a_resolvable_icon() {
+    let json = r##"{
+  "panel": {
+    "sections": [ {
+      "name": "sys",
+      "sensors": [ { "icon": "piuma-definitely-missing-icon",
+                     "source": { "type": "static_text" } } ]
+    } ]
+  }
+}"##;
+    let mut state = fixture();
+    state.load_from_json(json).expect("text/icon config must load");
+    state.refresh_validation();
+    assert!(
+        state.field_err("panel.sections[0].sensors[0].icon").is_some(),
+        "the missing icon is named: {:?}",
+        state.validation
+    );
+    let err = state.save_config("never-written-icon.json").unwrap_err();
+    assert!(err.contains("Save blocked"), "message: {err}");
+    assert!(!file_path("never-written-icon.json").exists(), "no file may be written");
+}
+
+#[test]
+fn text_icon_is_displayed_as_text_slash_icon() {
+    assert_eq!(source_label("static_text"), "Text/Icon");
+    assert_eq!(source_type_display("static_text"), "Text/Icon");
+    assert_eq!(source_type_from_display("Text/Icon"), "static_text");
+    assert_eq!(source_label("volume_meter"), "Volume bar");
+    assert_eq!(source_type_display("volume_meter"), "Volume bar");
+    assert_eq!(source_type_from_display("Volume bar"), "volume_meter");
+    assert_eq!(source_field_display("volume_meter"), "volume_meter");
+    assert_eq!(source_type_from_display("volume_meter"), "volume_meter");
+    assert_eq!(source_field_display("static_text"), "Text/Icon");
+    assert_eq!(source_label("workspace_dots"), "Workspace dots");
+    assert_eq!(source_field_display("workspace_dots"), "workspace_dots");
+    assert_eq!(source_type_from_display("workspace_dots"), "workspace_dots");
+    assert_eq!(source_type_display("perc_cpu"), "perc_cpu");
+}
+
+/// The graphical workspace sensor's circle count survives a save and
+/// piuma accepts the result.
+#[test]
+fn workspace_dots_roundtrips_its_count() {
+    let json = r##"{
+  "panel": {
+    "sections": [ {
+      "name": "sys",
+      "sensors": [ { "source": { "type": "workspace_dots", "count": 12 } } ]
+    } ]
+  }
+}"##;
+    let mut state = fixture();
+    state.load_from_json(json).expect("workspace dots must load");
+    let saved = state.serialize().expect("serialize must succeed");
+    let out: JsonValue = serde_json::from_str(&saved).expect("saved JSON must parse");
+    assert_eq!(
+        out["panel"]["sections"][0]["sensors"][0]["source"]["type"],
+        "workspace_dots"
+    );
+    assert_eq!(
+        out["panel"]["sections"][0]["sensors"][0]["source"]["count"],
+        12
+    );
+    serde_json::from_str::<config::Config>(&saved)
+        .expect("piuma must accept the saved workspace dots");
+}
+
+/// The graphical volume meter is an ordinary config sensor for the
+/// editor: its device survives a save and piuma accepts the result.
+#[test]
+fn volume_meter_roundtrips_its_device() {
+    let json = r##"{
+  "panel": {
+    "sections": [ {
+      "name": "sys",
+      "sensors": [ { "source": { "type": "volume_meter", "device": "Speaker" } } ]
+    } ]
+  }
+}"##;
+    let mut state = fixture();
+    state.load_from_json(json).expect("volume meter must load");
+    let saved = state.serialize().expect("serialize must succeed");
+    let out: JsonValue = serde_json::from_str(&saved).expect("saved JSON must parse");
+    assert_eq!(
+        out["panel"]["sections"][0]["sensors"][0]["source"]["type"],
+        "volume_meter"
+    );
+    assert_eq!(
+        out["panel"]["sections"][0]["sensors"][0]["source"]["device"],
+        "Speaker"
+    );
+    serde_json::from_str::<config::Config>(&saved)
+        .expect("piuma must accept the saved volume meter");
 }
 
 /// A tray sensor must survive load→save untouched (type name included)
@@ -255,17 +379,21 @@ fn layout_sensor_roundtrips_without_a_name() {
         .expect("piuma must accept the saved config (pre-save validation)");
 }
 
-/// A saved layout's label: its windows as "class: title", sorted
-/// exactly like the automatic name, " · " between them; an entry that
-/// isn't an array of windows shows nothing.
+/// A saved layout's windows are grouped by class, with the classes and
+/// their titles sorted; an entry that isn't an array shows no classes.
 #[test]
-fn layout_label_lists_windows_sorted() {
+fn layout_classes_group_windows_by_class() {
     let value: JsonValue = serde_json::from_str(
-        r#"[{"class":"vivaldi-stable","title":"WhatsApp"},{"class":"kitty","title":"shell"}]"#,
+        r#"[{"class":"vivaldi-stable","title":"WhatsApp"},{"class":"kitty","title":"shell"},{"class":"kitty","title":"vim"}]"#,
     )
     .expect("entries must parse");
-    assert_eq!(layout_label(&value), "kitty: shell · vivaldi-stable: WhatsApp");
-    assert_eq!(layout_label(&JsonValue::Bool(true)), "", "a non-array entry shows nothing");
+    let classes = layout_classes(&value);
+    assert_eq!(classes.len(), 2);
+    assert_eq!(classes[0].class, "kitty");
+    assert_eq!(classes[0].titles, vec!["shell", "vim"]);
+    assert_eq!(classes[1].class, "vivaldi-stable");
+    assert_eq!(classes[1].titles, vec!["WhatsApp"]);
+    assert!(layout_classes(&JsonValue::Bool(true)).is_empty(), "a non-array entry shows nothing");
 }
 
 /// `panel.notifications` and a notifications sensor must survive

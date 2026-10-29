@@ -5,6 +5,7 @@ use iced::widget::{button, column, container, text, toggler, Column, Row};
 use iced::{Alignment, Border, Element, Length, Theme};
 
 use crate::controls::*;
+use crate::icons;
 use crate::model::*;
 use crate::style::*;
 use crate::model::{Section, Sensor};
@@ -198,7 +199,7 @@ pub(crate) fn sensor_summary(sensor: &Sensor) -> String {
         .or(cfg.env_var.as_deref())
         .or(cfg.static_text.as_deref())
         .filter(|p| !p.is_empty());
-    let mut parts = vec![canonical_type(&sensor.source_type).to_string()];
+    let mut parts = vec![source_type_display(&sensor.source_type)];
     if let Some(p) = param {
         parts.push(format!("'{p}'"));
     }
@@ -228,9 +229,14 @@ pub(crate) fn sensor_view<'a>(
         .name
         .clone()
         .unwrap_or_else(|| source_label(canonical_type(&sensor.source_type)).to_string());
+    // A volume meter shows the same static speaker as the bar when the
+    // optional sensor icon is left empty.
+    let default_icon = matches!(canonical_type(&sensor.source_type), "volume_meter")
+        .then_some(icons::VOLUME_ICON);
+    let icon_name = sensor.icon.as_deref().or(default_icon);
     let mut header = Row::new();
     // The sensor's own icon leads the row, at the bar's row-height size.
-    if let Some(icon) = resolved_icon(&state.config, icon_size, sensor.icon.as_deref()) {
+    if let Some(icon) = resolved_icon(&state.config, icon_size, icon_name) {
         header = header.push(icon);
     }
     let header = header
@@ -293,20 +299,39 @@ pub(crate) fn sensor_view<'a>(
     // Options = the canonical types, alphabetical (roadmap2 #6); an
     // unknown/typo'd type from the file joins the list — still sorted —
     // so the current value never falls out of the options.
-    let source_types = available_source_types(&sensor.source_type);
+    let source_types: Vec<String> = available_source_types(&sensor.source_type)
+        .into_iter()
+        .map(|kind| source_field_display(&kind))
+        .collect();
+    let selected_type = source_field_display(&sensor.source_type);
     let source_type_picklist = picklist(
         source_types,
-        Some(&sensor.source_type),
-        move |value| Message::SensorSourceTypeChanged(section_index, sensor_index, value),
-    ).width(130);
+        Some(selected_type),
+        move |value| Message::SensorSourceTypeChanged(
+            section_index,
+            sensor_index,
+            source_type_from_display(&value),
+        ),
+    ).width(Length::Shrink);
 
     let source_config: Element<Message> = match canonical_type(&sensor.source_type) {
         "net_state" | "used_netdown" | "used_netup" => input("Interface", sensor.source_config.interface.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "interface".to_string(), value))
             .width(Length::Fill)
             .into(),
-        "perc_volume" => input("Device", sensor.source_config.device.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "device".to_string(), value))
+        "perc_volume" | "volume_meter" => input("Device", sensor.source_config.device.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "device".to_string(), value))
             .width(Length::Fill)
             .into(),
+        "workspace_dots" => slider_control(
+            1i32..=50,
+            sensor.source_config.count.unwrap_or(10) as i32,
+            None,
+            move |value| Message::SensorSourceTypeConfigChanged(
+                section_index,
+                sensor_index,
+                "count".to_string(),
+                value.to_string(),
+            ),
+        ),
         "clock" | "calendar" => input("Format", sensor.source_config.format.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "format".to_string(), value))
             .width(Length::Fill)
             .into(),
@@ -325,27 +350,39 @@ pub(crate) fn sensor_view<'a>(
             .into(),
     };
 
-    let source = form_cell("Source", Row::new()
-        .push(source_type_picklist)
-        .push(source_config)
-        .spacing(8)
-        .width(Length::Fill)
-        .into());
+    let source_error = state.field_err(&format!(
+        "panel.sections[{section_index}].sensors[{sensor_index}].source"
+    ));
+    let source = form_cell("Source", invalid_under(
+        Row::new()
+            .push(source_type_picklist)
+            .push(source_config)
+            .spacing(8)
+            .width(Length::Fill)
+            .into(),
+        source_error,
+    ));
 
     // Icon name, live preview at the row's real size and a browse
     // modal: the preview resolves exactly like the bar, so it cannot lie.
-    let icon = form_cell("Icon", Row::new()
-        .push(input("icon name (theme)", sensor.icon.as_deref().unwrap_or(""), move |value| Message::SensorIconChanged(section_index, sensor_index, value))
-            .width(Length::Fill))
-        .push(button(text("…").size(BODY))
-            .on_press(Message::BrowseIconsPressed(section_index, sensor_index))
-            .padding(5)
-            .style(move |t, s| btn_secondary(pal, t, s)))
-        .push(icon_preview(&state.config, icon_size, sensor.icon.as_deref()))
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .width(Length::Fill)
-        .into());
+    let icon_error = state.field_err(&format!(
+        "panel.sections[{section_index}].sensors[{sensor_index}].icon"
+    ));
+    let icon = form_cell("Icon", invalid_under(
+        Row::new()
+            .push(input("icon name (theme)", sensor.icon.as_deref().unwrap_or(""), move |value| Message::SensorIconChanged(section_index, sensor_index, value))
+                .width(Length::Fill))
+            .push(button(text("…").size(BODY))
+                .on_press(Message::BrowseIconsPressed(section_index, sensor_index))
+                .padding(5)
+                .style(move |t, s| btn_secondary(pal, t, s)))
+            .push(icon_preview(&state.config, icon_size, icon_name))
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .width(Length::Fill)
+            .into(),
+        icon_error,
+    ));
 
     let action = form_cell("Action", input("close_panel / command / ...", sensor.action.as_deref().unwrap_or(""), move |value| Message::SensorActionChanged(section_index, sensor_index, value))
         .width(Length::Fill)

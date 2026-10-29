@@ -340,6 +340,23 @@ pub fn adjust_volume(device: &str, up: bool) {
     eprintln!("[piuma] volume adjust failed: no working backend (amixer/wpctl/pactl)");
 }
 
+/// Set the mixer to an absolute percentage (`0..=100`): the click branch
+/// of the graphical volume meter. Uses the cached backend first, like
+/// [`adjust_volume`], and ignores a failed backend instead of leaving
+/// the mixer half-changed.
+pub fn set_volume(device: &str, pct: f32) {
+    let _guard = VOLUME_ADJUST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let device = volume_device(device);
+    let pct = pct.clamp(0.0, 100.0);
+    for backend in backend_order() {
+        if backend.set(device, pct) {
+            cache_backend(backend);
+            return;
+        }
+    }
+    eprintln!("[piuma] volume set failed: no working backend (amixer/wpctl/pactl)");
+}
+
 /// Get current time.
 /// A `date` reading for an arbitrary strftime format: the `calendar`
 /// sensor's bar text (and the fixed readings below). The format is one

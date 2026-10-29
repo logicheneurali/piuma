@@ -241,6 +241,8 @@ pub struct SourceConfig {
     pub interface: Option<String>,
     pub device: Option<String>,
     pub format: Option<String>,
+    /// `workspace_dots`: number of circles (absent = 10).
+    pub count: Option<u32>,
 }
 
 impl Default for PiumaConfig {
@@ -324,6 +326,7 @@ impl Default for SourceConfig {
             interface: None,
             device: None,
             format: None,
+            count: None,
         }
     }
 }
@@ -529,7 +532,7 @@ impl PiumaSetup {
                     map.insert("interface".to_string(), JsonValue::String(iface.clone()));
                 }
             }
-            "perc_volume" => {
+            "perc_volume" | "volume_meter" => {
                 if let Some(device) = &sensor.source_config.device {
                     map.insert("device".to_string(), JsonValue::String(device.clone()));
                 }
@@ -552,6 +555,11 @@ impl PiumaSetup {
             "static_text" => {
                 if let Some(st) = &sensor.source_config.static_text {
                     map.insert("static_text".to_string(), JsonValue::String(st.clone()));
+                }
+            }
+            "workspace_dots" => {
+                if let Some(count) = sensor.source_config.count {
+                    map.insert("count".to_string(), JsonValue::Number(count.into()));
                 }
             }
             _ => {}
@@ -980,6 +988,9 @@ impl PiumaSetup {
             if let Some(device) = source.get("device").and_then(|v| v.as_str()) {
                 sensor.source_config.device = Some(device.to_string());
             }
+            if let Some(count) = source.get("count").and_then(|v| v.as_u64()) {
+                sensor.source_config.count = Some(count as u32);
+            }
             if let Some(format) = source.get("format").and_then(|v| v.as_str()) {
                 sensor.source_config.format = Some(format.to_string());
             }
@@ -1125,8 +1136,8 @@ pub(crate) const SOURCE_TYPES: &[&str] = &[
     "temp_cpu",
     // no numeric category
     "net_state", "uptime", "clock", "calendar", "window", "workspace",
-    "command", "env_var", "static_text", "tray", "notifications",
-    "taskbar", "layout",
+    "workspace_dots", "command", "env_var", "static_text", "volume_meter",
+    "tray", "notifications", "taskbar", "layout",
 ];
 
 /// The sensor-type combo's options (roadmap2 #6): every canonical type
@@ -1173,25 +1184,75 @@ pub(crate) fn source_label(canonical: &str) -> &'static str {
         "calendar" => "Calendar",
         "window" => "Focused window",
         "workspace" => "Workspace",
+        "workspace_dots" => "Workspace dots",
         "tray" => "System tray",
         "notifications" => "Desktop notifications",
         "taskbar" => "Window taskbar",
         "layout" => "Window layout",
         "command" => "Shell command",
         "env_var" => "Environment variable",
-        "static_text" => "Static text",
+        "static_text" => "Text/Icon",
+        "volume_meter" => "Volume bar",
         _ => "Sensor",
+    }
+}
+
+/// Label shown in the source-type picklist for the sources whose JSON
+/// keys are not self-explanatory; the key itself stays unchanged.
+pub(crate) fn source_type_display(canonical: &str) -> String {
+    match canonical_type(canonical) {
+        "static_text" => "Text/Icon".to_string(),
+        "volume_meter" => "Volume bar".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// The Source field's own picklist shows canonical keys (like every
+/// other source); only the dedicated description/title uses the friendly
+/// label. Keep the special `volume_meter` spelling here.
+pub(crate) fn source_field_display(canonical: &str) -> String {
+    if canonical_type(canonical) == "volume_meter" {
+        "volume_meter".to_string()
+    } else {
+        source_type_display(canonical)
+    }
+}
+
+/// Reverse of the display labels used by both picklists.
+pub(crate) fn source_type_from_display(label: &str) -> String {
+    match label {
+        "Text/Icon" => "static_text".to_string(),
+        "Volume bar" => "volume_meter".to_string(),
+        other => other.to_string(),
     }
 }
 
 // ── saved window layouts (piuma-layouts.json) ────────────────────────
 
 /// One saved layout as the Layouts tab shows it: its key (the bar's
-/// automatic name) and a label built from the window pairs.
+/// automatic name), its windows grouped by class, and the total count.
 pub struct SavedLayout {
     pub key: String,
-    pub label: String,
+    pub classes: Vec<LayoutClass>,
     pub windows: usize,
+}
+
+/// One class in a saved layout with its window titles, sorted.
+pub struct LayoutClass {
+    pub class: String,
+    pub titles: Vec<String>,
+}
+
+impl SavedLayout {
+    /// A compact header such as `kitty ×2 · vivaldi-stable ×1`; the full
+    /// titles live in the per-class cards, not on one endless line.
+    pub(crate) fn class_summary(&self) -> String {
+        self.classes
+            .iter()
+            .map(|group| format!("{} ×{}", group.class, group.titles.len()))
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
 }
 
 /// `~/.config/piuma/piuma-layouts.json`, next to piuma.json — the one
@@ -1200,19 +1261,27 @@ fn layouts_path() -> PathBuf {
     config_dir().join("piuma-layouts.json")
 }
 
-/// The display label of one saved layout: its (class, title) pairs
-/// sorted exactly like the automatic name, one "class: title" per
-/// window, " · " between them.
-pub(crate) fn layout_label(value: &JsonValue) -> String {
+/// Group a layout's windows by class, sorting class names and titles so
+/// the Layouts tab stays stable. Entries without a class are ignored.
+pub(crate) fn layout_classes(value: &JsonValue) -> Vec<LayoutClass> {
     let Some(wins) = value.as_array() else {
-        return String::new();
+        return Vec::new();
     };
-    let mut pairs: Vec<(&str, &str)> = wins
-        .iter()
-        .filter_map(|w| Some((w.get("class")?.as_str()?, w.get("title")?.as_str()?)))
-        .collect();
-    pairs.sort_unstable();
-    pairs.iter().map(|(c, t)| format!("{c}: {t}")).collect::<Vec<_>>().join(" · ")
+    let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for window in wins {
+        let Some(class) = window.get("class").and_then(JsonValue::as_str) else {
+            continue;
+        };
+        let title = window.get("title").and_then(JsonValue::as_str).unwrap_or_default();
+        groups.entry(class.to_string()).or_default().push(title.to_string());
+    }
+    groups
+        .into_iter()
+        .map(|(class, mut titles)| {
+            titles.sort();
+            LayoutClass { class, titles }
+        })
+        .collect()
 }
 
 /// Every saved layout (key → label + window count) in the file's
@@ -1225,7 +1294,7 @@ pub(crate) fn load_layouts() -> Result<Vec<SavedLayout>, String> {
         .into_iter()
         .map(|(key, value)| SavedLayout {
             windows: value.as_array().map_or(0, Vec::len),
-            label: layout_label(&value),
+            classes: layout_classes(&value),
             key,
         })
         .collect())

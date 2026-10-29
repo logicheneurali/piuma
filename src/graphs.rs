@@ -41,7 +41,8 @@ pub fn scale_of(source: &config::SensorSource) -> Option<Scale> {
         | S::PercDisk {}
         | S::PercBattery {}
         | S::PercBacklight {}
-        | S::PercVolume { .. } => Scale::Percent,
+        | S::PercVolume { .. }
+        | S::VolumeMeter { .. } => Scale::Percent,
         S::UsedMem {}
         | S::UsedSwap {}
         | S::UsedDisk {}
@@ -103,6 +104,7 @@ pub fn unit_of(source: &config::SensorSource) -> &'static str {
         | S::PercBattery {}
         | S::PercBacklight {}
         | S::PercVolume { .. }
+        | S::VolumeMeter { .. }
         | S::UsedMem {}
         | S::UsedSwap {}
         | S::UsedDisk {}
