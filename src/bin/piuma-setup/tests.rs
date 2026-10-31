@@ -267,6 +267,32 @@ fn text_icon_is_displayed_as_text_slash_icon() {
     assert_eq!(source_type_display("perc_cpu"), "perc_cpu");
 }
 
+/// The optional value animation survives a load/save roundtrip, both
+/// the panel mode and the per-sensor opt-in.
+#[test]
+fn value_effect_and_sensor_optin_roundtrip() {
+    let json = r##"{
+  "panel": {
+    "value_effect": "sheen",
+    "sections": [ {
+      "sensors": [ { "name": "CPU", "effect": true,
+                     "source": { "type": "perc_cpu" } } ]
+    } ]
+  }
+}"##;
+    let mut state = fixture();
+    state.load_from_json(json).expect("effect config must load");
+    let saved = state.serialize().expect("serialize must succeed");
+    let out: JsonValue = serde_json::from_str(&saved).expect("saved JSON must parse");
+    assert_eq!(out["panel"]["value_effect"], "sheen");
+    assert_eq!(
+        out["panel"]["sections"][0]["sensors"][0]["effect"].as_bool(),
+        Some(true)
+    );
+    serde_json::from_str::<config::Config>(&saved)
+        .expect("piuma must accept the saved effect config");
+}
+
 /// The graphical workspace sensor's circle count survives a save and
 /// piuma accepts the result.
 #[test]

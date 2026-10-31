@@ -17,6 +17,11 @@ pub(crate) fn panel_settings(state: &PiumaSetup) -> Element<'_, Message> {
     let thickness = state.config.thickness;
     let anchor = state.config.anchor.clone().unwrap_or_default();
     let align = state.config.align.clone().unwrap_or_default();
+    let value_effect = state
+        .config
+        .value_effect
+        .clone()
+        .unwrap_or_else(|| "off".to_string());
     // Absent corners block = the bar's own fallback radius (config.rs).
     let corners_radius = state.config.screen_corners.as_ref().map_or(32, |c| c.radius);
 
@@ -68,6 +73,16 @@ pub(crate) fn panel_settings(state: &PiumaSetup) -> Element<'_, Message> {
             .label("Show section titles")
             .on_toggle(Message::SectionTitleChanged)
             .into()),
+        ("Value Effect", invalid_under(
+            picklist(
+                vec!["off".to_string(), "underline".to_string(), "sheen".to_string()],
+                Some(value_effect),
+                Message::ValueEffectChanged,
+            )
+            .width(Length::Fill)
+            .into(),
+            state.field_err("panel.value_effect"),
+        )),
         ("Default BG", color_control(
             state.config.default_bg_color.as_deref().unwrap_or(""),
             state.field_err("panel.default_bg_color"),

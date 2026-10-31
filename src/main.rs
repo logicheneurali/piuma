@@ -33,6 +33,7 @@ mod calendar;
 mod config;
 mod corners;
 mod dbusmenu;
+mod effects;
 mod fill_sections;
 mod geometry;
 mod graphs;
@@ -140,6 +141,9 @@ pub(crate) struct SensorValue {
     pub(crate) name: String,
     pub(crate) description: String,
     pub(crate) value: String,
+    /// Opted into `panel.value_effect`; the view reserves the effect
+    /// layer only for these sensors.
+    pub(crate) effect: bool,
     pub(crate) text_color: Option<iced::Color>,
     /// Threshold colour rules (config `color_rules`) parsed to colours
     /// and sorted ascending by `min`: the view tints the value with
@@ -345,6 +349,9 @@ pub(crate) struct Panel {
     /// Per-card scroll viewport (absolute offset, max offset) of the
     /// notification body; drives the two nav arrows instead of a rail.
     pub(crate) notif_scroll: HashMap<u32, (f32, f32)>,
+    /// Value-change effects currently alive: (section, sensor) → start.
+    /// Only opted sensors enter this map; empty means no animation.
+    pub(crate) value_effects: HashMap<(usize, usize), Instant>,
     /// Volume meter under a drag: (section, sensor, target percent).
     /// The sink is written only on release, so a tick in between must
     /// not replace the bar with the old reading.
@@ -527,6 +534,9 @@ pub(crate) struct CalendarPopup {
 pub(crate) enum Message {
     /// Marks a second edge: the tick handler reloads, polls and advances.
     Tick,
+    /// One animation frame while a value effect is alive: only prunes
+    /// expired effects; the view computes their progress.
+    EffectFrame,
     /// The tick's data pass finished on a worker thread: the config
     /// generation it read against (a reply from an older config is
     /// dropped, see `spawn_read`) and every sensor's reading.
@@ -1003,6 +1013,9 @@ fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<Command<Mess
     // sensor, collected here so the sections and the history never
     // borrow the panel at once).
     let mut graph_samples: Vec<((usize, usize), f64)> = Vec::new();
+    let effect_mode = panel.config.panel.value_effect.as_deref().unwrap_or("off");
+    let effect_enabled = matches!(effect_mode, effects::UNDERLINE | effects::SHEEN);
+    let mut effect_starts: Vec<(usize, usize)> = Vec::new();
     let mut sections: Vec<SectionData> = Vec::new();
     // The styles are config-driven and already resolved (`restyle`,
     // on load/reload/palette change): this pass only pairs its
@@ -1087,10 +1100,21 @@ fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<Command<Mess
                     let size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
                     text_width::widest(&font, size, &sensors::net_rate_samples(&value))
                 });
+                if effect_enabled && s.effect {
+                    let old_value = panel
+                        .sections
+                        .get(section_idx)
+                        .and_then(|section| section.sensors.get(sensor_idx))
+                        .map(|sensor| sensor.value.as_str());
+                    if effects::value_changed(old_value, &value) {
+                        effect_starts.push((section_idx, sensor_idx));
+                    }
+                }
                 SensorValue {
                     name: st.name.clone(),
                     description: st.description.clone(),
                     value,
+                    effect: s.effect,
                     text_color: Some(st.text_color),
                     color_rules: st.color_rules.clone(),
                     bg_color: st.bg_color,
@@ -1131,6 +1155,19 @@ fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<Command<Mess
     // fork, and exactly what the engine just matched against.
     panel.hypr = hypr;
     panel.sections = sections;
+    // Restart the effect of every value that really changed this pass;
+    // expired entries go away so the frame subscription can stop.
+    let now = Instant::now();
+    panel
+        .value_effects
+        .retain(|_, start| now.saturating_duration_since(*start) < effects::DURATION);
+    if effect_enabled {
+        for key in effect_starts {
+            panel.value_effects.insert(key, now);
+        }
+    } else {
+        panel.value_effects.clear();
+    }
     // One ring advance per pass: columns repeat their last value
     // when a reading was missing (time stays uniform).
     panel.graphs.record(&graph_samples);
@@ -1168,6 +1205,13 @@ fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<Command<Mess
 
 fn update(panel: &mut Panel, message: Message) -> Command<Message> {
     match message {
+        Message::EffectFrame => {
+            let now = Instant::now();
+            panel
+                .value_effects
+                .retain(|_, start| now.saturating_duration_since(*start) < effects::DURATION);
+            Command::none()
+        }
         Message::Tick => {
             // Hot reload: pick up config file changes (content and, when
             // layout/align differ from what is applied, surface geometry).
@@ -1245,6 +1289,7 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             // previous config's sensor.
             if config_reloaded {
                 panel.volume_drag = None;
+                panel.value_effects.clear();
                 if let Some(gp) = panel.graph_popup.take() {
                     cmds.push(iced::window::close(gp.id));
                 }
@@ -2047,6 +2092,10 @@ fn subscription(panel: &Panel) -> Subscription<Message> {
             notifications::configure(cfg);
             notifications::subscription()
         });
+    // Animation frames exist only while an effect is alive: the idle
+    // bar never pays for a 30 fps subscription.
+    let effect_sub = (!panel.value_effects.is_empty())
+        .then(|| time::every(effects::FRAME).map(|_| Message::EffectFrame));
     Subscription::batch(
         [
             time::every(std::time::Duration::from_secs(1)).map(|_| Message::Tick),
@@ -2054,7 +2103,8 @@ fn subscription(panel: &Panel) -> Subscription<Message> {
         ]
         .into_iter()
         .chain(tray_sub)
-        .chain(notif_sub),
+        .chain(notif_sub)
+        .chain(effect_sub),
     )
 }
 
@@ -2141,6 +2191,12 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
     // Build sections.
     let mut section_elements: Vec<Element<'a, Message>> = Vec::new();
 
+    let value_effect = panel
+        .config
+        .panel
+        .value_effect
+        .as_deref()
+        .unwrap_or("off");
     for (section_idx, section) in panel.sections.iter().enumerate() {
         let section_bg = section.bg_color;
         let section_text = section.text_color;
@@ -2219,16 +2275,57 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
             // wraps, whatever the content; the text is centred inside it so
             // the value lands like every other sensor's value (no leading
             // padding shifts it off the line).
+            let effect_progress = panel
+                .value_effects
+                .get(&(section_idx, sensor_idx))
+                .and_then(|start| effects::progress(*start));
+            let value_color = effect_progress
+                .map(|t| effects::fade(text_color, t))
+                .unwrap_or(text_color);
             let value_text = text(&s.value)
-                .color(text_color)
+                .color(value_color)
                 .size(font_size)
                 .font(value_font_obj);
+            let effect_value = s.effect
+                && matches!(value_effect, effects::UNDERLINE | effects::SHEEN);
+            let value_width = if effect_value {
+                s.fixed_width.map(f32::from).unwrap_or_else(|| {
+                    f32::from(text_width::widest(
+                        &value_font_obj,
+                        font_size,
+                        std::slice::from_ref(&s.value),
+                    ))
+                })
+            } else {
+                0.0
+            };
+            let value_element: Element<'a, Message> = if effect_value
+                && value_effect == effects::UNDERLINE
+            {
+                effects::underline(
+                    value_text.into(),
+                    value_width,
+                    (font_size as f32 * 1.3).max(1.0),
+                    text_color,
+                    effect_progress,
+                )
+            } else if effect_value && value_effect == effects::SHEEN {
+                effects::sheen(
+                    value_text.into(),
+                    value_width,
+                    (font_size as f32 * 1.3).max(1.0),
+                    text_color,
+                    effect_progress,
+                )
+            } else {
+                value_text.into()
+            };
             let value_widget: Element<'a, Message> = match s.fixed_width {
-                Some(width) => container(value_text)
+                Some(width) => container(value_element)
                     .width(Length::Fixed(f32::from(width)))
                     .align_x(Alignment::Center)
                     .into(),
-                None => value_text.into(),
+                None => value_element,
             };
 
             // Name and value side by side, separated by a small gap (the
@@ -3150,6 +3247,7 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         popup_cards: 0,
                         popup_hover: None,
                         notif_scroll: HashMap::new(),
+                        value_effects: HashMap::new(),
                         volume_drag: None,
                         tray_menu: None,
                         tray_menu_hover: None,

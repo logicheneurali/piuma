@@ -78,6 +78,8 @@ pub struct PiumaConfig {
     pub app_theme: Option<bool>,
     /// Draw each section's title above its sensors (bar default: true).
     pub section_title: Option<bool>,
+    /// Value-change animation mode: `None`/`off`, `underline` or `sheen`.
+    pub value_effect: Option<String>,
     /// Desktop background the bar draws itself (roadmap2 #1): `None` =
     /// key absent (the bar opens no background window).
     pub wallpaper: Option<WallpaperCfg>,
@@ -227,6 +229,8 @@ pub struct Sensor {
     pub padding: Option<i32>,
     pub action: Option<String>,
     pub draw_graph: bool,
+    /// Opt this sensor into the panel's value-change effect.
+    pub effect: bool,
     /// Threshold colours for the displayed value (`color_rules`), the
     /// highest `min` the reading reaches wins on the bar; `None` = the
     /// sensor's plain `text_color` everywhere (mirrors src/config.rs).
@@ -260,6 +264,7 @@ impl Default for PiumaConfig {
             screen_corners: None,
             section_layout: "horizontal".to_string(),
             section_title: None,
+            value_effect: None,
             default_section_weight: 1,
             default_bg_color: Some("#1a1b26".to_string()),
             default_text_color: Some("#e8e8e8".to_string()),
@@ -312,6 +317,7 @@ impl Default for Sensor {
             padding: None,
             action: None,
             draw_graph: false,
+            effect: false,
             color_rules: None,
         }
     }
@@ -367,6 +373,9 @@ impl PiumaSetup {
         }
         if let Some(t) = self.config.section_title {
             panel.insert("section_title".to_string(), JsonValue::Bool(t));
+        }
+        if let Some(effect) = &self.config.value_effect {
+            panel.insert("value_effect".to_string(), JsonValue::String(effect.clone()));
         }
         // Only the toggle travels to the file: the palette it selects is
         // derived at runtime and never serialized.
@@ -603,6 +612,9 @@ impl PiumaSetup {
         if sensor.draw_graph {
             map.insert("draw_graph".to_string(), JsonValue::Bool(true));
         }
+        if sensor.effect {
+            map.insert("effect".to_string(), JsonValue::Bool(true));
+        }
 
         // Threshold colour rules, stored sorted by ascending `min` (the
         // order the bar evaluates them); absent/empty = key omitted, like
@@ -708,6 +720,7 @@ impl PiumaSetup {
             screen_corners: None,
             section_layout: "horizontal".to_string(),
             section_title: None,
+            value_effect: None,
             default_section_weight: 1,
             default_bg_color: None,
             default_text_color: None,
@@ -756,6 +769,10 @@ impl PiumaSetup {
         // Absent `section_title` stays `None` (the bar draws titles by
         // default); an explicit false is kept as-is.
         self.config.section_title = panel.get("section_title").and_then(|v| v.as_bool());
+        self.config.value_effect = panel
+            .get("value_effect")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
         // Absent `wallpaper` stays `None`: the bar draws no background
         // (roadmap2 #1). A partial block falls back per field.
         self.config.wallpaper = panel.get("wallpaper").and_then(|v| {
@@ -1040,6 +1057,7 @@ impl PiumaSetup {
         }
         // Graph toggle: absent = off (the config default).
         sensor.draw_graph = obj.get("draw_graph").and_then(|v| v.as_bool()).unwrap_or(false);
+        sensor.effect = obj.get("effect").and_then(|v| v.as_bool()).unwrap_or(false);
 
         // Threshold colour rules: loaded like `action`, otherwise the next
         // save would drop the key. Entries a rule cannot be made of (wrong

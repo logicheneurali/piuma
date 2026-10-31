@@ -64,6 +64,10 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
             // is titles drawn, so off must write a false.
             state.config.section_title = Some(value);
         }
+        Message::ValueEffectChanged(value) => {
+            // Absent means off: keep the file minimal when disabled.
+            state.config.value_effect = (value != "off").then_some(value);
+        }
         Message::WallpaperEnabled(value) => {
             // The toggle only flips `enabled`: the chosen path survives
             // both directions (the surface opens/closes on save + reload).
@@ -563,6 +567,14 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                 let section = &mut state.config.sections[section_index];
                 if sensor_index < section.sensors.len() {
                     section.sensors[sensor_index].draw_graph = value;
+                }
+            }
+        }
+        Message::SensorEffectChanged(section_index, sensor_index, value) => {
+            if section_index < state.config.sections.len() {
+                let section = &mut state.config.sections[section_index];
+                if sensor_index < section.sensors.len() {
+                    section.sensors[sensor_index].effect = value;
                 }
             }
         }

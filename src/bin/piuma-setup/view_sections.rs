@@ -392,6 +392,11 @@ pub(crate) fn sensor_view<'a>(
     let draw_graph = form_cell("Draw graph", toggler(sensor.draw_graph)
         .on_toggle(move |value| Message::SensorDrawGraphChanged(section_index, sensor_index, value))
         .into());
+    // Opt-in for `panel.value_effect`; the panel mode stays the master.
+    let animate = form_cell("Animate", toggler(sensor.effect)
+        .label("On value change")
+        .on_toggle(move |value| Message::SensorEffectChanged(section_index, sensor_index, value))
+        .into());
 
     // Cross-section ordering: only when there is somewhere else to go.
     let move_to = if section_labels.len() > 1 {
@@ -436,7 +441,7 @@ pub(crate) fn sensor_view<'a>(
 
     // The header (title + controls) stays visible in both states, so an
     // expanded sensor can still be collapsed, reordered, copied, removed.
-    let mut root = column![header, fields, source, icon, action, draw_graph]
+    let mut root = column![header, fields, source, icon, action, draw_graph, animate]
         .spacing(6)
         .width(Length::Fill);
     if let Some(move_to) = move_to {

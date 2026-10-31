@@ -219,6 +219,14 @@ drawn before its text, sized to the font and resolved under
 icon machinery stays dormant — no theme parsing, no file resolution, no
 memory — until at least one sensor declares an icon.
 
+A sensor opts into the panel's value animation with `"effect": true`
+(absent = off); `panel.value_effect` above chooses the style.
+
+`panel.value_effect` animates changed values: `underline` fades the
+value in and grows a short underline, `sheen` adds a light band sweep.
+It is off when absent; only sensors with `"effect": true` animate, so
+the global mode is a master switch, not a blanket animation.
+
 `panel.autostart: true` makes the bar launch, once at startup, the
 applications marked as autostart under the standard XDG directories —
 `$XDG_CONFIG_HOME/autostart` (default `~/.config/autostart`) and the

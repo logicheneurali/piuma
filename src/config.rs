@@ -130,6 +130,10 @@ pub struct PanelConfig {
     /// Draw each section's title above its stacked sensors (the title
     /// exists only where sensors stack); absent = true.
     pub section_title: Option<bool>,
+    /// How a sensor value animates when it changes: `off` (default),
+    /// `underline` (fade + underline sweep) or `sheen` (fade + light
+    /// sweep over the value). Only sensors with `effect: true` animate.
+    pub value_effect: Option<String>,
     pub default_section_weight: Option<u32>,
     pub default_bg_color: Option<String>,
     pub default_text_color: Option<String>,
@@ -338,6 +342,10 @@ pub struct SensorConfig {
     /// `temp_cpu`); on the others the toggle is inert.
     #[serde(default)]
     pub draw_graph: bool,
+    /// Opt this sensor into the panel's value effect (`panel.value_effect`):
+    /// absent = off, so a global mode alone never animates everything.
+    #[serde(default)]
+    pub effect: bool,
     /// Threshold colours for the displayed value (`color_rules`): the
     /// highest `min` the reading reaches wins; hover still overrides
     /// (`text_color_hover`). Absent = plain `text_color`.
@@ -483,11 +491,11 @@ pub fn default_config() -> Config {
         border_radius: None,
         border_type: None,
         sensors: vec![
-            SensorConfig { name: "CPU".to_string(), description: None, icon: None, source: SensorSource::PercCpu {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false, color_rules: None },
-            SensorConfig { name: "GPU".to_string(), description: None, icon: None, source: SensorSource::PercGpu {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false, color_rules: None },
-            SensorConfig { name: "MEM".to_string(), description: None, icon: None, source: SensorSource::DetailMem {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false, color_rules: None },
-            SensorConfig { name: "DISK".to_string(), description: None, icon: None, source: SensorSource::PercDisk {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false, color_rules: None },
-            SensorConfig { name: "UPTIME".to_string(), description: None, icon: None, source: SensorSource::Uptime {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false, color_rules: None },
+            SensorConfig { name: "CPU".to_string(), description: None, icon: None, source: SensorSource::PercCpu {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false, effect: false, color_rules: None },
+            SensorConfig { name: "GPU".to_string(), description: None, icon: None, source: SensorSource::PercGpu {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false, effect: false, color_rules: None },
+            SensorConfig { name: "MEM".to_string(), description: None, icon: None, source: SensorSource::DetailMem {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false, effect: false, color_rules: None },
+            SensorConfig { name: "DISK".to_string(), description: None, icon: None, source: SensorSource::PercDisk {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false, effect: false, color_rules: None },
+            SensorConfig { name: "UPTIME".to_string(), description: None, icon: None, source: SensorSource::Uptime {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false, effect: false, color_rules: None },
         ],
     };
 
@@ -506,6 +514,7 @@ pub fn default_config() -> Config {
             screen_corners: None,
             section_layout: Some("horizontal".to_string()),
             section_title: None,
+            value_effect: None,
             default_section_weight: Some(1),
             default_bg_color: None,
             default_text_color: None,
@@ -679,6 +688,12 @@ pub fn validate_config(cfg: &Config) -> Vec<ConfigError> {
         "panel.section_layout",
         p.section_layout.as_deref(),
         &["horizontal", "vertical"],
+    );
+    err_one_of(
+        &mut errors,
+        "panel.value_effect",
+        p.value_effect.as_deref(),
+        &["off", "underline", "sheen"],
     );
     err_range_u32(&mut errors, "panel.thickness", p.thickness, 4, 256);
     err_range_u32(&mut errors, "panel.font_size", p.font_size, 1, 256);
@@ -1300,6 +1315,30 @@ mod tests {
         let out = serde_json::to_string(&cfg).expect("config must serialize");
         assert!(out.contains(r#""volume_meter""#), "got: {out}");
         assert!(out.contains(r#""device":"Speaker""#), "got: {out}");
+    }
+
+    /// Value effects: global mode and per-sensor opt-in roundtrip, and
+    /// an unknown mode is named at its path.
+    #[test]
+    fn value_effect_and_sensor_optin_roundtrip() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"panel":{"value_effect":"underline","sections":[{"sensors":[{"name":"CPU","effect":true,"source":{"type":"perc_cpu"}}]}]}}"#,
+        )
+        .expect("effect config must parse");
+        assert_eq!(cfg.panel.value_effect.as_deref(), Some("underline"));
+        assert!(cfg.panel.sections[0].sensors[0].effect);
+        assert!(validate_config(&cfg).is_empty());
+        let out = serde_json::to_string(&cfg).expect("config must serialize");
+        assert!(out.contains(r#""value_effect":"underline""#), "got: {out}");
+        assert!(out.contains(r#""effect":true"#), "got: {out}");
+
+        let bad: Config = serde_json::from_str(
+            r#"{"panel":{"value_effect":"flash","sections":[]}}"#,
+        )
+        .expect("unknown mode still parses");
+        let errors = validate_config(&bad);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].path, "panel.value_effect");
     }
 
     /// The graphical workspace sensor carries its circle count and

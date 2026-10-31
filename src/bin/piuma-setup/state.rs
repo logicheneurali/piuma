@@ -32,6 +32,8 @@ pub enum Message {
     /// Section title toggle: draw each section's title above its
     /// stacked sensors.
     SectionTitleChanged(bool),
+    /// Panel value-change effect: `off`, `underline` or `sheen`.
+    ValueEffectChanged(String),
     /// Wallpaper enable toggle (roadmap2 #1).
     WallpaperEnabled(bool),
     /// Wallpaper image path, from the scanned list or a hand-typed
@@ -134,6 +136,8 @@ pub enum Message {
     SensorActionChanged(usize, usize, String),
     /// Graph toggle of one sensor (hover popup trend).
     SensorDrawGraphChanged(usize, usize, bool),
+    /// Value-effect opt-in of one sensor.
+    SensorEffectChanged(usize, usize, bool),
     /// Opens the threshold colour-rules editor for one sensor (the "…"
     /// right of the Text colour field).
     ColorRulesPressed(usize, usize),
