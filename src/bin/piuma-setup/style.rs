@@ -212,6 +212,17 @@ pub(crate) fn btn_secondary(pal: Palette, t: &Theme, s: button::Status) -> butto
     st
 }
 
+/// Invisible button skin: makes a preview pill clickable without adding
+/// a second frame around it.
+pub(crate) fn btn_ghost() -> button::Style {
+    button::Style {
+        background: None,
+        text_color: Color::WHITE,
+        border: Border::default(),
+        ..button::Style::default()
+    }
+}
+
 /// The 16x16 swatch colour of a typed value: the bar's own parser, with
 /// the grey "unparsable" fallback the editor uses for blank fields.
 pub(crate) fn hex_color(value: &str) -> Color {
@@ -261,4 +272,3 @@ pub(crate) fn inset_style(pal: Palette) -> impl Fn(&Theme) -> container::Style {
         ..container::Style::default()
     }
 }
-

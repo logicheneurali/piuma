@@ -448,6 +448,10 @@ pub enum SensorSource {
     },
     /// System tray (StatusNotifierItem): renders the tray icons; the
     /// rendering and the whole D-Bus side live in `tray.rs`.
+    /// MPRIS media player: title/artist of the selected player, click
+    /// play/pause, wheel previous/next. Empty = no player (sensor hides).
+    #[serde(rename = "media")]
+    Media {},
     #[serde(rename = "tray")]
     Tray {},
     /// Desktop Notifications: shows the newest active notification; the
@@ -1339,6 +1343,22 @@ mod tests {
         let errors = validate_config(&bad);
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert_eq!(errors[0].path, "panel.value_effect");
+    }
+
+    /// The MPRIS media sensor has no parameters and roundtrips.
+    #[test]
+    fn media_sensor_parses_and_roundtrips() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[{"sensors":[{"source":{"type":"media"}}]}]}}"#,
+        )
+        .expect("media sensor must parse");
+        assert!(matches!(
+            cfg.panel.sections[0].sensors[0].source,
+            SensorSource::Media {}
+        ));
+        assert!(validate_config(&cfg).is_empty());
+        let out = serde_json::to_string(&cfg).expect("config must serialize");
+        assert!(out.contains(r#""media""#), "got: {out}");
     }
 
     /// The graphical workspace sensor carries its circle count and

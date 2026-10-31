@@ -42,6 +42,7 @@ mod icons;
 mod instance_lock;
 mod layouts;
 mod menus;
+mod mpris;
 mod notifications;
 mod palette;
 mod popup_calendar;
@@ -556,6 +557,9 @@ pub(crate) enum Message {
     SensorHoverConfirmed(usize, usize, u64),
     /// A sensor was clicked: (section_index, sensor_index, action).
     SensorPressed(usize, usize, Option<String>),
+    /// Right-click on the bar outside any widget that owns that button
+    /// (tray/taskbar keep theirs): open the sibling `piuma-setup`.
+    OpenSetup,
     /// A workspace button was clicked: focus that workspace (roadmap2 #4).
     WorkspaceClicked(String),
     /// Wheel scrolled over a sensor: (section_index, sensor_index, up);
@@ -1205,6 +1209,10 @@ fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<Command<Mess
 
 fn update(panel: &mut Panel, message: Message) -> Command<Message> {
     match message {
+        Message::OpenSetup => {
+            open_setup();
+            Command::none()
+        }
         Message::EffectFrame => {
             let now = Instant::now();
             panel
@@ -1686,6 +1694,19 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             Command::none()
         }
         Message::SensorPressed(section_index, sensor_index, action) => {
+            // The media sensor's click is its transport control; a
+            // configured shell action has no useful meaning here.
+            let is_media = panel
+                .config
+                .panel
+                .sections
+                .get(section_index)
+                .and_then(|sec| sec.sensors.get(sensor_index))
+                .is_some_and(|s| matches!(s.source, config::SensorSource::Media {}));
+            if is_media {
+                mpris::play_pause();
+                return Command::none();
+            }
             let action = action.filter(|a| !a.trim().is_empty());
             match action.as_deref() {
                 Some(ACTION_CLOSE_PANEL) => {
@@ -1764,6 +1785,10 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
                     .get(section_index)
                     .and_then(|sec| sec.sensors.get(sensor_index))
                     .map(|s| &s.source);
+                if matches!(source, Some(config::SensorSource::Media {})) {
+                    mpris::step(up);
+                    return Command::none();
+                }
                 if matches!(source, Some(config::SensorSource::Notifications {})) {
                     notifications::scroll(up);
                     // Rewrite the value at once; the next tick confirms it.
@@ -2237,6 +2262,16 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
                 .and_then(|sec| sec.sensors.get(sensor_idx))
                 .is_some_and(|cfg_s| matches!(cfg_s.source, config::SensorSource::Notifications {}));
             if is_notifications && s.value.is_empty() {
+                return None;
+            }
+            let is_media = panel
+                .config
+                .panel
+                .sections
+                .get(section_idx)
+                .and_then(|sec| sec.sensors.get(sensor_idx))
+                .is_some_and(|cfg_s| matches!(cfg_s.source, config::SensorSource::Media {}));
+            if is_media && s.value.is_empty() {
                 return None;
             }
             // A workspace sensor with no buttons (hyprctl unreachable)
@@ -2759,7 +2794,30 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
         })
     };
 
-    surface_container.into()
+    // Discreet setup entry: a right-click on the bar opens the editor.
+    // Tray and taskbar areas already handle the right button and capture
+    // it, so `MouseArea` stops here only for the zones that own nothing.
+    MouseArea::new(surface_container)
+        .on_right_press(Message::OpenSetup)
+        .into()
+}
+
+/// Sibling `piuma-setup` of the running executable: both binaries are
+/// installed in the same folder, so no PATH lookup is involved.
+fn setup_binary_path(exe: &std::path::Path) -> PathBuf {
+    exe.with_file_name("piuma-setup")
+}
+
+/// Starts the editor detached; a missing binary stays a log line (no
+/// popup on the bar).
+fn open_setup() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let path = setup_binary_path(&exe);
+    if let Err(e) = std::process::Command::new(&path).spawn() {
+        eprintln!("[piuma] cannot start {}: {e}", path.display());
+    }
 }
 
 // ── positioning helpers ─────────────────────────────────────────────
@@ -3364,8 +3422,22 @@ fn parse_config_arg() -> Option<String> {
 mod tests {
     use super::{
         config, focused_output_in, icons_theme, monitor_names_json, palette, popup_card_h,
-        popup_style, HoverGate, PopupStyle,
+        popup_style, setup_binary_path, HoverGate, PopupStyle,
     };
+
+    /// The right-click entry point starts the installer from the same
+    /// folder as the running bar, whatever that folder is.
+    #[test]
+    fn setup_binary_is_the_sibling_of_the_bar() {
+        assert_eq!(
+            setup_binary_path(std::path::Path::new("/opt/piuma/bin/piuma")),
+            std::path::PathBuf::from("/opt/piuma/bin/piuma-setup")
+        );
+        assert_eq!(
+            setup_binary_path(std::path::Path::new("target/release/piuma")),
+            std::path::PathBuf::from("target/release/piuma-setup")
+        );
+    }
 
     /// The hover dwell gate: an enter arms, its confirmation activates
     /// exactly once — a leave on that sensor or a newer enter cancels

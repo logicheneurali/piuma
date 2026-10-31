@@ -61,7 +61,7 @@ Sensor `type` values follow a naming convention by category:
 - **`temp_`** – temperature: `temp_cpu`
 - **no prefix** – not numeric: `net_state`, `uptime`, `clock`, `window`,
   `workspace`, `workspace_dots`, `command`, `env_var`, `static_text` (Text/Icon),
-  `volume_meter`, `tray`, `notifications`, `taskbar`, `layout`
+  `volume_meter`, `media`, `tray`, `notifications`, `taskbar`, `layout`
 
 The old names (`ProcCpu`, `NvidiaGpu`, `ProcMem`, `ProcDisk`, `Audio`,
 `Network`, `Uptime`, `Clock`, `Window`, `Workspace`, `Command`, `EnvVar`,
@@ -378,6 +378,7 @@ Each sensor's `source` object has a `type` plus the parameters listed
 | `command`        | shell command stdout                                         | `command`                                                               |
 | `env_var`        | environment variable value                                   | `env_var`                                                               |
 | `static_text`    | text/icon: fixed text, or just the sensor `icon` when the text is empty | `static_text` (optional with an `icon`)                        |
+| `media`          | MPRIS player: `▶  title — artist` (25 chars each); click play/pause, wheel prev/next | —                                                        |
 | `tray`           | system tray icons (StatusNotifierItem)                       | —                                                                       |
 | `notifications`  | newest active notification (`N6 newest (5)`)                 | —                                                                       |
 
@@ -617,6 +618,11 @@ For a visual configuration tool, you can use:
 1. The `piuma-setup` binary (if compiled)
 2. Or use the command-line configuration wizard
 3. Or manually edit the configuration file
+
+The running bar opens `piuma-setup` with a **right-click** anywhere it
+has no widget of its own: tray icons and taskbar slots keep their own
+right-click menus, every other zone starts the editor found next to the
+bar binary.
 
 `piuma-setup` loads `~/.config/piuma/piuma.json` on startup. The
 categories sit behind **side tabs** on the left — Panel, Notifications,

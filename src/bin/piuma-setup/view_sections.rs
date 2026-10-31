@@ -1,12 +1,15 @@
 //! Sections tab: the accordion of section cards, the per-sensor form with
 //! its source-type params and colour rules, and the two defaults cards
 //! (per-sensor and per-section).
-use iced::widget::{button, column, container, text, toggler, Column, Row};
-use iced::{Alignment, Border, Element, Length, Theme};
+use iced::widget::text::Style as TextStyle;
+use iced::widget::{button, column, container, text, toggler, tooltip, Column, Row};
+use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
 
+use crate::config;
 use crate::controls::*;
 use crate::icons;
 use crate::model::*;
+use crate::preview;
 use crate::style::*;
 use crate::model::{Section, Sensor};
 use crate::state::{Message, PiumaSetup};
@@ -120,11 +123,43 @@ pub(crate) fn section_view<'a>(
             .into(),
             state.field_err(&format!("panel.sections[{index}].layout")),
         )),
-        ("BG", color_control(section.bg_color.as_deref().unwrap_or(""), state.field_err(&format!("panel.sections[{index}].bg_color")), move |value| Message::SectionBgColorChanged(index, value))),
-        ("Text", color_control(section.text_color.as_deref().unwrap_or(""), state.field_err(&format!("panel.sections[{index}].text_color")), move |value| Message::SectionTextColorChanged(index, value))),
-        ("Border", color_control(section.border_color.as_deref().unwrap_or(""), state.field_err(&format!("panel.sections[{index}].border_color")), move |value| Message::SectionStyleChanged(index, "border_color".to_string(), value))),
-        ("Border Width", slider_control(-1i32..=10, section.border_width.unwrap_or(-1), state.field_err(&format!("panel.sections[{index}].border_width")), move |value| Message::SectionNumberChanged(index, "border_width".to_string(), value))),
-        ("Border Radius", slider_control(-1i32..=20, section.border_radius.unwrap_or(-1), state.field_err(&format!("panel.sections[{index}].border_radius")), move |value| Message::SectionNumberChanged(index, "border_radius".to_string(), value))),
+        ("BG", color_control_over(
+            section.bg_color.as_deref().unwrap_or(""),
+            state.field_err(&format!("panel.sections[{index}].bg_color")),
+            state.config.section_defaults.bg_color.as_deref(),
+            move |value| Message::SectionBgColorChanged(index, value),
+            Some(Message::SectionBgColorChanged(index, String::new())),
+        )),
+        ("Text", color_control_over(
+            section.text_color.as_deref().unwrap_or(""),
+            state.field_err(&format!("panel.sections[{index}].text_color")),
+            state.config.section_defaults.text_color.as_deref(),
+            move |value| Message::SectionTextColorChanged(index, value),
+            Some(Message::SectionTextColorChanged(index, String::new())),
+        )),
+        ("Border", color_control_over(
+            section.border_color.as_deref().unwrap_or(""),
+            state.field_err(&format!("panel.sections[{index}].border_color")),
+            state.config.section_defaults.border_color.as_deref(),
+            move |value| Message::SectionStyleChanged(index, "border_color".to_string(), value),
+            Some(Message::SectionStyleChanged(index, "border_color".to_string(), String::new())),
+        )),
+        ("Border Width", slider_control_over(
+            -1i32..=10,
+            section.border_width.unwrap_or(-1),
+            state.field_err(&format!("panel.sections[{index}].border_width")),
+            config::style_num(state.config.section_defaults.border_width).map(|n| n as i32),
+            move |value| Message::SectionNumberChanged(index, "border_width".to_string(), value),
+            Some(Message::SectionNumberChanged(index, "border_width".to_string(), -1)),
+        )),
+        ("Border Radius", slider_control_over(
+            -1i32..=20,
+            section.border_radius.unwrap_or(-1),
+            state.field_err(&format!("panel.sections[{index}].border_radius")),
+            config::style_num(state.config.section_defaults.border_radius).map(|n| n as i32),
+            move |value| Message::SectionNumberChanged(index, "border_radius".to_string(), value),
+            Some(Message::SectionNumberChanged(index, "border_radius".to_string(), -1)),
+        )),
         ("Border Type", invalid_under(
             picklist(
                 border_type_options(),
@@ -146,6 +181,7 @@ pub(crate) fn section_view<'a>(
             index,
             j,
             section.sensors.len(),
+            section,
             sensor,
             state.sensors_open.contains(&(index, j)),
             state.sensor_style_open.contains(&(index, j)),
@@ -220,6 +256,7 @@ pub(crate) fn sensor_view<'a>(
     section_index: usize,
     sensor_index: usize,
     sensor_count: usize,
+    section: &'a Section,
     sensor: &'a Sensor,
     open: bool,
     style_open: bool,
@@ -275,7 +312,9 @@ pub(crate) fn sensor_view<'a>(
         .width(Length::Fill);
 
     if !open {
-        return card(pal, column![header].width(Length::Fill)).into();
+        return card(pal, column![header].width(Length::Fill))
+            .id(sensor_card_id(section_index, sensor_index))
+            .into();
     }
 
     // Identity fields: the name input carries the id that add/duplicate
@@ -296,31 +335,91 @@ pub(crate) fn sensor_view<'a>(
         .into()),
     ]);
 
-    // Options = the canonical types, alphabetical (roadmap2 #6); an
-    // unknown/typo'd type from the file joins the list — still sorted —
-    // so the current value never falls out of the options.
-    let source_types: Vec<String> = available_source_types(&sensor.source_type)
-        .into_iter()
-        .map(|kind| source_field_display(&kind))
-        .collect();
-    let selected_type = source_field_display(&sensor.source_type);
-    let source_type_picklist = picklist(
-        source_types,
-        Some(selected_type),
-        move |value| Message::SensorSourceTypeChanged(
-            section_index,
-            sensor_index,
-            source_type_from_display(&value),
-        ),
-    ).width(Length::Shrink);
+    // The current type as its real preview card: pressing it reopens the
+    // same visual picker the "Add Sensor" flow uses.
+    let type_card = button(
+        Row::new()
+            .push(preview::kind_pill(&state.config, &sensor.source_type))
+            .push(text(source_field_display(&sensor.source_type)).size(10))
+            .spacing(8)
+            .align_y(Alignment::Center),
+    )
+    .on_press(Message::SensorTypePickerOpened(section_index, sensor_index))
+    .padding(4)
+    .style(move |t, s| btn_secondary(pal, t, s));
+    let type_card = tooltip(
+        type_card,
+        container(text("Open the visual type picker").size(10))
+            .padding(4)
+            .style(move |_t: &Theme| container::Style {
+                background: Some(Background::Color(pal.inset)),
+                border: Border {
+                    width: 1.0,
+                    color: pal.card_border,
+                    radius: 3.0.into(),
+                },
+                ..container::Style::default()
+            }),
+        tooltip::Position::Top,
+    );
+
+    // Parameter helpers: a pick list of what exists on this machine next
+    // to the free-text field (the value is the same config key).
+    let combo = |kind: &'static str,
+                 placeholder: &'static str,
+                 current: &'a str,
+                 options: Vec<String>| {
+        let selected = if current.is_empty() {
+            DEFAULT_OPTION.to_string()
+        } else {
+            current.to_string()
+        };
+        let pick = picklist(options, Some(selected), move |value: String| {
+            let value = if value == DEFAULT_OPTION { String::new() } else { value };
+            Message::SensorSourceTypeConfigChanged(
+                section_index,
+                sensor_index,
+                kind.to_string(),
+                value,
+            )
+        })
+        .width(Length::Fixed(170.0));
+        let field = input(placeholder, current, move |value| {
+            Message::SensorSourceTypeConfigChanged(
+                section_index,
+                sensor_index,
+                kind.to_string(),
+                value,
+            )
+        })
+        .width(Length::Fill);
+        Row::new()
+            .push(pick)
+            .push(field)
+            .spacing(6)
+            .width(Length::Fill)
+            .into()
+    };
 
     let source_config: Element<Message> = match canonical_type(&sensor.source_type) {
-        "net_state" | "used_netdown" | "used_netup" => input("Interface", sensor.source_config.interface.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "interface".to_string(), value))
-            .width(Length::Fill)
-            .into(),
-        "perc_volume" | "volume_meter" => input("Device", sensor.source_config.device.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "device".to_string(), value))
-            .width(Length::Fill)
-            .into(),
+        "net_state" | "used_netdown" | "used_netup" => {
+            let current = sensor.source_config.interface.as_deref().unwrap_or("");
+            combo(
+                "interface",
+                "Interface",
+                current,
+                options_with_current(network_interfaces(), current),
+            )
+        }
+        "perc_volume" | "volume_meter" => {
+            let current = sensor.source_config.device.as_deref().unwrap_or("");
+            combo(
+                "device",
+                "Device",
+                current,
+                options_with_current(audio_devices(), current),
+            )
+        }
         "workspace_dots" => slider_control(
             1i32..=50,
             sensor.source_config.count.unwrap_or(10) as i32,
@@ -332,12 +431,25 @@ pub(crate) fn sensor_view<'a>(
                 value.to_string(),
             ),
         ),
-        "clock" | "calendar" => input("Format", sensor.source_config.format.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "format".to_string(), value))
-            .width(Length::Fill)
-            .into(),
-        "command" => input("Command", sensor.source_config.command.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "command".to_string(), value))
-            .width(Length::Fill)
-            .into(),
+        "clock" | "calendar" => {
+            let current = sensor.source_config.format.as_deref().unwrap_or("");
+            let presets = if canonical_type(&sensor.source_type) == "clock" {
+                clock_formats()
+            } else {
+                calendar_formats()
+            };
+            combo("format", "Format", current, options_with_current(presets, current))
+        }
+        "command" => column![
+            input("Command", sensor.source_config.command.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "command".to_string(), value))
+                .width(Length::Fill),
+            text("The command's first output line becomes the value, e.g. `date +%H:%M`.")
+                .size(10)
+                .style(muted_text(pal)),
+        ]
+        .spacing(2)
+        .width(Length::Fill)
+        .into(),
         "env_var" => input("Env Var", sensor.source_config.env_var.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "env_var".to_string(), value))
             .width(Length::Fill)
             .into(),
@@ -355,13 +467,34 @@ pub(crate) fn sensor_view<'a>(
     ));
     let source = form_cell("Source", invalid_under(
         Row::new()
-            .push(source_type_picklist)
+            .push(type_card)
             .push(source_config)
             .spacing(8)
             .width(Length::Fill)
             .into(),
         source_error,
     ));
+
+    // The live preview: the sensor as the bar would draw it, plus a
+    // readability warning when the text disappears over its background.
+    let hint = preview::contrast_hint(&state.config, Some(section), sensor);
+    let preview_line = text(hint.clone().unwrap_or_default())
+        .size(10)
+        .style(move |_t: &Theme| TextStyle {
+            color: hint.as_ref().map(|_| Color::from_rgb(1.0, 0.6, 0.2)),
+            ..TextStyle::default()
+        });
+    let preview_block: Element<Message> = form_cell(
+        "Preview",
+        column![
+            container(preview::sensor_preview(&state.config, Some(section), sensor))
+                .padding(2),
+            preview_line,
+        ]
+        .spacing(2)
+        .into(),
+    )
+    .into();
 
     // Icon name, live preview at the row's real size and a browse
     // modal: the preview resolves exactly like the bar, so it cannot lie.
@@ -419,19 +552,20 @@ pub(crate) fn sensor_view<'a>(
         None
     };
 
-    // Collapsed header shows which overrides are actually set.
-    let summary = style_summary(
+    // Collapsed header shows the overrides as coloured chips (a value is
+    // recognisable at a glance, unlike a list of field names).
+    let summary = style_chips(
+        pal,
         &[
             ("text", &sensor.text_color), ("hover-text", &sensor.text_color_hover),
             ("bg", &sensor.bg_color), ("hover-bg", &sensor.bg_color_hover),
             ("border", &sensor.border_color), ("border-hover", &sensor.border_color_hover),
-            ("border-type", &sensor.border_type),
         ],
         &[
             ("brd", &sensor.border_width), ("rad", &sensor.border_radius), ("pad", &sensor.padding),
         ],
     );
-    let style_header = collapsible_header(
+    let style_header = collapsible_header_el(
         pal,
         "Style overrides".to_string(),
         summary,
@@ -441,7 +575,7 @@ pub(crate) fn sensor_view<'a>(
 
     // The header (title + controls) stays visible in both states, so an
     // expanded sensor can still be collapsed, reordered, copied, removed.
-    let mut root = column![header, fields, source, icon, action, draw_graph, animate]
+    let mut root = column![header, fields, source, preview_block, icon, action, draw_graph, animate]
         .spacing(6)
         .width(Length::Fill);
     if let Some(move_to) = move_to {
@@ -453,11 +587,23 @@ pub(crate) fn sensor_view<'a>(
     if style_open {
         let spath =
             |field: &str| format!("panel.sections[{section_index}].sensors[{sensor_index}].{field}");
+        // The inherited value the bar would use: shown grey in empty
+        // fields and as "auto N" on disabled sliders, so an override is
+        // visible before (and instead of) reading the defaults tab.
+        let d = &state.config.sensor_defaults;
+        let inh = |value: &Option<i32>| config::style_num(*value).map(|n| n as i32);
+        let reset = |message: Message| Some(message);
         let fields = vec![
             // Text colour with the threshold-rules editor right after it:
             // the "…" opens the popup where colours and thresholds live.
             ("Text", Row::new()
-                .push(color_control(sensor.text_color.as_deref().unwrap_or(""), state.field_err(&spath("text_color")), move |value| Message::SensorTextColorChanged(section_index, sensor_index, value)))
+                .push(color_control_over(
+                    sensor.text_color.as_deref().unwrap_or(""),
+                    state.field_err(&spath("text_color")),
+                    d.text_color.as_deref(),
+                    move |value| Message::SensorTextColorChanged(section_index, sensor_index, value),
+                    reset(Message::SensorTextColorChanged(section_index, sensor_index, String::new())),
+                ))
                 .push(
                     button(text("…").size(BODY))
                         .on_press(Message::ColorRulesPressed(section_index, sensor_index))
@@ -468,14 +614,65 @@ pub(crate) fn sensor_view<'a>(
                 .align_y(Alignment::Center)
                 .width(Length::Fill)
                 .into()),
-            ("Hover Text", color_control(sensor.text_color_hover.as_deref().unwrap_or(""), state.field_err(&spath("text_color_hover")), move |value| Message::SensorTextColorHoverChanged(section_index, sensor_index, value))),
-            ("BG", color_control(sensor.bg_color.as_deref().unwrap_or(""), state.field_err(&spath("bg_color")), move |value| Message::SensorBgColorChanged(section_index, sensor_index, value))),
-            ("Hover BG", color_control(sensor.bg_color_hover.as_deref().unwrap_or(""), state.field_err(&spath("bg_color_hover")), move |value| Message::SensorBgColorHoverChanged(section_index, sensor_index, value))),
-            ("Border", color_control(sensor.border_color.as_deref().unwrap_or(""), state.field_err(&spath("border_color")), move |value| Message::SensorBorderColorChanged(section_index, sensor_index, value))),
-            ("Border Hover", color_control(sensor.border_color_hover.as_deref().unwrap_or(""), state.field_err(&spath("border_color_hover")), move |value| Message::SensorBorderColorHoverChanged(section_index, sensor_index, value))),
-            ("Border Width", slider_control(-1i32..=10, sensor.border_width.unwrap_or(-1), state.field_err(&spath("border_width")), move |value| Message::SensorBorderWidthChanged(section_index, sensor_index, value))),
-            ("Border Radius", slider_control(-1i32..=20, sensor.border_radius.unwrap_or(-1), state.field_err(&spath("border_radius")), move |value| Message::SensorBorderRadiusChanged(section_index, sensor_index, value))),
-            ("Padding", slider_control(-1i32..=20, sensor.padding.unwrap_or(-1), state.field_err(&spath("padding")), move |value| Message::SensorPaddingChanged(section_index, sensor_index, value))),
+            ("Hover Text", color_control_over(
+                sensor.text_color_hover.as_deref().unwrap_or(""),
+                state.field_err(&spath("text_color_hover")),
+                d.text_color_hover.as_deref(),
+                move |value| Message::SensorTextColorHoverChanged(section_index, sensor_index, value),
+                reset(Message::SensorTextColorHoverChanged(section_index, sensor_index, String::new())),
+            )),
+            ("BG", color_control_over(
+                sensor.bg_color.as_deref().unwrap_or(""),
+                state.field_err(&spath("bg_color")),
+                d.bg_color.as_deref(),
+                move |value| Message::SensorBgColorChanged(section_index, sensor_index, value),
+                reset(Message::SensorBgColorChanged(section_index, sensor_index, String::new())),
+            )),
+            ("Hover BG", color_control_over(
+                sensor.bg_color_hover.as_deref().unwrap_or(""),
+                state.field_err(&spath("bg_color_hover")),
+                d.bg_color_hover.as_deref(),
+                move |value| Message::SensorBgColorHoverChanged(section_index, sensor_index, value),
+                reset(Message::SensorBgColorHoverChanged(section_index, sensor_index, String::new())),
+            )),
+            ("Border", color_control_over(
+                sensor.border_color.as_deref().unwrap_or(""),
+                state.field_err(&spath("border_color")),
+                d.border_color.as_deref(),
+                move |value| Message::SensorBorderColorChanged(section_index, sensor_index, value),
+                reset(Message::SensorBorderColorChanged(section_index, sensor_index, String::new())),
+            )),
+            ("Border Hover", color_control_over(
+                sensor.border_color_hover.as_deref().unwrap_or(""),
+                state.field_err(&spath("border_color_hover")),
+                d.border_color_hover.as_deref(),
+                move |value| Message::SensorBorderColorHoverChanged(section_index, sensor_index, value),
+                reset(Message::SensorBorderColorHoverChanged(section_index, sensor_index, String::new())),
+            )),
+            ("Border Width", slider_control_over(
+                -1i32..=10,
+                sensor.border_width.unwrap_or(-1),
+                state.field_err(&spath("border_width")),
+                inh(&d.border_width),
+                move |value| Message::SensorBorderWidthChanged(section_index, sensor_index, value),
+                reset(Message::SensorBorderWidthChanged(section_index, sensor_index, -1)),
+            )),
+            ("Border Radius", slider_control_over(
+                -1i32..=20,
+                sensor.border_radius.unwrap_or(-1),
+                state.field_err(&spath("border_radius")),
+                inh(&d.border_radius),
+                move |value| Message::SensorBorderRadiusChanged(section_index, sensor_index, value),
+                reset(Message::SensorBorderRadiusChanged(section_index, sensor_index, -1)),
+            )),
+            ("Padding", slider_control_over(
+                -1i32..=20,
+                sensor.padding.unwrap_or(-1),
+                state.field_err(&spath("padding")),
+                inh(&d.padding),
+                move |value| Message::SensorPaddingChanged(section_index, sensor_index, value),
+                reset(Message::SensorPaddingChanged(section_index, sensor_index, -1)),
+            )),
             ("Border Type", invalid_under(
                 picklist(
                     border_type_options(),
@@ -495,7 +692,9 @@ pub(crate) fn sensor_view<'a>(
         );
     }
 
-    card(pal, root).into()
+    card(pal, root)
+        .id(sensor_card_id(section_index, sensor_index))
+        .into()
 }
 
 /// The "Sensor Defaults" card: global style applied to every sensor,
@@ -504,18 +703,18 @@ pub(crate) fn sensor_defaults_view(state: &PiumaSetup) -> Element<'_, Message> {
     let pal = palette(&state.config);
     let d = &state.config.sensor_defaults;
 
-    let summary = style_summary(
+    let summary = style_chips(
+        pal,
         &[
             ("text", &d.text_color), ("hover-text", &d.text_color_hover),
             ("bg", &d.bg_color), ("hover-bg", &d.bg_color_hover),
             ("border", &d.border_color), ("border-hover", &d.border_color_hover),
-            ("border-type", &d.border_type),
         ],
         &[
             ("brd", &d.border_width), ("rad", &d.border_radius), ("pad", &d.padding),
         ],
     );
-    let header = collapsible_header(
+    let header = collapsible_header_el(
         pal,
         "Sensor Defaults".to_string(),
         summary,
@@ -533,15 +732,15 @@ pub(crate) fn sensor_defaults_view(state: &PiumaSetup) -> Element<'_, Message> {
 
         // Style numbers: -1 = disabled (the defaults apply), 0..=N = enabled.
         let fields = vec![
-            ("Text", color_control(d.text_color.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.text_color"), |value| Message::DefaultsStyleChanged("text_color".to_string(), value))),
-            ("Hover Text", color_control(d.text_color_hover.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.text_color_hover"), |value| Message::DefaultsStyleChanged("text_color_hover".to_string(), value))),
-            ("BG", color_control(d.bg_color.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.bg_color"), |value| Message::DefaultsStyleChanged("bg_color".to_string(), value))),
-            ("Hover BG", color_control(d.bg_color_hover.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.bg_color_hover"), |value| Message::DefaultsStyleChanged("bg_color_hover".to_string(), value))),
-            ("Border", color_control(d.border_color.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.border_color"), |value| Message::DefaultsStyleChanged("border_color".to_string(), value))),
-            ("Border Hover", color_control(d.border_color_hover.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.border_color_hover"), |value| Message::DefaultsStyleChanged("border_color_hover".to_string(), value))),
-            ("Border Width", slider_control(-1i32..=10, d.border_width.unwrap_or(-1), state.field_err("panel.sensor_defaults.border_width"), |value| Message::DefaultsNumberChanged("border_width".to_string(), value))),
-            ("Border Radius", slider_control(-1i32..=20, d.border_radius.unwrap_or(-1), state.field_err("panel.sensor_defaults.border_radius"), |value| Message::DefaultsNumberChanged("border_radius".to_string(), value))),
-            ("Padding", slider_control(-1i32..=20, d.padding.unwrap_or(-1), state.field_err("panel.sensor_defaults.padding"), |value| Message::DefaultsNumberChanged("padding".to_string(), value))),
+            ("Text", color_control_over(d.text_color.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.text_color"), None, |value| Message::DefaultsStyleChanged("text_color".to_string(), value), Some(Message::DefaultsStyleChanged("text_color".to_string(), String::new())))),
+            ("Hover Text", color_control_over(d.text_color_hover.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.text_color_hover"), None, |value| Message::DefaultsStyleChanged("text_color_hover".to_string(), value), Some(Message::DefaultsStyleChanged("text_color_hover".to_string(), String::new())))),
+            ("BG", color_control_over(d.bg_color.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.bg_color"), None, |value| Message::DefaultsStyleChanged("bg_color".to_string(), value), Some(Message::DefaultsStyleChanged("bg_color".to_string(), String::new())))),
+            ("Hover BG", color_control_over(d.bg_color_hover.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.bg_color_hover"), None, |value| Message::DefaultsStyleChanged("bg_color_hover".to_string(), value), Some(Message::DefaultsStyleChanged("bg_color_hover".to_string(), String::new())))),
+            ("Border", color_control_over(d.border_color.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.border_color"), None, |value| Message::DefaultsStyleChanged("border_color".to_string(), value), Some(Message::DefaultsStyleChanged("border_color".to_string(), String::new())))),
+            ("Border Hover", color_control_over(d.border_color_hover.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.border_color_hover"), None, |value| Message::DefaultsStyleChanged("border_color_hover".to_string(), value), Some(Message::DefaultsStyleChanged("border_color_hover".to_string(), String::new())))),
+            ("Border Width", slider_control_over(-1i32..=10, d.border_width.unwrap_or(-1), state.field_err("panel.sensor_defaults.border_width"), None, |value| Message::DefaultsNumberChanged("border_width".to_string(), value), Some(Message::DefaultsNumberChanged("border_width".to_string(), -1)))),
+            ("Border Radius", slider_control_over(-1i32..=20, d.border_radius.unwrap_or(-1), state.field_err("panel.sensor_defaults.border_radius"), None, |value| Message::DefaultsNumberChanged("border_radius".to_string(), value), Some(Message::DefaultsNumberChanged("border_radius".to_string(), -1)))),
+            ("Padding", slider_control_over(-1i32..=20, d.padding.unwrap_or(-1), state.field_err("panel.sensor_defaults.padding"), None, |value| Message::DefaultsNumberChanged("padding".to_string(), value), Some(Message::DefaultsNumberChanged("padding".to_string(), -1)))),
             ("Border Type", invalid_under(
                 picklist(
                     border_type_options(),
@@ -565,14 +764,15 @@ pub(crate) fn section_defaults_view(state: &PiumaSetup) -> Element<'_, Message> 
     let pal = palette(&state.config);
     let d = &state.config.section_defaults;
 
-    let summary = style_summary(
+    let summary = style_chips(
+        pal,
         &[
             ("bg", &d.bg_color), ("text", &d.text_color),
             ("border", &d.border_color), ("border-type", &d.border_type),
         ],
         &[("brd", &d.border_width), ("rad", &d.border_radius)],
     );
-    let header = collapsible_header(
+    let header = collapsible_header_el(
         pal,
         "Section Defaults".to_string(),
         summary,
@@ -590,11 +790,11 @@ pub(crate) fn section_defaults_view(state: &PiumaSetup) -> Element<'_, Message> 
 
         // Style numbers: -1 = disabled (built-in fallback), 0..=N = enabled.
         let fields = vec![
-            ("BG", color_control(d.bg_color.as_deref().unwrap_or(""), state.field_err("panel.section_defaults.bg_color"), |value| Message::SecDefaultsStyleChanged("bg_color".to_string(), value))),
-            ("Text", color_control(d.text_color.as_deref().unwrap_or(""), state.field_err("panel.section_defaults.text_color"), |value| Message::SecDefaultsStyleChanged("text_color".to_string(), value))),
-            ("Border", color_control(d.border_color.as_deref().unwrap_or(""), state.field_err("panel.section_defaults.border_color"), |value| Message::SecDefaultsStyleChanged("border_color".to_string(), value))),
-            ("Border Width", slider_control(-1i32..=10, d.border_width.unwrap_or(-1), state.field_err("panel.section_defaults.border_width"), |value| Message::SecDefaultsNumberChanged("border_width".to_string(), value))),
-            ("Border Radius", slider_control(-1i32..=20, d.border_radius.unwrap_or(-1), state.field_err("panel.section_defaults.border_radius"), |value| Message::SecDefaultsNumberChanged("border_radius".to_string(), value))),
+            ("BG", color_control_over(d.bg_color.as_deref().unwrap_or(""), state.field_err("panel.section_defaults.bg_color"), None, |value| Message::SecDefaultsStyleChanged("bg_color".to_string(), value), Some(Message::SecDefaultsStyleChanged("bg_color".to_string(), String::new())))),
+            ("Text", color_control_over(d.text_color.as_deref().unwrap_or(""), state.field_err("panel.section_defaults.text_color"), None, |value| Message::SecDefaultsStyleChanged("text_color".to_string(), value), Some(Message::SecDefaultsStyleChanged("text_color".to_string(), String::new())))),
+            ("Border", color_control_over(d.border_color.as_deref().unwrap_or(""), state.field_err("panel.section_defaults.border_color"), None, |value| Message::SecDefaultsStyleChanged("border_color".to_string(), value), Some(Message::SecDefaultsStyleChanged("border_color".to_string(), String::new())))),
+            ("Border Width", slider_control_over(-1i32..=10, d.border_width.unwrap_or(-1), state.field_err("panel.section_defaults.border_width"), None, |value| Message::SecDefaultsNumberChanged("border_width".to_string(), value), Some(Message::SecDefaultsNumberChanged("border_width".to_string(), -1)))),
+            ("Border Radius", slider_control_over(-1i32..=20, d.border_radius.unwrap_or(-1), state.field_err("panel.section_defaults.border_radius"), None, |value| Message::SecDefaultsNumberChanged("border_radius".to_string(), value), Some(Message::SecDefaultsNumberChanged("border_radius".to_string(), -1)))),
             ("Border Type", invalid_under(
                 picklist(
                     border_type_options(),

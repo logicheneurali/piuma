@@ -1,7 +1,8 @@
 //! Wallpaper tab: the freedesktop folder scan feeding the image pick list
 //! plus its card, and the autostart tab listing the launchers that start
 //! with the session.
-use iced::widget::{button, column, container, scrollable, text, toggler, Row};
+use iced::widget::image::Handle;
+use iced::widget::{button, column, container, image, scrollable, text, toggler, Row};
 use iced::{Alignment, Background, Border, Element, Length, Theme};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -94,6 +95,75 @@ fn collect_images(dir: &Path, out: &mut Vec<PathBuf>, depth: u8) {
     }
 }
 
+/// Thumbnail size in pixels: the visible grid never needs more.
+const THUMB_WIDTH: u32 = 160;
+const THUMB_HEIGHT: u32 = 90;
+
+/// `~/.cache/piuma/wallpapers`: downscaled previews live here, so a
+/// later setup run lists every wallpaper without decoding it again.
+fn thumbnail_cache_dir() -> Option<PathBuf> {
+    dirs::cache_dir().map(|dir| dir.join("piuma/wallpapers"))
+}
+
+/// Cache file of one wallpaper: the key carries path, size and mtime, so
+/// an edited image is decoded again instead of showing a stale preview.
+fn cache_file(dir: &Path, path: &Path) -> PathBuf {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    if let Ok(meta) = path.metadata() {
+        meta.len().hash(&mut hasher);
+        if let Ok(modified) = meta.modified() {
+            if let Ok(elapsed) = modified.duration_since(std::time::UNIX_EPOCH) {
+                elapsed.as_nanos().hash(&mut hasher);
+            }
+        }
+    }
+    dir.join(format!("{:016x}.png", hasher.finish()))
+}
+
+/// One downscaled preview: from the disk cache when fresh, decoded and
+/// then cached otherwise. `None` for an unreadable image — the grid still
+/// lists it by name, so the list stays complete even then.
+pub(crate) fn thumbnail(path: &Path) -> Option<(String, Handle)> {
+    thumbnail_cached(thumbnail_cache_dir().as_deref(), path)
+}
+
+/// Cache-aware worker of [`thumbnail`] (`None` cache = decode only, used
+/// by the tests so they never touch the user's cache).
+pub(crate) fn thumbnail_cached(cache: Option<&Path>, path: &Path) -> Option<(String, Handle)> {
+    let label = path.to_string_lossy().into_owned();
+    let cached = cache.map(|dir| cache_file(dir, path));
+    if let Some(file) = &cached {
+        if let Ok(bytes) = fs::read(file) {
+            if !bytes.is_empty() {
+                return Some((label, Handle::from_bytes(bytes)));
+            }
+        }
+    }
+    let decoded = ::image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .decode()
+        .ok()?;
+    let thumb = decoded.thumbnail(THUMB_WIDTH, THUMB_HEIGHT).to_rgba8();
+    let mut bytes = Vec::new();
+    ::image::DynamicImage::ImageRgba8(thumb)
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            ::image::ImageFormat::Png,
+        )
+        .ok()?;
+    if let (Some(dir), Some(file)) = (cache, cached) {
+        let _ = fs::create_dir_all(dir);
+        let _ = fs::write(file, &bytes);
+    }
+    Some((label, Handle::from_bytes(bytes)))
+}
+
 /// Applies one wallpaper edit and collapses a block the user backed out
 /// of (disabled + empty path) back to `None`, so a save never injects
 /// the key unless the section was really used.
@@ -103,6 +173,58 @@ pub(crate) fn wallpaper_set(config: &mut PiumaConfig, edit: impl FnOnce(&mut Wal
     if !w.enabled && w.path.is_empty() && w.color.is_empty() {
         config.wallpaper = None;
     }
+}
+
+/// One thumbnail cell of the wallpaper grid: the decoded cover preview
+/// over the file name; pressing it selects that wallpaper.
+fn wallpaper_cell(
+    pal: Palette,
+    path: &str,
+    handle: Option<&Handle>,
+    selected: bool,
+) -> Element<'static, Message> {
+    let label = Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string());
+    // Every file is a cell from the first frame; a thumbnail that is
+    // still decoding shows a neutral placeholder, never a missing row.
+    let preview: Element<'static, Message> = match handle {
+        Some(handle) => image(handle.clone())
+            .width(Length::Fill)
+            .height(Length::Fixed(84.0))
+            .content_fit(iced::ContentFit::Cover)
+            .into(),
+        None => container(text("◌").size(20))
+            .width(Length::Fill)
+            .height(Length::Fixed(84.0))
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center)
+            .style(inset_style(pal))
+            .into(),
+    };
+    button(
+        column![
+            preview,
+            text(label)
+                .size(10)
+                .width(Length::Fill)
+                .wrapping(iced::widget::text::Wrapping::Word),
+        ]
+        .spacing(4)
+        .width(Length::Fill),
+    )
+    .on_press(Message::WallpaperPathChanged(path.to_string()))
+    .padding(4)
+    .width(Length::Fill)
+    .style(move |t, s| {
+        if selected {
+            btn_primary(pal, t, s)
+        } else {
+            btn_secondary(pal, t, s)
+        }
+    })
+    .into()
 }
 
 /// The `panel.wallpaper` editor (roadmap2 #1): the bar draws the
@@ -207,33 +329,6 @@ pub(crate) fn wallpaper_settings(state: &PiumaSetup) -> Element<'_, Message> {
                 }),
         );
     } else {
-        // The scanned images as a pickable list; the current path is marked.
-        let mut files = column![].spacing(2).width(Length::Fill);
-        for file in &state.wallpaper_files {
-            let label = file.to_string_lossy().to_string();
-            let selected = current == label;
-            files = files.push(
-                button(
-                    text(if selected {
-                        format!("• {label}")
-                    } else {
-                        label.clone()
-                    })
-                    .size(BODY),
-                )
-                .on_press(Message::WallpaperPathChanged(label))
-                .style(move |t, s| {
-                    if selected {
-                        btn_primary(pal, t, s)
-                    } else {
-                        btn_secondary(pal, t, s)
-                    }
-                })
-                .width(Length::Fill),
-            );
-        }
-        let list = scrollable(files).height(Length::Fixed(240.0)).width(Length::Fill);
-
         // Runtime-only tones (see the save): the file keeps just this
         // switch, so turning it off restores the user's own colours.
         content = content.push(
@@ -241,25 +336,52 @@ pub(crate) fn wallpaper_settings(state: &PiumaSetup) -> Element<'_, Message> {
                 .label("Bar colours from the wallpaper")
                 .on_toggle(Message::PaletteFromWallpaper),
         );
-        content = content.push(
-            Row::new()
-                .push(list)
-                .push(
-                    container(preview)
-                        .width(Length::Fixed(360.0))
-                        .height(Length::Fixed(240.0))
-                        .style(move |_t: &Theme| container::Style {
-                            border: Border {
-                                color: pal.card_border,
-                                width: 1.0,
-                                radius: 4.0.into(),
-                            },
-                            ..container::Style::default()
-                        }),
-                )
-                .spacing(10)
-                .width(Length::Fill),
-        );
+        // Every wallpaper is a cell from the first frame (name + cover
+        // thumbnail when decoded): three columns, three rows visible and
+        // the scrollbar for the rest. Thumbnails arrive in batches from
+        // the background decode, so the grid fills in without hiding any
+        // file and without blocking the window.
+        let mut grid = column![].spacing(6).width(Length::Fill);
+        let mut row = Row::new().spacing(6).width(Length::Fill);
+        for (i, file) in state.wallpaper_files.iter().enumerate() {
+            let path = file.to_string_lossy();
+            let handle = state.wallpaper_thumbs.get(path.as_ref());
+            row = row.push(wallpaper_cell(
+                pal,
+                &path,
+                handle,
+                current == path.as_ref(),
+            ));
+            if (i + 1) % 3 == 0 {
+                grid = grid.push(row);
+                row = Row::new().spacing(6).width(Length::Fill);
+            }
+        }
+        if state.wallpaper_files.len() % 3 != 0 {
+            grid = grid.push(row);
+        }
+        let grid: Element<Message> = if state.wallpaper_files.is_empty() {
+            text("No wallpapers found in the freedesktop folders.")
+                .size(BODY)
+                .into()
+        } else {
+            scrollable(grid)
+                .height(Length::Fixed(3.0 * 116.0))
+                .width(Length::Fill)
+                .into()
+        };
+        content = content.push(grid);
+        if state.wallpaper_thumbs.len() < state.wallpaper_files.len() {
+            content = content.push(
+                text(format!(
+                    "Previews: {} of {} decoded (the list above is complete and selectable).",
+                    state.wallpaper_thumbs.len(),
+                    state.wallpaper_files.len()
+                ))
+                .size(10)
+                .style(muted_text(pal)),
+            );
+        }
         content = content.push(
             input(
                 "/path/to/image.png",

@@ -1,8 +1,8 @@
 //! Form controls (inputs, sliders, pick lists, collapsible cards) and the
 //! icon-theme discovery feeding the sensor icon pickers.
 use iced::widget::text::Style as TextStyle;
-use iced::widget::{button, column, container, text, PickList, Row, Slider, TextInput, Button, Column};
-use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
+use iced::widget::{button, canvas, column, container, text, PickList, Row, Slider, TextInput, Button, Column};
+use iced::{Alignment, Background, Border, Color, Element, Length, Point, Size, Theme};
 use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -13,11 +13,11 @@ use std::path::{Path, PathBuf};
 use crate::config;
 use crate::icons;
 use crate::style::{
-    btn_secondary, error_text_style, hex_color, inset_style, muted_text, palette, Palette, BODY,
-    ERROR_RED, LABEL_WIDTH,
+    btn_primary, btn_secondary, error_text_style, hex_color, inset_style, muted_text, palette,
+    Palette, BODY, ERROR_RED, LABEL_WIDTH,
 };
 use crate::model::{PiumaConfig, Section, Sensor};
-use crate::state::{Message, PiumaSetup};
+use crate::state::Message;
 
 
 /// One label + control pair filling half of a form row.
@@ -160,26 +160,6 @@ pub(crate) fn icon_theme_options(current: Option<&str>) -> Vec<String> {
     }
     themes.insert(0, SYSTEM_ICON_THEME.to_string());
     themes
-}
-
-/// The panel's icon-theme picker; the empty config maps to the sentinel
-/// and back (empty = the bar's system fallback).
-pub(crate) fn icon_theme_picker(state: &PiumaSetup) -> Element<'_, Message> {
-    let current = state.config.icon_theme.clone().unwrap_or_default();
-    let selected = if current.is_empty() {
-        SYSTEM_ICON_THEME.to_string()
-    } else {
-        current
-    };
-    picklist(
-        icon_theme_options(state.config.icon_theme.as_deref()),
-        Some(selected),
-        |value: String| {
-            Message::IconThemeChanged(if value == SYSTEM_ICON_THEME { String::new() } else { value })
-        },
-    )
-    .width(Length::Fill)
-    .into()
 }
 
 /// The XDG data dirs of the lookup: the user's data home, then
@@ -413,6 +393,18 @@ pub(crate) fn sensor_name_id(section: usize, sensor: usize) -> iced::widget::Id 
     iced::widget::Id::from(format!("sensor-name-{section}-{sensor}"))
 }
 
+/// Widget id of one sensor's card: the mini-bar scrolls to it.
+pub(crate) fn sensor_card_id(section: usize, sensor: usize) -> iced::widget::Id {
+    iced::widget::Id::from(format!("sensor-card-{section}-{sensor}"))
+}
+
+/// Scroll offset (content px) that puts a sensor card near the top of the
+/// content scrollable: `sensor_y` and `scroll_top` are window coords, so
+/// the current translation turns them back into content coords.
+pub(crate) fn scroll_target(scroll_top: f32, translation: f32, sensor_y: f32) -> f32 {
+    (sensor_y - scroll_top + translation - 8.0).max(0.0)
+}
+
 /// Two-column form grid: fields alternate left/right, one per cell, so long
 /// forms stay compact and their labels line up in fixed columns.
 pub(crate) fn form_grid<'a>(fields: Vec<(&'a str, Element<'a, Message>)>) -> Element<'a, Message> {
@@ -449,29 +441,94 @@ pub(crate) fn invalid_under<'a>(field: Element<'a, Message>, reason: Option<&'a 
         .into()
 }
 
-/// Colour input filling its cell: text field plus a live 16x16 preview
-/// swatch. An invalid value (`config::validate_config`'s reason) turns
-/// the field and swatch red and shows the reason under them.
+/// Checkerboard + colour swatch drawn on a canvas, so transparency reads
+/// as transparency (the grey squares) instead of a wrong solid colour.
+struct Swatch {
+    color: Color,
+    invalid: bool,
+}
+
+impl canvas::Program<Message> for Swatch {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &iced::Renderer,
+        _theme: &Theme,
+        bounds: iced::Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let cell = 6.0;
+        let light = Color::from_rgb(0.58, 0.58, 0.58);
+        let dark = Color::from_rgb(0.34, 0.34, 0.34);
+        let cols = (bounds.width / cell).ceil() as i32;
+        let rows = (bounds.height / cell).ceil() as i32;
+        for row in 0..rows {
+            for col in 0..cols {
+                let color = if (row + col) % 2 == 0 { light } else { dark };
+                frame.fill_rectangle(
+                    Point::new(col as f32 * cell, row as f32 * cell),
+                    Size::new(cell, cell),
+                    color,
+                );
+            }
+        }
+        // The colour over the board: alpha now blends visibly.
+        frame.fill_rectangle(Point::ORIGIN, bounds.size(), self.color);
+        if self.invalid {
+            frame.stroke_rectangle(
+                Point::ORIGIN,
+                bounds.size(),
+                canvas::Stroke::default()
+                    .with_color(ERROR_RED)
+                    .with_width(2.0),
+            );
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
+/// A 28×28 alpha-aware swatch: the visible colour of a field, with a red
+/// ring when the typed value does not parse.
+pub(crate) fn swatch(color: Color, invalid: bool) -> Element<'static, Message> {
+    canvas(Swatch { color, invalid })
+        .width(28)
+        .height(28)
+        .into()
+}
+
+/// Colour input filling its cell, without override controls (see
+/// [`color_control_over`]).
 pub(crate) fn color_control<'a>(
     value: &'a str,
     invalid: Option<&'a str>,
     on_input: impl Fn(String) -> Message + 'a,
 ) -> Element<'a, Message> {
+    color_control_over(value, invalid, None, on_input, None)
+}
+
+/// Colour input filling its cell: text field, a large alpha-aware swatch
+/// and the colour's alpha percentage. `inherited` fills the placeholder
+/// when the field is empty (the value the bar would use) and `on_reset`
+/// adds the × that drops the override, so the inheritance is visible
+/// instead of being an invisible "empty means default".
+pub(crate) fn color_control_over<'a>(
+    value: &'a str,
+    invalid: Option<&'a str>,
+    inherited: Option<&'a str>,
+    on_input: impl Fn(String) -> Message + 'a,
+    on_reset: Option<Message>,
+) -> Element<'a, Message> {
     let error_color = ERROR_RED;
-    let swatch_color = hex_color(value);
-    let swatch = container(text(""))
-        .width(16)
-        .height(16)
-        .style(move |_t: &Theme| container::Style {
-            background: Some(Background::Color(swatch_color)),
-            border: Border {
-                width: 1.0,
-                color: if invalid.is_some() { error_color } else { Color::from_rgb(0.45, 0.45, 0.45) },
-                radius: 3.0.into(),
-            },
-            ..container::Style::default()
-        });
-    let field = input("#rrggbb", value, on_input)
+    let parsed = config::parse_color(value).ok();
+    let swatch_color = parsed.unwrap_or_else(|| hex_color(value));
+    let alpha = parsed.map(|c| c.a).unwrap_or(1.0);
+    let placeholder = inherited
+        .filter(|i| !i.trim().is_empty())
+        .unwrap_or("#rrggbb");
+    let field = input(placeholder, value, on_input)
         .width(Length::Fill)
         .style(move |t: &Theme, status| {
             let mut style = iced::widget::text_input::default(t, status);
@@ -480,11 +537,27 @@ pub(crate) fn color_control<'a>(
             }
             style
         });
+    let mut row = Row::new()
+        .push(field)
+        .push(swatch(swatch_color, invalid.is_some()));
+    if alpha < 0.999 {
+        row = row.push(text(format!("{:.0}%", alpha * 100.0)).size(10));
+    }
+    if value.trim().is_empty() {
+        row = row.push(text("inherited").size(10).style(|_t: &Theme| TextStyle {
+            color: Some(Color::from_rgb(0.55, 0.55, 0.58)),
+            ..TextStyle::default()
+        }));
+    } else if let Some(reset) = on_reset {
+        row = row.push(
+            button(text("×").size(BODY))
+                .on_press(reset)
+                .padding(4)
+                .style(button::secondary),
+        );
+    }
     invalid_under(
-        Row::new()
-            .push(field)
-            .push(swatch)
-            .spacing(6)
+        row.spacing(6)
             .align_y(Alignment::Center)
             .width(Length::Fill)
             .into(),
@@ -492,27 +565,55 @@ pub(crate) fn color_control<'a>(
     )
 }
 
-/// Slider control filling its cell: slider takes the space, value on the
-/// right (style numbers: -1 = disabled, 0..=N = enabled). An invalid
-/// loaded value turns the number red with the reason under the row.
+/// Slider control without override controls (see [`slider_control_over`]).
 pub(crate) fn slider_control<'a>(
     range: RangeInclusive<i32>,
     value: i32,
     invalid: Option<&'a str>,
     on_input: impl Fn(i32) -> Message + 'a,
 ) -> Element<'a, Message> {
-    let value_text = text(value.to_string())
+    slider_control_over(range, value, invalid, None, on_input, None)
+}
+
+/// Slider control filling its cell: slider takes the space, value on the
+/// right (style numbers: -1 = disabled, 0..=N = enabled). With `inherited`
+/// a disabled field shows the value it would fall back to; `on_reset`
+/// adds the × that removes an enabled override.
+pub(crate) fn slider_control_over<'a>(
+    range: RangeInclusive<i32>,
+    value: i32,
+    invalid: Option<&'a str>,
+    inherited: Option<i32>,
+    on_input: impl Fn(i32) -> Message + 'a,
+    on_reset: Option<Message>,
+) -> Element<'a, Message> {
+    let label = if value < 0 {
+        inherited.map_or_else(|| "-1".to_string(), |n| format!("auto {n}"))
+    } else {
+        value.to_string()
+    };
+    let value_text = text(label)
         .size(BODY)
-        .width(40)
+        .width(56)
         .style(move |_t: &Theme| TextStyle {
             color: invalid.map(|_| ERROR_RED),
             ..TextStyle::default()
         });
+    let mut row = Row::new()
+        .push(Slider::new(range, value, on_input).width(Length::Fill))
+        .push(value_text);
+    if value >= 0 {
+        if let Some(reset) = on_reset {
+            row = row.push(
+                button(text("×").size(BODY))
+                    .on_press(reset)
+                    .padding(4)
+                    .style(button::secondary),
+            );
+        }
+    }
     invalid_under(
-        Row::new()
-            .push(Slider::new(range, value, on_input).width(Length::Fill))
-            .push(value_text)
-            .spacing(8)
+        row.spacing(8)
             .align_y(Alignment::Center)
             .width(Length::Fill)
             .into(),
@@ -529,11 +630,23 @@ pub(crate) fn collapsible_header<'a>(
     expanded: bool,
     on_toggle: Message,
 ) -> Element<'a, Message> {
+    let summary = text(summary).size(10).style(muted_text(pal)).into();
+    collapsible_header_el(pal, title, summary, expanded, on_toggle)
+}
+
+/// Same header with a widget summary (the coloured override chips).
+pub(crate) fn collapsible_header_el<'a>(
+    pal: Palette,
+    title: String,
+    summary: Element<'a, Message>,
+    expanded: bool,
+    on_toggle: Message,
+) -> Element<'a, Message> {
     button(
         Row::new()
             .push(text(if expanded { "▾" } else { "▸" }).size(BODY).width(14))
             .push(text(title).size(13))
-            .push(text(summary).size(10).style(muted_text(pal)))
+            .push(summary)
             .spacing(8)
             .align_y(Alignment::Center)
             .width(Length::Fill),
@@ -552,22 +665,305 @@ pub(crate) fn sorted_rules(mut rules: Vec<config::ColorRule>) -> Vec<config::Col
     rules
 }
 
-/// One-line summary of the active style overrides for collapsed headers:
-/// colors by field name, numbers with value, "none" when all is inherited.
-pub(crate) fn style_summary(colors: &[(&str, &Option<String>)], numbers: &[(&str, &Option<i32>)]) -> String {
-    let mut parts = Vec::new();
-    let set_colors: Vec<&str> = colors.iter().filter(|(_, v)| v.is_some()).map(|(k, _)| *k).collect();
-    if !set_colors.is_empty() {
-        parts.push(set_colors.join(" "));
-    }
-    let set_numbers: Vec<String> = numbers.iter().filter_map(|(k, v)| v.map(|n| format!("{} {}", k, n))).collect();
-    if !set_numbers.is_empty() {
-        parts.push(set_numbers.join(" "));
-    }
-    if parts.is_empty() { "none".to_string() } else { parts.join(" · ") }
-}
-
 /// The border-type picklists' options, from the bar's own list.
 pub(crate) fn border_type_options() -> Vec<String> {
     config::BORDER_TYPES.iter().map(|b| b.to_string()).collect()
+}
+
+// --- override chips and visual placement grids -------------------------
+
+/// Coloured chips of the active overrides (a swatch per colour, the
+/// number per style value) instead of a string summary; "inherited"
+/// when nothing is overridden.
+pub(crate) fn style_chips<'a>(
+    pal: Palette,
+    colors: &[(&'a str, &Option<String>)],
+    numbers: &[(&'a str, &Option<i32>)],
+) -> Element<'a, Message> {
+    let mut row = Row::new().spacing(6).align_y(Alignment::Center);
+    let mut any = false;
+    for (name, value) in colors {
+        let Some(value) = value else { continue };
+        any = true;
+        let color = hex_color(value);
+        row = row.push(
+            Row::new()
+                .push(
+                    container(text(""))
+                        .width(10)
+                        .height(10)
+                        .style(move |_t: &Theme| container::Style {
+                            background: Some(Background::Color(color)),
+                            border: Border {
+                                width: 1.0,
+                                color: Color::from_rgb(0.4, 0.4, 0.4),
+                                radius: 2.0.into(),
+                            },
+                            ..container::Style::default()
+                        }),
+                )
+                .push(text((*name).to_string()).size(9).style(muted_text(pal)))
+                .spacing(3)
+                .align_y(Alignment::Center),
+        );
+    }
+    for (name, value) in numbers {
+        let Some(value) = value else { continue };
+        any = true;
+        row = row.push(
+            text(format!("{name} {value}"))
+                .size(9)
+                .style(muted_text(pal)),
+        );
+    }
+    if any {
+        row.into()
+    } else {
+        text("inherited").size(10).style(muted_text(pal)).into()
+    }
+}
+
+/// The nine cells of the anchor grid: the eight placements around the
+/// screen edge, with `None` for the centre (the screen itself).
+pub(crate) fn anchor_cells() -> [(&'static str, Option<&'static str>); 9] {
+    [
+        ("↖", Some("top-left")),
+        ("↑", Some("top")),
+        ("↗", Some("top-right")),
+        ("←", Some("left")),
+        ("▦", None),
+        ("→", Some("right")),
+        ("↙", Some("bottom-left")),
+        ("↓", Some("bottom")),
+        ("↘", Some("bottom-right")),
+    ]
+}
+
+/// 3×3 screen grid placing the bar on an edge or corner by clicking.
+pub(crate) fn anchor_grid<'a>(pal: Palette, current: &str) -> Element<'a, Message> {
+    let mut grid = Column::new().spacing(4);
+    for chunk in anchor_cells().chunks(3) {
+        let mut row = Row::new().spacing(4);
+        for (glyph, value) in chunk {
+            let cell: Element<Message> = match value {
+                Some(value) => {
+                    let selected = current == *value;
+                    button(text(*glyph).size(16))
+                        .on_press(Message::AnchorChanged((*value).to_string()))
+                        .width(Length::Fixed(34.0))
+                        .height(Length::Fixed(28.0))
+                        .style(move |t, s| {
+                            if selected {
+                                btn_primary(pal, t, s)
+                            } else {
+                                btn_secondary(pal, t, s)
+                            }
+                        })
+                        .into()
+                }
+                None => container(text("▦").size(16))
+                    .width(Length::Fixed(34.0))
+                    .height(Length::Fixed(28.0))
+                    .align_x(Alignment::Center)
+                    .align_y(Alignment::Center)
+                    .into(),
+            };
+            row = row.push(cell);
+        }
+        grid = grid.push(row);
+    }
+    grid.width(Length::Shrink).into()
+}
+
+/// Alignment along the bar: four visual choices instead of a picklist.
+pub(crate) fn align_row<'a>(pal: Palette, current: &str) -> Element<'a, Message> {
+    let mut row = Row::new().spacing(4);
+    for (glyph, value) in [("◧", "left"), ("▣", "center"), ("◨", "right"), ("↔", "fill")] {
+        let selected = current == value;
+        row = row.push(
+            button(text(glyph).size(16))
+                .on_press(Message::AlignChanged(value.to_string()))
+                .width(Length::Fixed(34.0))
+                .height(Length::Fixed(28.0))
+                .style(move |t, s| {
+                    if selected {
+                        btn_primary(pal, t, s)
+                    } else {
+                        btn_secondary(pal, t, s)
+                    }
+                }),
+        );
+    }
+    row.width(Length::Shrink).into()
+}
+
+/// The six popup positions on a two-row screen grid (row = top/bottom,
+/// column = left/center/right).
+pub(crate) fn notif_cells() -> [(&'static str, &'static str); 6] {
+    [
+        ("↖", "top-left"),
+        ("↑", "top-center"),
+        ("↗", "top-right"),
+        ("↙", "bottom-left"),
+        ("↓", "bottom-center"),
+        ("↘", "bottom-right"),
+    ]
+}
+
+/// Popup-placement grid with the extra `auto` cell.
+pub(crate) fn notif_position_grid<'a>(pal: Palette, current: &str) -> Element<'a, Message> {
+    let mut grid = Column::new().spacing(4);
+    for chunk in notif_cells().chunks(3) {
+        let mut row = Row::new().spacing(4);
+        for (glyph, value) in chunk {
+            let selected = current == *value;
+            row = row.push(
+                button(text(*glyph).size(16))
+                    .on_press(Message::NotifPositionChanged((*value).to_string()))
+                    .width(Length::Fixed(34.0))
+                    .height(Length::Fixed(28.0))
+                    .style(move |t, s| {
+                        if selected {
+                            btn_primary(pal, t, s)
+                        } else {
+                            btn_secondary(pal, t, s)
+                        }
+                    }),
+            );
+        }
+        grid = grid.push(row);
+    }
+    let auto = current == "auto";
+    Row::new()
+        .push(grid)
+        .push(
+            button(text("Auto").size(BODY))
+                .on_press(Message::NotifPositionChanged("auto".to_string()))
+                .padding(6)
+                .style(move |t, s| {
+                    if auto {
+                        btn_primary(pal, t, s)
+                    } else {
+                        btn_secondary(pal, t, s)
+                    }
+                }),
+        )
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .into()
+}
+
+// --- sensor parameter pick lists ---------------------------------------
+
+/// Sentinel of a parameter pick list: clearing the key (the bar's own
+/// default applies).
+pub(crate) const DEFAULT_OPTION: &str = "(system default)";
+
+/// Options of a parameter pick list: the sentinel, the current custom
+/// value when the detected list does not carry it, then the detected
+/// values — the selection never falls out of the list.
+pub(crate) fn options_with_current(mut options: Vec<String>, current: &str) -> Vec<String> {
+    if !current.is_empty() && !options.iter().any(|o| o == current) {
+        options.insert(0, current.to_string());
+    }
+    options.insert(0, DEFAULT_OPTION.to_string());
+    options
+}
+
+/// PulseAudio/PipeWire sink names from `pactl` (read once; an absent
+/// `pactl` simply leaves the list empty and the text field usable).
+pub(crate) fn audio_devices() -> Vec<String> {
+    static CACHE: OnceLock<Vec<String>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            std::process::Command::new("pactl")
+                .args(["list", "short", "sinks"])
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .map(|out| {
+                    String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .filter_map(|line| line.split_whitespace().nth(1).map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .clone()
+}
+
+/// Network interfaces from `/sys/class/net`, sorted.
+pub(crate) fn network_interfaces() -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir("/sys/class/net")
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|e| e.file_name().to_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// Clock format presets for the pick list next to the free-text field.
+pub(crate) fn clock_formats() -> Vec<String> {
+    ["%H:%M", "%H:%M:%S", "%a %d %b %H:%M", "%d/%m/%Y %H:%M", "%I:%M %p"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Calendar format presets.
+pub(crate) fn calendar_formats() -> Vec<String> {
+    ["%B %Y", "%A %d %B", "%d %b", "%d/%m/%Y"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+// --- icon theme grid ----------------------------------------------------
+
+/// Icon names previewed in each icon-theme cell.
+pub(crate) const THEME_SAMPLES: [&str; 3] = ["folder", "utilities-terminal", "text-x-generic"];
+
+/// One icon-theme cell: three sample icons resolved under that theme plus
+/// the theme name; pressing it selects the theme (`None` = system).
+pub(crate) fn theme_cell(
+    pal: Palette,
+    theme: Option<&str>,
+    label: &str,
+    selected: bool,
+) -> Element<'static, Message> {
+    let size = 20;
+    let mut row = Row::new().spacing(4).align_y(Alignment::Center);
+    for name in THEME_SAMPLES {
+        let icon: Element<'static, Message> = theme
+            .and_then(|theme| icons::resolve(theme, name, size))
+            .map(|path| icons::widget(&path, f32::from(size)))
+            .unwrap_or_else(|| text("·").size(BODY).into());
+        row = row.push(icon);
+    }
+    button(
+        column![
+            row,
+            text(label.to_string())
+                .size(10)
+                .width(Length::Fill)
+                .wrapping(iced::widget::text::Wrapping::Word),
+        ]
+        .spacing(4)
+        .width(Length::Fill),
+    )
+    .on_press(Message::IconThemeChanged(theme.unwrap_or("").to_string()))
+    .padding(6)
+    .width(Length::Fill)
+    .style(move |t, s| {
+        if selected {
+            btn_primary(pal, t, s)
+        } else {
+            btn_secondary(pal, t, s)
+        }
+    })
+    .into()
 }

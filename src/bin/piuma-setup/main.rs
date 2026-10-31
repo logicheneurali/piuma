@@ -34,6 +34,7 @@ mod controls;
 mod hyprland_wallpaper;
 mod model;
 mod modal;
+mod preview;
 mod state;
 mod style;
 mod update;
@@ -86,6 +87,21 @@ fn app() -> iced::Result {
         .default_font(gui_font())
         .window_size((920, 680))
         .resizable(true)
+        // Ctrl+S saves like the footer button; every other key is ignored.
+        .subscription(|_state: &PiumaSetup| {
+            iced::keyboard::listen().filter_map(|event| match event {
+                iced::keyboard::Event::KeyPressed { key, modifiers, .. }
+                    if modifiers.command()
+                        && matches!(
+                            key.as_ref(),
+                            iced::keyboard::Key::Character("s" | "S")
+                        ) =>
+                {
+                    Some(Message::SaveConfig)
+                }
+                _ => None,
+            })
+        })
         .run()
 }
 

@@ -116,6 +116,8 @@ fn fixture() -> PiumaSetup {
         modal: None,
         validation: Vec::new(),
         wallpaper_files: Vec::new(),
+        wallpaper_thumbs: std::collections::HashMap::new(),
+        wallpaper_thumbs_requested: false,
         hypr_wallpaper_disabled: None,
         autostart_apps: Vec::new(),
         layouts: Vec::new(),
@@ -264,6 +266,8 @@ fn text_icon_is_displayed_as_text_slash_icon() {
     assert_eq!(source_label("workspace_dots"), "Workspace dots");
     assert_eq!(source_field_display("workspace_dots"), "workspace_dots");
     assert_eq!(source_type_from_display("workspace_dots"), "workspace_dots");
+    assert_eq!(source_label("media"), "Media");
+    assert_eq!(source_field_display("media"), "media");
     assert_eq!(source_type_display("perc_cpu"), "perc_cpu");
 }
 
@@ -1326,4 +1330,178 @@ fn invalid_under_keeps_the_widget_shape() {
         build(None).as_widget().tag(),
         build(Some("bad")).as_widget().tag(),
     );
+}
+
+/// The visual picker's samples: every parameterless/typical type has a
+/// representative reading and a short name to draw.
+#[test]
+fn source_previews_carry_a_sample_reading() {
+    for kind in SOURCE_TYPES {
+        let value = crate::preview::sample_value(kind);
+        let name = crate::preview::sample_name(kind);
+        // Purely graphical sensors legitimately draw no text; every
+        // textual one must not fall back to the generic "value".
+        if !matches!(
+            canonical_type(kind),
+            "workspace_dots" | "tray" | "taskbar" | "volume_meter" | "static_text"
+        ) {
+            assert_ne!(value, "value", "no sample for {kind}");
+        }
+        if !matches!(canonical_type(kind), "static_text") {
+            assert!(!name.is_empty(), "no preview name for {kind}");
+        }
+    }
+    assert_eq!(crate::preview::sample_value("perc_cpu"), "12%");
+    assert_eq!(crate::preview::sample_value("media"), "▶  Song — Artist");
+}
+
+/// WCAG contrast: identical colours are 1:1, black on white ~21:1, and
+/// the preview warns only below its 3:1 threshold.
+#[test]
+fn contrast_ratio_is_the_wcag_value() {
+    let black = iced::Color::BLACK;
+    let white = iced::Color::WHITE;
+    let ratio = crate::preview::contrast_ratio(black, white);
+    assert!((ratio - 21.0).abs() < 0.1, "got {ratio}");
+    assert!((crate::preview::contrast_ratio(black, black) - 1.0).abs() < f32::EPSILON);
+
+    let mut s = test_state();
+    s.config.sections[0].sensors[0].text_color = Some("#000000".to_string());
+    s.config.sections[0].sensors[0].bg_color = Some("#000000".to_string());
+    assert!(
+        crate::preview::contrast_hint(
+            &s.config,
+            Some(&s.config.sections[0]),
+            &s.config.sections[0].sensors[0],
+        )
+        .is_some()
+    );
+}
+
+/// Placement grids offer exactly the values the bar accepts.
+#[test]
+fn placement_grids_cover_the_config_values() {
+    let anchors: Vec<&str> = anchor_cells()
+        .iter()
+        .filter_map(|(_, value)| *value)
+        .collect();
+    assert_eq!(anchors.len(), 8);
+    for anchor in &anchors {
+        let cfg: crate::config::Config = serde_json::from_str(&format!(
+            r#"{{"panel":{{"anchor":"{anchor}","sections":[]}}}}"#
+        ))
+        .expect("anchor must parse");
+        assert!(
+            crate::config::validate_config(&cfg).is_empty(),
+            "{anchor} rejected by the bar"
+        );
+    }
+    let notif: Vec<&str> = notif_cells().iter().map(|(_, value)| *value).collect();
+    assert_eq!(notif.len(), 6);
+    assert!(notif.contains(&"top-center") && notif.contains(&"bottom-right"));
+}
+
+/// Parameter pick lists keep the sentinel first and never lose a custom
+/// value the detection did not find.
+#[test]
+fn parameter_options_keep_the_current_value() {
+    let options = options_with_current(vec!["wlan0".to_string()], "eth0");
+    assert_eq!(options[0], DEFAULT_OPTION);
+    assert_eq!(options[1], "eth0");
+    assert!(options.contains(&"wlan0".to_string()));
+    let again = options_with_current(vec!["wlan0".to_string()], "wlan0");
+    assert_eq!(again.iter().filter(|o| *o == "wlan0").count(), 1);
+    assert!(!clock_formats().is_empty() && !calendar_formats().is_empty());
+}
+
+/// The source field's card reopens the picker and retyping applies on
+/// the click, without touching the sensor's name or style.
+#[test]
+fn sensor_type_picker_retypes_an_existing_sensor() {
+    let mut s = test_state();
+    s.config.sections[0].sensors[0].name = Some("Keep".to_string());
+    s.config.sections[0].sensors[0].text_color = Some("#abcdef".to_string());
+    let _ = update(&mut s, Message::SensorTypePickerOpened(0, 0));
+    assert!(matches!(
+        s.modal,
+        Some(Modal::AddSensor { sensor_index: Some(0), .. })
+    ));
+    let _ = update(&mut s, Message::ModalTypeChanged("media".to_string()));
+    let sensor = &s.config.sections[0].sensors[0];
+    assert_eq!(sensor.source_type, "media");
+    assert_eq!(sensor.name.as_deref(), Some("Keep"));
+    assert_eq!(sensor.text_color.as_deref(), Some("#abcdef"));
+    assert!(s.modal.is_none());
+}
+
+/// A mini-bar click opens the Sections tab on that sensor's card.
+#[test]
+fn mini_bar_click_opens_the_sensor_card() {
+    let mut s = test_state();
+    s.active_tab = Tab::Panel;
+    s.sections_collapsed.insert(1);
+    let _ = update(&mut s, Message::SensorSelected(1, 0));
+    assert_eq!(s.active_tab, Tab::Sections);
+    assert!(s.sensors_open.contains(&(1, 0)));
+    assert!(!s.sections_collapsed.contains(&1));
+    // Out-of-range clicks are ignored.
+    let _ = update(&mut s, Message::SensorSelected(9, 9));
+    assert_eq!(s.active_tab, Tab::Sections);
+}
+
+/// The × on an override clears the key (the bar reads its inherited
+/// value again) instead of storing the "disabled" marker.
+#[test]
+fn override_reset_clears_the_key() {
+    let mut s = test_state();
+    let sensor = &mut s.config.sections[0].sensors[0];
+    sensor.border_width = Some(4);
+    sensor.padding = Some(6);
+    sensor.text_color = Some("#ffffff".to_string());
+    let _ = update(&mut s, Message::SensorBorderWidthChanged(0, 0, -1));
+    let _ = update(&mut s, Message::SensorPaddingChanged(0, 0, -1));
+    let _ = update(
+        &mut s,
+        Message::SensorTextColorChanged(0, 0, String::new()),
+    );
+    let sensor = &s.config.sections[0].sensors[0];
+    assert!(sensor.border_width.is_none());
+    assert!(sensor.padding.is_none());
+    assert!(sensor.text_color.is_none());
+}
+
+/// Wallpaper previews decode small, skip unreadable files and land in
+/// the cache so the next run lists them without decoding again.
+#[test]
+fn wallpaper_thumbnails_skip_broken_files_and_cache() {
+    let dir = std::env::temp_dir().join(format!("piuma-thumb-test-{}", std::process::id()));
+    let cache = dir.join("cache");
+    fs::create_dir_all(&dir).expect("fixture dir");
+    let good = dir.join("good.png");
+    image::RgbaImage::from_pixel(8, 8, image::Rgba([200, 10, 10, 255]))
+        .save(&good)
+        .expect("png fixture");
+    let bad = dir.join("broken.png");
+    fs::write(&bad, b"not an image").expect("broken fixture");
+    let thumb = crate::view_wallpaper::thumbnail_cached(Some(&cache), &good)
+        .expect("the valid image must decode");
+    assert_eq!(thumb.0, good.to_string_lossy());
+    assert!(
+        crate::view_wallpaper::thumbnail_cached(Some(&cache), &bad).is_none(),
+        "a broken image is skipped, the grid still lists it by name"
+    );
+    assert!(
+        fs::read_dir(&cache).map_or(0, |entries| entries.count()) >= 1,
+        "the decoded preview must be cached on disk"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// The mini-bar jump converts the card's window position back to a
+/// content offset (translation included) with a small top margin.
+#[test]
+fn scroll_target_converts_window_coordinates() {
+    assert_eq!(scroll_target(100.0, 0.0, 500.0), 392.0);
+    assert_eq!(scroll_target(100.0, 200.0, 500.0), 592.0);
+    assert_eq!(scroll_target(100.0, 0.0, 50.0), 0.0);
 }

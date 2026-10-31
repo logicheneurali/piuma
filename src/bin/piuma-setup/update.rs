@@ -1,11 +1,13 @@
 //! The message loop: one handler per `Message`, mutating the setup state
 //! or spawning iced tasks (focus, icon browsing, reloads).
+use iced::advanced::widget::Operation;
 use iced::widget::operation;
+use iced::widget::scrollable::AbsoluteOffset;
 use iced::Task;
 
 use crate::autostart;
 use crate::config;
-use crate::controls::{content_scroll_id, sensor_name_id, sorted_rules};
+use crate::controls::{content_scroll_id, scroll_target, sensor_card_id, sensor_name_id, sorted_rules};
 use crate::modal::{Modal, RuleDraft};
 use crate::view_wallpaper::wallpaper_set;
 use crate::model::*;
@@ -142,6 +144,18 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                 }
             }
             state.active_tab = tab;
+            // Wallpaper thumbnails decode once, off the UI thread; the
+            // grid then only clones handles.
+            if tab == Tab::Wallpaper
+                && !state.wallpaper_thumbs_requested
+                && !state.wallpaper_files.is_empty()
+            {
+                state.wallpaper_thumbs_requested = true;
+                return wallpaper_thumb_task(state.wallpaper_files.clone());
+            }
+        }
+        Message::WallpaperThumbsLoaded(batch) => {
+            state.wallpaper_thumbs.extend(batch);
         }
         Message::ThicknessChanged(value) => state.config.thickness = value,
         Message::DefaultsStyleChanged(field, value) => {
@@ -160,11 +174,14 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
         }
         Message::DefaultsNumberChanged(field, value) => {
             let d = &mut state.config.sensor_defaults;
+            // -1 is the "inherit" marker: dropping the key says the same
+            // to the bar and keeps the saved file minimal.
+            let v = (value >= 0).then_some(value);
             match field.as_str() {
-                "border_width" => d.border_width = Some(value),
-                "border_width_hover" => d.border_width_hover = Some(value),
-                "border_radius" => d.border_radius = Some(value),
-                "padding" => d.padding = Some(value),
+                "border_width" => d.border_width = v,
+                "border_width_hover" => d.border_width_hover = v,
+                "border_radius" => d.border_radius = v,
+                "padding" => d.padding = v,
                 _ => {}
             }
         }
@@ -184,8 +201,8 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
             if index < state.config.sections.len() {
                 let s = &mut state.config.sections[index];
                 match field.as_str() {
-                    "border_width" => s.border_width = Some(value),
-                    "border_radius" => s.border_radius = Some(value),
+                    "border_width" => s.border_width = (value >= 0).then_some(value),
+                    "border_radius" => s.border_radius = (value >= 0).then_some(value),
                     _ => {}
                 }
             }
@@ -204,8 +221,8 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
         Message::SecDefaultsNumberChanged(field, value) => {
             let d = &mut state.config.section_defaults;
             match field.as_str() {
-                "border_width" => d.border_width = Some(value),
-                "border_radius" => d.border_radius = Some(value),
+                "border_width" => d.border_width = (value >= 0).then_some(value),
+                "border_radius" => d.border_radius = (value >= 0).then_some(value),
                 _ => {}
             }
         }
@@ -308,10 +325,57 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
             if section_index < state.config.sections.len() {
                 state.modal = Some(Modal::AddSensor {
                     section_index,
+                    sensor_index: None,
                     kind: "perc_cpu".to_string(),
                     name: String::new(),
                 });
             }
+        }
+        Message::SensorTypePickerOpened(section_index, sensor_index) => {
+            if let Some(sensor) = state
+                .config
+                .sections
+                .get(section_index)
+                .and_then(|section| section.sensors.get(sensor_index))
+            {
+                state.modal = Some(Modal::AddSensor {
+                    section_index,
+                    sensor_index: Some(sensor_index),
+                    kind: sensor.source_type.clone(),
+                    name: String::new(),
+                });
+            }
+        }
+        Message::SensorSelected(section_index, sensor_index) => {
+            // The mini-bar jumps to the card: its tab, its section and its
+            // body open, so the sensor being previewed is the one on screen.
+            if state
+                .config
+                .sections
+                .get(section_index)
+                .is_some_and(|section| sensor_index < section.sensors.len())
+            {
+                state.active_tab = Tab::Sections;
+                state.sections_collapsed.remove(&section_index);
+                state.sensors_open.insert((section_index, sensor_index));
+                // The card is now in the next layout: ask it (and the
+                // scrollable's translation) for the offset to jump to.
+                return iced_runtime::task::widget(FindSensorScroll {
+                    target: sensor_card_id(section_index, sensor_index),
+                    scroll: content_scroll_id(),
+                    scroll_position: None,
+                    sensor_position: None,
+                });
+            }
+        }
+        Message::SensorScrollTarget(offset) => {
+            return operation::scroll_to(
+                content_scroll_id(),
+                AbsoluteOffset {
+                    x: Some(0.0),
+                    y: Some(offset),
+                },
+            );
         }
         Message::RemoveSensorPressed(section_index, sensor_index) => {
             if section_index < state.config.sections.len()
@@ -518,7 +582,7 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
             if section_index < state.config.sections.len() {
                 let section = &mut state.config.sections[section_index];
                 if sensor_index < section.sensors.len() {
-                    section.sensors[sensor_index].border_width = Some(value);
+                    section.sensors[sensor_index].border_width = (value >= 0).then_some(value);
                 }
             }
         }
@@ -526,7 +590,7 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
             if section_index < state.config.sections.len() {
                 let section = &mut state.config.sections[section_index];
                 if sensor_index < section.sensors.len() {
-                    section.sensors[sensor_index].border_width_hover = Some(value);
+                    section.sensors[sensor_index].border_width_hover = (value >= 0).then_some(value);
                 }
             }
         }
@@ -534,7 +598,7 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
             if section_index < state.config.sections.len() {
                 let section = &mut state.config.sections[section_index];
                 if sensor_index < section.sensors.len() {
-                    section.sensors[sensor_index].border_radius = Some(value);
+                    section.sensors[sensor_index].border_radius = (value >= 0).then_some(value);
                 }
             }
         }
@@ -550,7 +614,7 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
             if section_index < state.config.sections.len() {
                 let section = &mut state.config.sections[section_index];
                 if sensor_index < section.sensors.len() {
-                    section.sensors[sensor_index].padding = Some(value);
+                    section.sensors[sensor_index].padding = (value >= 0).then_some(value);
                 }
             }
         }
@@ -663,8 +727,25 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
             _ => {}
         },
         Message::ModalTypeChanged(kind) => {
-            if let Some(Modal::AddSensor { kind: slot, .. }) = state.modal.as_mut() {
-                *slot = kind;
+            let mut retype = None;
+            if let Some(Modal::AddSensor { section_index, sensor_index, kind: slot, .. }) =
+                state.modal.as_mut()
+            {
+                *slot = kind.clone();
+                retype = Some((*section_index, *sensor_index));
+            }
+            // Retyping an existing sensor applies on the click; the
+            // add flow keeps the grid open for the optional name.
+            if let Some((section_index, Some(sensor_index))) = retype {
+                if let Some(sensor) = state
+                    .config
+                    .sections
+                    .get_mut(section_index)
+                    .and_then(|section| section.sensors.get_mut(sensor_index))
+                {
+                    sensor.source_type = kind;
+                }
+                state.modal = None;
             }
         }
         Message::LayoutDeletePressed(key) => {
@@ -727,8 +808,17 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                 state.sensors_open.insert((new_index, 0));
                 return operation::snap_to_end(content_scroll_id());
             }
-            Some(Modal::AddSensor { section_index, kind, name }) => {
-                if section_index < state.config.sections.len() {
+            Some(Modal::AddSensor { section_index, sensor_index, kind, name }) => {
+                if let Some(sensor_index) = sensor_index {
+                    if let Some(sensor) = state
+                        .config
+                        .sections
+                        .get_mut(section_index)
+                        .and_then(|section| section.sensors.get_mut(sensor_index))
+                    {
+                        sensor.source_type = kind;
+                    }
+                } else if section_index < state.config.sections.len() {
                     let mut sensor = Sensor::default();
                     sensor.source_type = kind;
                     let trimmed = name.trim();
@@ -880,4 +970,83 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
         Message::Status(_) => {}
     }
     Task::none()
+}
+
+/// Widget operation behind the mini-bar jump: reads the content
+/// scrollable's position/translation and the target sensor card's window
+/// position, then reports the content offset to scroll to. Two frames at
+/// most: the card must be laid out (the click that expands it changes the
+/// tree right before the operation runs).
+struct FindSensorScroll {
+    target: iced::widget::Id,
+    scroll: iced::widget::Id,
+    /// (top y, translation y) of the content scrollable.
+    scroll_position: Option<(f32, f32)>,
+    /// Window y of the target card.
+    sensor_position: Option<f32>,
+}
+
+impl Operation<Message> for FindSensorScroll {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<Message>)) {
+        operate(self);
+    }
+
+    fn scrollable(
+        &mut self,
+        id: Option<&iced::widget::Id>,
+        bounds: iced::Rectangle,
+        _content_bounds: iced::Rectangle,
+        translation: iced::Vector,
+        _state: &mut dyn iced::advanced::widget::operation::Scrollable,
+    ) {
+        if id == Some(&self.scroll) {
+            self.scroll_position = Some((bounds.y, translation.y));
+        }
+    }
+
+    fn container(&mut self, id: Option<&iced::widget::Id>, bounds: iced::Rectangle) {
+        if id == Some(&self.target) {
+            self.sensor_position = Some(bounds.y);
+        }
+    }
+
+    fn finish(&self) -> iced::advanced::widget::operation::Outcome<Message> {
+        match (self.scroll_position, self.sensor_position) {
+            (Some((top, translation)), Some(sensor_y)) => {
+                iced::advanced::widget::operation::Outcome::Some(Message::SensorScrollTarget(
+                    scroll_target(top, translation, sensor_y),
+                ))
+            }
+            _ => iced::advanced::widget::operation::Outcome::None,
+        }
+    }
+}
+
+/// Decode wallpaper previews in the background: the grid is complete from
+/// the first frame and every decoded preview replaces its placeholder as
+/// it lands. Two workers halve the wait of a cold cache while capping the
+/// peak memory at two full decodes; the disk cache makes later runs
+/// instant.
+fn wallpaper_thumb_task(files: Vec<std::path::PathBuf>) -> Task<Message> {
+    const WORKERS: usize = 2;
+    let (sender, receiver) = iced::futures::channel::mpsc::channel(64);
+    let per_worker = files.len().div_ceil(WORKERS).max(1);
+    for part in files.chunks(per_worker) {
+        let sender = sender.clone();
+        let part = part.to_vec();
+        std::thread::spawn(move || {
+            for path in part {
+                let Some(thumb) = crate::view_wallpaper::thumbnail(&path) else {
+                    continue;
+                };
+                let sent = sender
+                    .clone()
+                    .try_send(Message::WallpaperThumbsLoaded(vec![thumb]));
+                if sent.is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    Task::stream(receiver)
 }

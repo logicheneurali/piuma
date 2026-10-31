@@ -188,6 +188,9 @@ pub fn run(source: &SensorSource, hypr: Option<&crate::hypr::Snapshot>) -> Read 
         SensorSource::Workspace {} => plain(sensors::workspace_name(hypr)),
         // The dots carry no text: the view draws them from the snapshot.
         SensorSource::WorkspaceDots { .. } => plain(String::new()),
+        // MPRIS state is read by the same background pass; no player
+        // yields an empty value and the view hides the sensor.
+        SensorSource::Media {} => plain(crate::mpris::display_value()),
         // Tray items carry no text: the icons come from the shared tray
         // state (see `tray.rs`), rendered by the view directly.
         SensorSource::Tray {} => plain(String::new()),

@@ -1155,7 +1155,7 @@ pub(crate) const SOURCE_TYPES: &[&str] = &[
     // no numeric category
     "net_state", "uptime", "clock", "calendar", "window", "workspace",
     "workspace_dots", "command", "env_var", "static_text", "volume_meter",
-    "tray", "notifications", "taskbar", "layout",
+    "media", "tray", "notifications", "taskbar", "layout",
 ];
 
 /// The sensor-type combo's options (roadmap2 #6): every canonical type
@@ -1203,6 +1203,7 @@ pub(crate) fn source_label(canonical: &str) -> &'static str {
         "window" => "Focused window",
         "workspace" => "Workspace",
         "workspace_dots" => "Workspace dots",
+        "media" => "Media",
         "tray" => "System tray",
         "notifications" => "Desktop notifications",
         "taskbar" => "Window taskbar",
@@ -1237,6 +1238,7 @@ pub(crate) fn source_field_display(canonical: &str) -> String {
 }
 
 /// Reverse of the display labels used by both picklists.
+#[cfg(test)]
 pub(crate) fn source_type_from_display(label: &str) -> String {
     match label {
         "Text/Icon" => "static_text".to_string(),

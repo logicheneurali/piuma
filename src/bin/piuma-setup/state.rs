@@ -1,7 +1,7 @@
 //! The application state: the message enum, the tab enum, the config-file
 //! helpers and `PiumaSetup` holding the edited config plus load, save and
 //! live validation.
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
@@ -103,6 +103,14 @@ pub enum Message {
     SectionTextColorChanged(usize, String),
     /// Opens the modal creating a sensor (type + name) in the section.
     AddSensorPressed(usize),
+    /// Opens the source-type picker for a sensor that already exists.
+    SensorTypePickerOpened(usize, usize),
+    /// Mini-bar / preview click: jumps to that sensor's card.
+    SensorSelected(usize, usize),
+    /// Offset (content px) the card jump resolved to: scrolls there.
+    SensorScrollTarget(f32),
+    /// Wallpaper thumbnails decoded off the UI thread: (path, image).
+    WallpaperThumbsLoaded(Vec<(String, iced::widget::image::Handle)>),
     /// Opens the removal confirmation for one sensor.
     RemoveSensorPressed(usize, usize),
     /// Clones a sensor right after itself (same section).
@@ -256,6 +264,21 @@ impl Tab {
         Tab::Layouts,
     ];
 
+    /// Glyph leading the sidebar label (a visual cue, not an icon theme
+    /// lookup: the rail must render before any theme is configured).
+    pub(crate) fn icon(self) -> &'static str {
+        match self {
+            Tab::Panel => "▤",
+            Tab::Notifications => "◍",
+            Tab::SensorDefaults => "◈",
+            Tab::SectionDefaults => "◫",
+            Tab::Sections => "≡",
+            Tab::Wallpaper => "▩",
+            Tab::AutostartApps => "▷",
+            Tab::Layouts => "⊞",
+        }
+    }
+
     /// Label shown on the sidebar button.
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -300,6 +323,12 @@ pub struct PiumaSetup {
     /// Images found under the freedesktop wallpaper folders (roadmap2 #1),
     /// scanned once at startup for the Wallpaper tab's list.
     pub(crate) wallpaper_files: Vec<PathBuf>,
+    /// Downscaled thumbnails of those images, keyed by path: decoded (and
+    /// disk-cached) off the UI thread the first time the tab opens, then
+    /// appended in batches while the grid is already complete.
+    pub(crate) wallpaper_thumbs: HashMap<String, iced::widget::image::Handle>,
+    /// One decode run per setup session, even if some files fail.
+    pub(crate) wallpaper_thumbs_requested: bool,
     /// Whether Hyprland's own default wallpaper/logo is currently off in
     /// its config; `None` when no Hyprland config was found.
     pub(crate) hypr_wallpaper_disabled: Option<bool>,
@@ -332,6 +361,8 @@ impl PiumaSetup {
             modal: None,
             validation: Vec::new(),
             wallpaper_files: scan_wallpaper_dirs(&wallpaper_dirs()),
+            wallpaper_thumbs: HashMap::new(),
+            wallpaper_thumbs_requested: false,
             hypr_wallpaper_disabled: crate::hyprland_wallpaper::read_disabled(),
             autostart_apps: Vec::new(),
             layouts: Vec::new(),

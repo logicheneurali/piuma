@@ -1,11 +1,14 @@
 //! The root view: tab rail, active tab's card, footer with status and
 //! actions, and the modal layer stacked on top.
 use iced::widget::text::Style as TextStyle;
-use iced::widget::{button, column, container, scrollable, stack, text, Column, Row};
+use iced::widget::{
+    button, column, container, scrollable, stack, text, tooltip, Column, Row,
+};
 use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Theme};
 
 use crate::controls::content_scroll_id;
 use crate::modal::modal_overlay;
+use crate::preview;
 use crate::style::*;
 use crate::view_layouts::*;
 use crate::view_panel::*;
@@ -61,9 +64,11 @@ pub(crate) fn view(state: &PiumaSetup) -> Element<'_, Message> {
     root.into()
 }
 
-/// The one card belonging to the active tab (roadmap N4).
+/// The one card belonging to the active tab (roadmap N4). The Panel and
+/// Sections tabs lead with the live mini-bar: the whole panel order (and
+/// every sample reading) stays in sight while a card is edited.
 fn active_card(state: &PiumaSetup) -> Element<'_, Message> {
-    match state.active_tab {
+    let tab_card: Element<'_, Message> = match state.active_tab {
         Tab::Panel => panel_settings(state),
         Tab::Notifications => notifications_settings(state),
         Tab::SensorDefaults => sensor_defaults_view(state),
@@ -72,7 +77,35 @@ fn active_card(state: &PiumaSetup) -> Element<'_, Message> {
         Tab::Wallpaper => wallpaper_settings(state),
         Tab::AutostartApps => autostart_apps_settings(state),
         Tab::Layouts => layouts_settings(state),
+    };
+    match state.active_tab {
+        Tab::Panel | Tab::Sections => {
+            let pal = palette(&state.config);
+            column![
+                card(pal, mini_bar_card(state)),
+                tab_card,
+            ]
+            .spacing(15)
+            .width(Length::Fill)
+            .into()
+        }
+        _ => tab_card,
     }
+}
+
+/// The mini-bar card: caption plus the clickable strip (defined in
+/// `preview`, which knows the sample values).
+fn mini_bar_card(state: &PiumaSetup) -> Element<'_, Message> {
+    let pal = palette(&state.config);
+    column![
+        text("Preview — click a sensor to open its card")
+            .size(10)
+            .style(muted_text(pal)),
+        preview::mini_bar(state),
+    ]
+    .spacing(6)
+    .width(Length::Fill)
+    .into()
 }
 
 /// Left tab rail (roadmap N4): one button per category, the active one
@@ -88,8 +121,22 @@ fn sidebar(state: &PiumaSetup) -> Element<'_, Message> {
     });
     for tab in Tab::ALL {
         let selected = state.active_tab == tab;
+        let errors = tab_error_count(state, tab);
+        let mut label = Row::new()
+            .push(text(tab.icon()).size(BODY).width(18))
+            .push(text(tab.label()).size(BODY).width(Length::Fill))
+            .spacing(4)
+            .align_y(Alignment::Center)
+            .width(Length::Fill);
+        if errors > 0 {
+            label = label.push(
+                text(format!("⚠{errors}"))
+                    .size(10)
+                    .style(error_text_style),
+            );
+        }
         rail = rail.push(
-            button(text(tab.label()).size(BODY))
+            button(label)
                 .on_press(Message::TabSelected(tab))
                 .padding(8)
                 .width(Length::Fill)
@@ -117,13 +164,68 @@ fn sidebar(state: &PiumaSetup) -> Element<'_, Message> {
         .into()
 }
 
+/// Invalid values belonging to a category, for the rail badge: the same
+/// `panel.sections[i].…` paths the red forms show.
+fn tab_error_count(state: &PiumaSetup, tab: Tab) -> usize {
+    let under = |prefix: &str| {
+        state
+            .validation
+            .iter()
+            .filter(|error| error.path.starts_with(prefix))
+            .count()
+    };
+    match tab {
+        Tab::Sections => (0..state.config.sections.len())
+            .map(|index| state.section_err_count(index))
+            .sum(),
+        Tab::Notifications => under("panel.notifications."),
+        Tab::SensorDefaults => under("panel.sensor_defaults."),
+        Tab::SectionDefaults => under("panel.section_defaults."),
+        Tab::Wallpaper => under("panel.wallpaper."),
+        // Panel keeps the remaining panel-level fields.
+        Tab::Panel => state
+            .validation
+            .iter()
+            .filter(|error| {
+                !error.path.starts_with("panel.sections[")
+                    && !error.path.starts_with("panel.notifications.")
+                    && !error.path.starts_with("panel.sensor_defaults.")
+                    && !error.path.starts_with("panel.section_defaults.")
+                    && !error.path.starts_with("panel.wallpaper.")
+            })
+            .count(),
+        Tab::AutostartApps | Tab::Layouts => 0,
+    }
+}
+
 /// Fixed bottom bar: edited file + status on the left, actions on the right.
 fn footer(state: &PiumaSetup) -> Element<'_, Message> {
     let pal = palette(&state.config);
+    // Same dirty check the Save button uses: serialized now vs the last
+    // load/save, so the indicator cannot disagree with the action.
+    let dirty = state
+        .serialize()
+        .map(|current| current != state.snapshot)
+        .unwrap_or(true);
+    let save_state = text(if dirty {
+        "● Unsaved changes"
+    } else {
+        "✓ Saved"
+    })
+    .size(10)
+    .style(move |_t: &Theme| TextStyle {
+        color: Some(if dirty {
+            Color::from_rgb(1.0, 0.65, 0.25)
+        } else {
+            Color::from_rgb(0.45, 0.75, 0.5)
+        }),
+        ..TextStyle::default()
+    });
     let info = column![
         text(format!("editing: {}", state.current_file))
             .size(BODY)
             .style(muted_text(pal)),
+        save_state,
         status_bar(state),
     ]
     .spacing(2);
@@ -179,6 +281,21 @@ fn action_buttons(pal: Palette) -> Element<'static, Message> {
         .on_press(Message::SaveConfig)
         .padding(10)
         .style(move |t, s| btn_primary(pal, t, s));
+    let save_btn = tooltip(
+        save_btn,
+        container(text("Ctrl+S").size(10)).padding(4).style(move |_t: &Theme| {
+            container::Style {
+                background: Some(Background::Color(pal.inset)),
+                border: Border {
+                    width: 1.0,
+                    color: pal.card_border,
+                    radius: 3.0.into(),
+                },
+                ..container::Style::default()
+            }
+        }),
+        tooltip::Position::Top,
+    );
     let save_as_btn = button(text("Save As…").size(BODY))
         .on_press(Message::SaveAs)
         .padding(10)

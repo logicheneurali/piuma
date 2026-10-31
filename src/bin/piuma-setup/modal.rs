@@ -7,6 +7,7 @@ use crate::config;
 use crate::icons;
 use crate::controls::*;
 use crate::model::*;
+use crate::preview;
 use crate::style::*;
 use crate::state::{Message, PiumaSetup};
 
@@ -31,8 +32,15 @@ pub enum Modal {
     LoadFile { selected: String, files: Vec<String> },
     /// New-section form: optional name (an empty one keeps the default).
     AddSection { name: String },
-    /// New-sensor form: target section, picked type, optional name.
-    AddSensor { section_index: usize, kind: String, name: String },
+    /// Sensor type picker, also the new-sensor form: `sensor_index` is
+    /// `None` when adding (the modal then keeps `name`) and `Some` when
+    /// retyping an existing sensor (picking applies immediately).
+    AddSensor {
+        section_index: usize,
+        sensor_index: Option<usize>,
+        kind: String,
+        name: String,
+    },
     /// Removal confirmation for one section (and its sensors).
     ConfirmRemoveSection(usize),
     /// Removal confirmation for one sensor.
@@ -153,32 +161,51 @@ pub(crate) fn modal_card(state: &PiumaSetup) -> Element<'_, Message> {
             error,
             dialog_actions(pal, Message::ModalConfirm, "Add"),
         ),
-        Some(Modal::AddSensor { kind, name, .. }) => {
-            // Type combo of the canonical list, plus an optional name; the
-            // muted line under the fields explains what the type does.
-            let types: Vec<String> = available_source_types(kind)
-                .into_iter()
-                .map(|value| source_field_display(&value))
-                .collect();
-            let body = column![
-                form_cell("Type", picklist(
-                    types,
-                    Some(source_field_display(kind)),
-                    |value: String| Message::ModalTypeChanged(source_type_from_display(&value)),
-                ).width(Length::Fill).into()),
-                form_cell("Name", input("optional", name, Message::ModalTextChanged)
-                    .width(Length::Fill)
-                    .into()),
-                text(source_label(canonical_type(kind))).size(10).style(muted_text(pal)),
+        Some(Modal::AddSensor { sensor_index, kind, name, .. }) => {
+            // A grid of type cards, each with the type's real preview and
+            // name: the choice is visual, not a list of JSON keys. When
+            // retyping an existing sensor the pick applies on click; when
+            // adding, the optional name and the Add button stay below.
+            let mut body = column![
+                source_picker_grid(pal, &state.config, kind),
+                Row::new()
+                    .push(
+                        text(source_label(canonical_type(kind)))
+                            .size(12)
+                            .style(fg_text(pal)),
+                    )
+                    .push(
+                        text(source_field_display(kind))
+                            .size(10)
+                            .style(muted_text(pal)),
+                    )
+                    .spacing(8)
+                    .align_y(Alignment::Center),
             ]
             .spacing(8)
             .width(Length::Fill);
-            dialog_frame(
+            if sensor_index.is_none() {
+                body = body.push(
+                    form_cell(
+                        "Name",
+                        input("optional", name, Message::ModalTextChanged)
+                            .width(Length::Fill)
+                            .into(),
+                    ),
+                );
+            }
+            let (title, action) = if sensor_index.is_some() {
+                ("Sensor type", "Close")
+            } else {
+                ("New sensor", "Add")
+            };
+            dialog_frame_w(
                 pal,
-                "New sensor",
+                600.0,
+                title,
                 body.into(),
                 error,
-                dialog_actions(pal, Message::ModalConfirm, "Add"),
+                dialog_actions(pal, Message::ModalConfirm, action),
             )
         }
         Some(Modal::ConfirmRemoveSection(index)) => {
@@ -410,6 +437,57 @@ pub(crate) fn modal_card(state: &PiumaSetup) -> Element<'_, Message> {
     }
 }
 
+/// Grid of source-type cards: each cell is the sensor's real preview over
+/// the type name, three rows visible and the rest behind the scrollbar.
+fn source_picker_grid<'a>(
+    pal: Palette,
+    cfg: &'a PiumaConfig,
+    selected: &str,
+) -> Element<'a, Message> {
+    const COLUMNS: usize = 2;
+    let mut grid = column![].spacing(6).width(Length::Fill);
+    let mut row = Row::new().spacing(6);
+    let mut cells = 0;
+    for kind in available_source_types(selected) {
+        let is_selected = kind == selected;
+        row = row.push(
+            button(
+                column![
+                    preview::kind_pill(cfg, &kind),
+                    text(source_label(canonical_type(&kind)))
+                        .size(10)
+                        .width(Length::Fill)
+                        .wrapping(iced::widget::text::Wrapping::Word),
+                ]
+                .spacing(4)
+                .width(Length::Fill),
+            )
+            .on_press(Message::ModalTypeChanged(kind))
+            .padding(6)
+            .width(Length::Fill)
+            .style(move |t, s| {
+                if is_selected {
+                    btn_primary(pal, t, s)
+                } else {
+                    btn_secondary(pal, t, s)
+                }
+            }),
+        );
+        cells += 1;
+        if cells % COLUMNS == 0 {
+            grid = grid.push(row);
+            row = Row::new().spacing(6);
+        }
+    }
+    if cells % COLUMNS != 0 {
+        grid = grid.push(row);
+    }
+    scrollable(grid)
+        .height(Length::Fixed(200.0))
+        .width(Length::Fill)
+        .into()
+}
+
 /// Modal card frame: title, body, optional error hint, action buttons.
 pub(crate) fn dialog_frame<'a>(
     pal: Palette,
@@ -418,9 +496,21 @@ pub(crate) fn dialog_frame<'a>(
     error: Option<String>,
     actions: Row<'a, Message>,
 ) -> Element<'a, Message> {
+    dialog_frame_w(pal, 420.0, title, body, error, actions)
+}
+
+/// Same frame at an explicit width (the type picker needs the room).
+fn dialog_frame_w<'a>(
+    pal: Palette,
+    width: f32,
+    title: &'a str,
+    body: Element<'a, Message>,
+    error: Option<String>,
+    actions: Row<'a, Message>,
+) -> Element<'a, Message> {
     let mut col = column![text(title).size(16)]
         .spacing(10)
-        .width(Length::Fixed(420.0));
+        .width(Length::Fixed(width));
     col = col.push(body);
     if let Some(e) = error {
         col = col.push(text(e).size(10)
