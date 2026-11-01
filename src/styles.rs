@@ -2,7 +2,6 @@
 //! background, and applying a resolved matrix to the panel.
 
 use crate::config;
-use crate::geometry::section_touch;
 use crate::palette;
 use crate::{
     icons, icons_theme, panel_thickness, Panel, SectionStyle, SensorStyle, DEFAULT_BG_COLOR,
@@ -74,7 +73,7 @@ pub(crate) fn resolve_styles(
         .sections
         .iter()
         .enumerate()
-        .map(|(section_idx, section_cfg)| {
+        .map(|(_section_idx, section_cfg)| {
             let section_default_txt = default_text(&cfg.panel, pal);
 
             // Text colour chain: section > wallpaper palette (when
@@ -372,17 +371,6 @@ pub(crate) fn resolve_styles(
                 border_width: bw_val as u16,
                 border_radius: br_val as u16,
                 border_type: bt_str.to_string(),
-                // Roadmap M3: the edge rule is a layout hint coming from
-                // the defaults only (a section's own border group
-                // doesn't carry it).
-                touch: if sdefaults
-                    .and_then(|sd| sd.respect_screen_edges)
-                    .unwrap_or(false)
-                {
-                    section_touch(cfg, section_idx, cfg.panel.sections.len())
-                } else {
-                    [false; 4]
-                },
                 sensors,
             }
         })

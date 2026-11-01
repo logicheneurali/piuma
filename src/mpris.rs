@@ -160,7 +160,7 @@ fn format_player(player: &Player) -> String {
         format!("{title} — {artist}")
     };
     let glyph = match player.status.as_str() {
-        "Playing" => "▶",
+        "Playing" => "⏵",
         "Paused" => "⏸",
         _ => "⏹",
     };
@@ -221,7 +221,7 @@ mod tests {
     fn format_carries_status_title_and_artist() {
         assert_eq!(
             format_player(&player("a", "Playing", "Song", "Artist")),
-            "▶  Song — Artist"
+            "⏵  Song — Artist"
         );
         assert_eq!(
             format_player(&player("a", "Paused", "Song", "")),
@@ -236,12 +236,12 @@ mod tests {
         let artist = "ABCDEFGHIJKLMNOPQRSTUVWXYZ5678";
         let text = format_player(&player("a", "Playing", title, artist));
         let expected = format!(
-            "▶  {}... — {}...",
+            "⏵  {}... — {}...",
             &title[..25],
             &artist[..25]
         );
         assert_eq!(text, expected);
-        assert!(text.starts_with("▶  "));
+        assert!(text.starts_with("⏵  "));
     }
 
     #[test]

@@ -70,6 +70,11 @@ pub fn style_num(value: Option<i32>) -> Option<u32> {
     value.and_then(|v| u32::try_from(v).ok())
 }
 
+/// Whether the panel asks for the light variant (absent = dark).
+pub fn light_mode(panel: &PanelConfig) -> bool {
+    panel.theme_mode.as_deref() == Some("light")
+}
+
 /// Default panel thickness on the cross axis, in pixels: what
 /// `panel.thickness` falls back to when the config does not set it
 /// (shared by the bar's surface size and the setup's icon preview, so
@@ -80,10 +85,77 @@ pub const DEFAULT_HEIGHT: u32 = 32;
 
 use serde::Deserialize;
 
+/// One extra bar: where it sits and which named sections it shows.
+/// Section definitions/styles stay global (in `panel.sections`), so the
+/// same section can appear on several monitors without duplication.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct PanelLayout {
+    /// Monitor name, `"auto"` or `"all"`; absent = `"auto"`.
+    pub output: Option<String>,
+    pub anchor: Option<String>,
+    pub align: Option<String>,
+    /// Section names to show; absent/empty = every section.
+    pub sections: Option<Vec<String>>,
+}
+
 #[derive(Deserialize, serde::Serialize, Clone)]
 #[allow(clippy::upper_variable_names)]
 pub struct Config {
     pub panel: PanelConfig,
+    /// Extra panels; the legacy `panel` is always the first one. Absent =
+    /// one panel showing every section.
+    #[serde(default)]
+    pub panels: Option<Vec<PanelLayout>>,
+}
+
+/// The layouts to render: the first from the legacy `panel`, the rest from
+/// `panels`; absent `panels` means a single full panel.
+pub fn panel_layouts(cfg: &Config) -> Vec<PanelLayout> {
+    // A file written by the multi-panel setup carries every layout,
+    // including the first one; the legacy `panel` block still supplies
+    // the global fields and the first-panel defaults.
+    if let Some(panels) = cfg.panels.as_ref().filter(|panels| !panels.is_empty()) {
+        let mut layouts = panels.clone();
+        // Sections are shared definitions but assigned EXCLUSIVELY: the
+        // first panel takes the sections not claimed by the others, so
+        // adding a secondary panel does not duplicate content. An explicit
+        // first-panel list wins (and may intentionally duplicate a section).
+        let claimed: Vec<String> = layouts
+            .iter()
+            .skip(1)
+            .flat_map(|panel| panel.sections.iter().flatten().cloned())
+            .collect();
+        if let Some(first) = layouts.first_mut() {
+            if first.sections.as_ref().is_none_or(|sections| sections.is_empty()) {
+                first.sections = Some(
+                    cfg.panel
+                        .sections
+                        .iter()
+                        .map(|section| section.name.clone())
+                        .filter(|name| !claimed.iter().any(|claimed| claimed == name))
+                        .collect(),
+                );
+            }
+            // Legacy root placement fills gaps in the first array entry.
+            first.output = first.output.clone().or_else(|| cfg.panel.output.clone());
+            first.anchor = first.anchor.clone().or_else(|| cfg.panel.anchor.clone());
+            first.align = first.align.clone().or_else(|| cfg.panel.align.clone());
+        }
+        // An extra panel with no list shows an empty bar; validation flags
+        // it so the editor cannot silently create a useless panel.
+        for panel in layouts.iter_mut().skip(1) {
+            if panel.sections.as_ref().is_none_or(|sections| sections.is_empty()) {
+                panel.sections = Some(Vec::new());
+            }
+        }
+        return layouts;
+    }
+    vec![PanelLayout {
+        output: cfg.panel.output.clone(),
+        anchor: cfg.panel.anchor.clone(),
+        align: cfg.panel.align.clone(),
+        sections: None,
+    }]
 }
 
 #[derive(Deserialize, serde::Serialize, Clone)]
@@ -134,11 +206,21 @@ pub struct PanelConfig {
     /// `underline` (fade + underline sweep) or `sheen` (fade + light
     /// sweep over the value). Only sensors with `effect: true` animate.
     pub value_effect: Option<String>,
+    /// Light or dark variant of the bar and the generated app themes:
+    /// `light` or `dark`; absent = dark (the historic default). The
+    /// configured colours seed the light variant; explicit per-sensor
+    /// overrides stay untouched.
+    pub theme_mode: Option<String>,
     pub default_section_weight: Option<u32>,
     pub default_bg_color: Option<String>,
     pub default_text_color: Option<String>,
     pub anchor: Option<String>,
     pub align: Option<String>,
+    /// Output the bar binds to; absent or `"auto"` = the focused output
+    /// (the compositor's choice). A monitor name is passed to the layer
+    /// shell as `StartMode::TargetScreen`; a missing output falls back to
+    /// the focused one. Requires a piuma restart when changed.
+    pub output: Option<String>,
     /// Panel thickness (fixed surface dimension) in px; `None` = 32.
     pub thickness: Option<u32>,
     /// Style applied to every sensor; per-sensor values take precedence.
@@ -504,6 +586,7 @@ pub fn default_config() -> Config {
     };
 
     Config {
+        panels: None,
         panel: PanelConfig {
             value_font: None,
             font: Some("Noto Sans".to_string()),
@@ -519,11 +602,13 @@ pub fn default_config() -> Config {
             section_layout: Some("horizontal".to_string()),
             section_title: None,
             value_effect: None,
+            theme_mode: None,
             default_section_weight: Some(1),
             default_bg_color: None,
             default_text_color: None,
             anchor: Some("top".to_string()),
             align: Some("center".to_string()),
+            output: None,
             thickness: None,
             sensor_defaults: None,
             section_defaults: None,
@@ -536,9 +621,9 @@ pub fn default_config() -> Config {
 // ── loading ─────────────────────────────────────────────────────────
 
 fn default_config_path() -> PathBuf {
-    let default_path = if let Some(config_home) = dirs::config_dir() {
+    let default_path = if let Some(config_home) = crate::xdg::config() {
         config_home.join("piuma").join("piuma.json")
-    } else if let Some(home) = dirs::home_dir() {
+    } else if let Some(home) = crate::xdg::home() {
         home.join(".config").join("piuma").join("piuma.json")
     } else {
         PathBuf::from("piuma.json")
@@ -699,6 +784,12 @@ pub fn validate_config(cfg: &Config) -> Vec<ConfigError> {
         p.value_effect.as_deref(),
         &["off", "underline", "sheen"],
     );
+    err_one_of(
+        &mut errors,
+        "panel.theme_mode",
+        p.theme_mode.as_deref(),
+        &["dark", "light"],
+    );
     err_range_u32(&mut errors, "panel.thickness", p.thickness, 4, 256);
     err_range_u32(&mut errors, "panel.font_size", p.font_size, 1, 256);
     err_range_u32(&mut errors, "panel.default_section_weight", p.default_section_weight, 1, 1000);
@@ -828,6 +919,52 @@ pub fn validate_config(cfg: &Config) -> Vec<ConfigError> {
                         path: format!("{spath}.source.count"),
                         message: format!("{count}: expected 1..=50"),
                     });
+                }
+            }
+        }
+    }
+
+    // Extra layouts: placement values and section names must exist. The
+    // first array entry mirrors the root panel; validating it again is
+    // harmless and keeps the paths unambiguous for the editor.
+    if let Some(panels) = &cfg.panels {
+        let names: Vec<&str> = cfg.panel.sections.iter().map(|s| s.name.as_str()).collect();
+        for (index, layout) in panels.iter().enumerate() {
+            err_one_of(
+                &mut errors,
+                &format!("panels[{index}].anchor"),
+                layout.anchor.as_deref(),
+                &[
+                    "top", "bottom", "left", "right", "top-left", "top-right",
+                    "bottom-left", "bottom-right",
+                ],
+            );
+            err_one_of(
+                &mut errors,
+                &format!("panels[{index}].align"),
+                layout.align.as_deref(),
+                &["left", "center", "right", "fill"],
+            );
+            if layout.output.as_deref() == Some("all") && index > 0 {
+                errors.push(ConfigError {
+                    path: format!("panels[{index}].output"),
+                    message: "only the first panel can mirror all monitors".to_string(),
+                });
+            }
+            if index > 0 && layout.sections.as_ref().is_none_or(|sections| sections.is_empty()) {
+                errors.push(ConfigError {
+                    path: format!("panels[{index}].sections"),
+                    message: "a secondary panel needs at least one section".to_string(),
+                });
+            }
+            if let Some(sections) = &layout.sections {
+                for name in sections {
+                    if !names.iter().any(|known| known == name) {
+                        errors.push(ConfigError {
+                            path: format!("panels[{index}].sections"),
+                            message: format!("{name:?}: no such section"),
+                        });
+                    }
                 }
             }
         }
@@ -1319,6 +1456,115 @@ mod tests {
         let out = serde_json::to_string(&cfg).expect("config must serialize");
         assert!(out.contains(r#""volume_meter""#), "got: {out}");
         assert!(out.contains(r#""device":"Speaker""#), "got: {out}");
+    }
+
+    /// Multiple layouts: the array is authoritative when present; a
+    /// missing array falls back to the single legacy panel.
+    #[test]
+    fn panel_layouts_use_the_array_or_the_legacy_panel() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"panel":{"output":"HDMI-A-2","sections":[]},
+                "panels":[
+                  {"output":"HDMI-A-2","anchor":"top","sections":["A"]},
+                  {"output":"eDP-1","anchor":"bottom","align":"fill","sections":["B"]}
+                ]}"#,
+        )
+        .expect("panels must parse");
+        let layouts = panel_layouts(&cfg);
+        assert_eq!(layouts.len(), 2);
+        assert_eq!(layouts[1].output.as_deref(), Some("eDP-1"));
+        assert_eq!(layouts[1].align.as_deref(), Some("fill"));
+
+        let legacy: Config = serde_json::from_str(
+            r#"{"panel":{"output":"eDP-1","sections":[]}}"#,
+        )
+        .unwrap();
+        let layouts = panel_layouts(&legacy);
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(layouts[0].output.as_deref(), Some("eDP-1"));
+
+        let broken: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[]},"panels":[{"anchor":"nope"},{"output":"eDP-1","align":"diagonal"}]}"#,
+        )
+        .unwrap();
+        let errors = validate_config(&broken);
+        assert!(errors.iter().any(|e| e.path == "panels[0].anchor"));
+        assert!(errors.iter().any(|e| e.path == "panels[1].align"));
+    }
+
+    /// Sections are assigned exclusively: the main panel defaults to the
+    /// ones no secondary panel claimed, so nothing is duplicated.
+    #[test]
+    fn panel_sections_are_assigned_exclusively() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[{"name":"A","sensors":[]},{"name":"B","sensors":[]},{"name":"C","sensors":[]}]},
+                "panels":[
+                  {"output":"HDMI-A-2"},
+                  {"output":"eDP-1","sections":["B"]}
+                ]}"#,
+        )
+        .expect("panels must parse");
+        let layouts = panel_layouts(&cfg);
+        assert_eq!(
+            layouts[0].sections,
+            Some(vec!["A".to_string(), "C".to_string()]),
+            "main keeps only unclaimed sections"
+        );
+        assert_eq!(layouts[1].sections, Some(vec!["B".to_string()]));
+
+        // An explicit main list wins (an intentional duplicate is allowed).
+        let explicit: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[{"name":"A","sensors":[]},{"name":"B","sensors":[]}]},
+                "panels":[
+                  {"sections":["A"]},
+                  {"sections":["B"]}
+                ]}"#,
+        )
+        .unwrap();
+        assert_eq!(panel_layouts(&explicit)[0].sections, Some(vec!["A".to_string()]));
+
+        // A secondary panel with no sections is invalid.
+        let empty: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[{"name":"A","sensors":[]}]},
+                "panels":[{"sections":["A"]},{}]}"#,
+        )
+        .unwrap();
+        assert!(validate_config(&empty)
+            .iter()
+            .any(|e| e.path == "panels[1].sections"));
+    }
+
+    /// The output selection roundtrips; absent means "focused output".
+    #[test]
+    fn output_key_roundtrips() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"panel":{"output":"HDMI-A-2","sections":[]}}"#,
+        )
+        .expect("output must parse");
+        assert_eq!(cfg.panel.output.as_deref(), Some("HDMI-A-2"));
+        assert!(validate_config(&cfg).is_empty());
+        let out = serde_json::to_string(&cfg).unwrap();
+        assert!(out.contains(r#""output":"HDMI-A-2""#), "got: {out}");
+        let bare: Config = serde_json::from_str(r#"{"panel":{"sections":[]}}"#).unwrap();
+        assert!(bare.panel.output.is_none());
+    }
+
+    /// The light/dark variant roundtrips and an unknown value is named.
+    #[test]
+    fn theme_mode_roundtrips_and_validates() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"panel":{"theme_mode":"light","sections":[]}}"#,
+        )
+        .expect("theme_mode must parse");
+        assert_eq!(cfg.panel.theme_mode.as_deref(), Some("light"));
+        assert!(validate_config(&cfg).is_empty());
+        let out = serde_json::to_string(&cfg).expect("config must serialize");
+        assert!(out.contains(r#""theme_mode":"light""#), "got: {out}");
+        let broken: Config = serde_json::from_str(
+            r#"{"panel":{"theme_mode":"sepia","sections":[]}}"#,
+        )
+        .unwrap();
+        assert_eq!(validate_config(&broken)[0].path, "panel.theme_mode");
     }
 
     /// Value effects: global mode and per-sensor opt-in roundtrip, and

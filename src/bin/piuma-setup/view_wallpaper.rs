@@ -17,21 +17,14 @@ use crate::state::{Message, PiumaSetup};
 /// user's pictures directory. Missing folders are skipped by the scan.
 pub(crate) fn wallpaper_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    let data_home = std::env::var_os("XDG_DATA_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")));
-    if let Some(base) = data_home {
+    if let Some(base) = crate::xdg::data() {
         dirs.push(base.join("wallpapers"));
     }
-    if let Ok(data_dirs) = std::env::var("XDG_DATA_DIRS") {
-        dirs.extend(
-            data_dirs
-                .split(':')
-                .filter(|d| !d.is_empty())
-                .map(|d| PathBuf::from(d).join("wallpapers")),
-        );
-    }
+    dirs.extend(
+        crate::xdg::data_dirs()
+            .into_iter()
+            .map(|dir| dir.join("wallpapers")),
+    );
     if let Some(pictures) = user_pictures_dir() {
         dirs.push(pictures);
     }
@@ -41,7 +34,7 @@ pub(crate) fn wallpaper_dirs() -> Vec<PathBuf> {
 /// Pictures folder from `~/.config/user-dirs.dirs`: the value is quoted
 /// shell-ish text with `$HOME` placeholders, expanded here.
 fn user_pictures_dir() -> Option<PathBuf> {
-    let home = PathBuf::from(std::env::var_os("HOME")?);
+    let home = crate::xdg::home()?;
     let content = fs::read_to_string(home.join(".config/user-dirs.dirs")).ok()?;
     let raw = parse_user_dirs_pictures(&content)?;
     Some(PathBuf::from(raw.replace("$HOME", home.to_str()?)))
@@ -102,7 +95,7 @@ const THUMB_HEIGHT: u32 = 90;
 /// `~/.cache/piuma/wallpapers`: downscaled previews live here, so a
 /// later setup run lists every wallpaper without decoding it again.
 fn thumbnail_cache_dir() -> Option<PathBuf> {
-    dirs::cache_dir().map(|dir| dir.join("piuma/wallpapers"))
+    crate::xdg::cache().map(|dir| dir.join("piuma/wallpapers"))
 }
 
 /// Cache file of one wallpaper: the key carries path, size and mtime, so

@@ -1,12 +1,12 @@
 //! Panel tab: the panel-wide card (font, palette, wallpaper and autostart
 //! shortcuts) and the notifications card styling the popup.
-use iced::widget::{column, scrollable, text, toggler, Row, Slider};
+use iced::widget::{button, column, container, scrollable, text, toggler, Column, Row, Slider};
 use iced::{Element, Length};
 
 use crate::controls::{
     align_row, anchor_grid, border_type_options, color_control, color_control_over, form_grid,
-    icon_theme_options, input, invalid_under, notif_position_grid, picklist, slider_control,
-    theme_cell, SYSTEM_ICON_THEME,
+    icon_theme_options, input, invalid_under, monitor_outputs, notif_position_grid, picklist,
+    slider_control, theme_cell, SYSTEM_ICON_THEME,
 };
 use crate::style::*;
 use crate::state::{Message, PiumaSetup};
@@ -83,6 +83,10 @@ pub(crate) fn panel_settings(state: &PiumaSetup) -> Element<'_, Message> {
             .into(),
             state.field_err("panel.value_effect"),
         )),
+        ("Theme", invalid_under(
+            theme_control(pal, state.config.theme_mode.as_deref().unwrap_or("dark")).into(),
+            state.field_err("panel.theme_mode"),
+        )),
         ("Default BG", color_control_over(
             state.config.default_bg_color.as_deref().unwrap_or(""),
             state.field_err("panel.default_bg_color"),
@@ -105,6 +109,14 @@ pub(crate) fn panel_settings(state: &PiumaSetup) -> Element<'_, Message> {
             align_row(pal, &align).into(),
             state.field_err("panel.align"),
         )),
+        ("Monitor", monitor_control(state)),
+        ("Sections shown", input(
+            "unassigned sections",
+            &state.config.root_sections_text,
+            Message::RootSectionsChanged,
+        )
+        .width(Length::Fill)
+        .into()),
         // Rounded screen corners (roadmap angoli-schermo): an absent
         // block reads as "off" with the bar's own fallback values.
         ("Screen Corners", toggler(
@@ -133,12 +145,192 @@ pub(crate) fn panel_settings(state: &PiumaSetup) -> Element<'_, Message> {
         column![
             text("Panel Settings").size(16).style(fg_text(pal)),
             form_grid(fields),
+            additional_panels(state),
             icon_theme_grid(state),
         ]
         .spacing(10)
         .width(Length::Fill),
     )
     .into()
+}
+
+/// Bar/app variant as two explicit choices (dark is the historic
+/// default, light is the derived variant).
+/// A small caption over one control of an extra-panel row.
+fn panel_label<'a>(
+    pal: Palette,
+    label: &'a str,
+    control: Element<'a, Message>,
+) -> Element<'a, Message> {
+    column![
+        text(label).size(9).style(muted_text(pal)),
+        control,
+    ]
+    .spacing(1)
+    .width(Length::Fill)
+    .into()
+}
+
+/// Extra panels: placement plus the comma-separated section names each
+/// one shows. The first panel is the settings above; sections are shared.
+fn additional_panels(state: &PiumaSetup) -> Element<'_, Message> {
+    let pal = palette(&state.config);
+    let mut list = Column::new().spacing(6).width(Length::Fill);
+    if state.config.panels.is_empty() {
+        list = list.push(
+            text("No extra panels — the bar uses the settings above.")
+                .size(10)
+                .style(muted_text(pal)),
+        );
+    }
+    for (index, panel) in state.config.panels.iter().enumerate() {
+        let current_output = panel.output.clone().unwrap_or_else(|| "auto".to_string());
+        let mut outputs = vec!["auto".to_string()];
+        let detected = monitor_outputs();
+        if current_output != "auto" && !detected.iter().any(|name| name == &current_output) {
+            outputs.push(current_output.clone());
+        }
+        outputs.extend(detected);
+        let sections = &panel.sections_text;
+        let sections_error = state.field_err(&format!("panels[{index}].sections"));
+        let row = Row::new()
+            .push(panel_label(
+                pal,
+                "Output",
+                picklist(outputs, Some(current_output), move |value: String| {
+                    Message::PanelOutputChanged(index, value)
+                })
+                .width(Length::Fill)
+                .into(),
+            ))
+            .push(panel_label(
+                pal,
+                "Anchor",
+                picklist(
+                    vec![
+                        "default".to_string(),
+                        "top".to_string(),
+                        "bottom".to_string(),
+                        "left".to_string(),
+                        "right".to_string(),
+                        "top-left".to_string(),
+                        "top-right".to_string(),
+                        "bottom-left".to_string(),
+                        "bottom-right".to_string(),
+                    ],
+                    Some(panel.anchor.clone().unwrap_or_else(|| "default".to_string())),
+                    move |value: String| Message::PanelAnchorChanged(index, value),
+                )
+                .width(Length::Fill)
+                .into(),
+            ))
+            .push(panel_label(
+                pal,
+                "Align",
+                picklist(
+                    vec![
+                        "default".to_string(),
+                        "left".to_string(),
+                        "center".to_string(),
+                        "right".to_string(),
+                        "fill".to_string(),
+                    ],
+                    Some(panel.align.clone().unwrap_or_else(|| "default".to_string())),
+                    move |value: String| Message::PanelAlignChanged(index, value),
+                )
+                .width(Length::Fill)
+                .into(),
+            ))
+            .push(
+                button(text("Remove").size(BODY))
+                    .on_press(Message::PanelRemoved(index))
+                    .padding(5),
+            )
+            .spacing(6)
+            .align_y(iced::Alignment::End);
+        list = list.push(
+            container(
+                column![
+                    row,
+                    invalid_under(
+                        input("required: section names", sections, move |value| {
+                            Message::PanelSectionsChanged(index, value)
+                        })
+                        .width(Length::Fill)
+                        .into(),
+                        sections_error,
+                    ),
+                ]
+                .spacing(4)
+                .width(Length::Fill),
+            )
+            .padding(6)
+            .width(Length::Fill)
+            .style(inset_style(pal)),
+        );
+    }
+    list = list.push(
+        button(text("+ Add panel").size(BODY))
+            .on_press(Message::PanelAdded)
+            .padding(6),
+    );
+    column![
+        text("Additional panels").size(12).style(fg_text(pal)),
+        text("Sections are assigned exclusively: the main panel shows the ones not listed here; a secondary panel needs at least one. Comma-separated names; placement applies at the next piuma start.")
+            .size(10)
+            .style(muted_text(pal)),
+        list,
+    ]
+    .spacing(6)
+    .width(Length::Fill)
+    .into()
+}
+
+/// The bar's output: `auto` (the focused monitor) or a detected name.
+/// Applied when piuma starts; a layer surface cannot move outputs.
+fn monitor_control(state: &PiumaSetup) -> Element<'_, Message> {
+    let pal = palette(&state.config);
+    let current = state
+        .config
+        .output
+        .clone()
+        .unwrap_or_else(|| "auto".to_string());
+    let mut options = vec!["auto".to_string(), "all".to_string()];
+    let detected = monitor_outputs();
+    if current != "auto" && !detected.iter().any(|name| name == &current) {
+        options.push(current.clone());
+    }
+    options.extend(detected);
+    column![
+        picklist(options, Some(current), Message::OutputChanged)
+            .width(Length::Fill),
+        text("auto = focused · all = every monitor · restart to apply")
+            .size(10)
+            .style(muted_text(pal)),
+    ]
+    .spacing(2)
+    .width(Length::Fill)
+    .into()
+}
+
+fn theme_control<'a>(pal: Palette, current: &str) -> Element<'a, Message> {
+    let mut row = Row::new().spacing(4);
+    for (label, value) in [("Dark", "dark"), ("Light", "light")] {
+        let selected = current == value;
+        row = row.push(
+            button(text(label).size(BODY))
+                .on_press(Message::ThemeModeChanged(value.to_string()))
+                .padding(6)
+                .style(move |t, s| {
+                    if selected {
+                        btn_primary(pal, t, s)
+                    } else {
+                        btn_secondary(pal, t, s)
+                    }
+                }),
+        );
+    }
+    row.into()
 }
 
 /// Icon themes as a 3×3-visible grid of cells previewing three sample

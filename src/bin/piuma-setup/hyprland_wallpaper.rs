@@ -16,7 +16,7 @@ const CONF_BEGIN: &str = "# piuma: hyprland wallpaper/logo (managed)";
 const CONF_END: &str = "# piuma: end hyprland wallpaper/logo";
 
 fn config_path() -> Option<PathBuf> {
-    let dir = dirs::config_dir()?.join("hypr");
+    let dir = crate::xdg::config()?.join("hypr");
     for name in ["hyprland.lua", "hyprland.conf"] {
         let path = dir.join(name);
         if path.is_file() {

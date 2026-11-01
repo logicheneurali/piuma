@@ -6,6 +6,13 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde_json::{Map, Value as JsonValue};
+use std::cell::RefCell;
+
+thread_local! {
+    /// Bridges the layout array built with the panel block to the root
+    /// object (`panels` is a Config field, not a panel field).
+    static ROOT_PANELS_PLACEHOLDER: RefCell<Option<JsonValue>> = const { RefCell::new(None) };
+}
 
 use crate::config;
 use crate::controls::sorted_rules;
@@ -54,6 +61,18 @@ pub(crate) fn corners_set(config: &mut PiumaConfig, edit: impl FnOnce(&mut Scree
     edit(config.screen_corners.get_or_insert_with(ScreenCornersCfg::default));
 }
 
+/// One extra bar managed by the setup: placement plus the named sections
+/// it shows (section definitions stay global).
+#[derive(Debug, Clone, Default)]
+pub struct PanelDraft {
+    pub output: Option<String>,
+    pub anchor: Option<String>,
+    pub align: Option<String>,
+    pub sections: Option<Vec<String>>,
+    /// Comma-separated draft mirrored by the text field (not serialized).
+    pub sections_text: String,
+}
+
 // Configuration structure for GUI - mirrors src/config.rs
 #[derive(Debug, Clone)]
 pub struct PiumaConfig {
@@ -80,6 +99,9 @@ pub struct PiumaConfig {
     pub section_title: Option<bool>,
     /// Value-change animation mode: `None`/`off`, `underline` or `sheen`.
     pub value_effect: Option<String>,
+    /// Light/dark variant of the bar and generated app themes: `None`
+    /// (absent) = dark, `Some("light")` = light.
+    pub theme_mode: Option<String>,
     /// Desktop background the bar draws itself (roadmap2 #1): `None` =
     /// key absent (the bar opens no background window).
     pub wallpaper: Option<WallpaperCfg>,
@@ -96,6 +118,14 @@ pub struct PiumaConfig {
     pub default_text_color: Option<String>,
     pub anchor: Option<String>,
     pub align: Option<String>,
+    /// Monitor the bar binds to (absent/"auto" = focused).
+    pub output: Option<String>,
+    /// First panel's section subset (absent/empty = every section).
+    pub visible_sections: Option<Vec<String>>,
+    /// Comma-separated draft mirrored by the text field (not serialized).
+    pub root_sections_text: String,
+    /// Extra panels after the first one.
+    pub panels: Vec<PanelDraft>,
     pub thickness: u32,
     pub sensor_defaults: SensorDefaults,
     pub section_defaults: SectionDefaults,
@@ -265,11 +295,16 @@ impl Default for PiumaConfig {
             section_layout: "horizontal".to_string(),
             section_title: None,
             value_effect: None,
+            theme_mode: None,
             default_section_weight: 1,
             default_bg_color: Some("#1a1b26".to_string()),
             default_text_color: Some("#e8e8e8".to_string()),
             anchor: Some("top".to_string()),
             align: Some("center".to_string()),
+            output: None,
+            visible_sections: None,
+            root_sections_text: String::new(),
+            panels: Vec::new(),
             thickness: 32,
             sensor_defaults: SensorDefaults::default(),
             section_defaults: SectionDefaults::default(),
@@ -377,6 +412,9 @@ impl PiumaSetup {
         if let Some(effect) = &self.config.value_effect {
             panel.insert("value_effect".to_string(), JsonValue::String(effect.clone()));
         }
+        if let Some(mode) = &self.config.theme_mode {
+            panel.insert("theme_mode".to_string(), JsonValue::String(mode.clone()));
+        }
         // Only the toggle travels to the file: the palette it selects is
         // derived at runtime and never serialized.
         if let Some(p) = self.config.wallpaper_palette {
@@ -416,6 +454,34 @@ impl PiumaSetup {
         }
         if let Some(align) = &self.config.align {
             panel.insert("align".to_string(), JsonValue::String(align.clone()));
+        }
+        if let Some(output) = &self.config.output {
+            panel.insert("output".to_string(), JsonValue::String(output.clone()));
+        }
+        // Layouts: the first mirrors the root panel; extras follow. The
+        // array is omitted for a plain single-panel config, so old files
+        // stay untouched.
+        if !self.config.panels.is_empty() || self.config.visible_sections.is_some() {
+            let mut layouts = Vec::new();
+            layouts.push(layout_to_json(
+                &self.config.output,
+                &self.config.anchor,
+                &self.config.align,
+                &self.config.visible_sections,
+            ));
+            for draft in &self.config.panels {
+                layouts.push(layout_to_json(
+                    &draft.output,
+                    &draft.anchor,
+                    &draft.align,
+                    &draft.sections,
+                ));
+            }
+            // `panels` lives at the config root (Config.panels), not in
+            // the panel block.
+            let root_panels = JsonValue::Array(layouts);
+            // Defer: inserted into the root below via a temporary map.
+            ROOT_PANELS_PLACEHOLDER.with(|slot| *slot.borrow_mut() = Some(root_panels));
         }
         panel.insert("thickness".to_string(), JsonValue::Number(self.config.thickness.into()));
 
@@ -526,6 +592,9 @@ impl PiumaSetup {
 
         let mut root = Map::new();
         root.insert("panel".to_string(), JsonValue::Object(panel));
+        if let Some(panels) = ROOT_PANELS_PLACEHOLDER.with(|slot| slot.borrow_mut().take()) {
+            root.insert("panels".to_string(), panels);
+        }
         JsonValue::Object(root)
     }
 
@@ -721,11 +790,16 @@ impl PiumaSetup {
             section_layout: "horizontal".to_string(),
             section_title: None,
             value_effect: None,
+            theme_mode: None,
             default_section_weight: 1,
             default_bg_color: None,
             default_text_color: None,
             anchor: None,
             align: None,
+            output: None,
+            visible_sections: None,
+            root_sections_text: String::new(),
+            panels: Vec::new(),
             thickness: 32,
             sensor_defaults: SensorDefaults::default(),
             section_defaults: SectionDefaults::default(),
@@ -773,6 +847,11 @@ impl PiumaSetup {
             .get("value_effect")
             .and_then(|v| v.as_str())
             .map(str::to_string);
+        self.config.theme_mode = panel
+            .get("theme_mode")
+            .and_then(|v| v.as_str())
+            .filter(|mode| matches!(*mode, "dark" | "light"))
+            .map(str::to_string);
         // Absent `wallpaper` stays `None`: the bar draws no background
         // (roadmap2 #1). A partial block falls back per field.
         self.config.wallpaper = panel.get("wallpaper").and_then(|v| {
@@ -818,6 +897,45 @@ impl PiumaSetup {
         }
         if let Some(align) = panel.get("align").and_then(|v| v.as_str()) {
             self.config.align = Some(align.to_string());
+        }
+        self.config.output = panel
+            .get("output")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|output| !output.is_empty() && *output != "auto")
+            .map(str::to_string);
+        if let Some(items) = json.get("panels").and_then(|v| v.as_array()) {
+            let mut layouts: Vec<PanelDraft> =
+                items.iter().filter_map(layout_from_json).collect();
+            if let Some(first) = layouts.first() {
+                if first.output.is_some() {
+                    self.config.output = first.output.clone();
+                }
+                if first.anchor.is_some() {
+                    self.config.anchor = first.anchor.clone();
+                }
+                if first.align.is_some() {
+                    self.config.align = first.align.clone();
+                }
+                self.config.visible_sections = first.sections.clone();
+            }
+            if !layouts.is_empty() {
+                layouts.remove(0);
+            }
+            self.config.panels = layouts;
+        }
+        self.config.root_sections_text = self
+            .config
+            .visible_sections
+            .as_ref()
+            .map(|names| names.join(", "))
+            .unwrap_or_default();
+        for panel in &mut self.config.panels {
+            panel.sections_text = panel
+                .sections
+                .as_ref()
+                .map(|names| names.join(", "))
+                .unwrap_or_default();
         }
         // Absent thickness resets to 32 (the config was reset at the top).
         self.config.thickness = panel.get("thickness").and_then(|v| v.as_u64()).map(|t| t as u32).unwrap_or(32);
@@ -1361,4 +1479,71 @@ fn write_layout_map(map: &BTreeMap<String, JsonValue>) -> Result<(), String> {
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, &json).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     std::fs::rename(&tmp, &path).map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
+/// One `panels[]` entry: only the fields that are actually set.
+fn layout_to_json(
+    output: &Option<String>,
+    anchor: &Option<String>,
+    align: &Option<String>,
+    sections: &Option<Vec<String>>,
+) -> JsonValue {
+    let mut map = Map::new();
+    for (key, value) in [
+        ("output", output),
+        ("anchor", anchor),
+        ("align", align),
+    ] {
+        if let Some(value) = value.as_deref().filter(|v| !v.is_empty()) {
+            map.insert(key.to_string(), JsonValue::String(value.to_string()));
+        }
+    }
+    if let Some(sections) = sections.as_ref().filter(|list| !list.is_empty()) {
+        map.insert(
+            "sections".to_string(),
+            JsonValue::Array(sections.iter().cloned().map(JsonValue::String).collect()),
+        );
+    }
+    JsonValue::Object(map)
+}
+
+fn layout_from_json(value: &JsonValue) -> Option<PanelDraft> {
+    let obj = value.as_object()?;
+    let text = |key: &str| {
+        obj.get(key)
+            .and_then(JsonValue::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    };
+    let sections = obj.get("sections").and_then(JsonValue::as_array).map(|items| {
+        items
+            .iter()
+            .filter_map(JsonValue::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    }).filter(|list: &Vec<String>| !list.is_empty());
+    Some(PanelDraft {
+        output: text("output"),
+        anchor: text("anchor"),
+        align: text("align"),
+        sections_text: sections
+            .as_ref()
+            .map(|names| names.join(", "))
+            .unwrap_or_default(),
+        sections,
+    })
+}
+
+/// Comma-separated section names → the key's list; empty input = absent.
+pub(crate) fn parse_sections(raw: &str) -> Option<Vec<String>> {
+    let sections: Vec<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect();
+    (!sections.is_empty()).then_some(sections)
 }

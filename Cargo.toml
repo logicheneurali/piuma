@@ -17,10 +17,11 @@ iced_exwlshell = { git = "https://github.com/waycrate/exwlshelleventloop.git", b
 image = "0.25"
 smol = "2"
 log = "0.4"
-simple_logger = "5"
+# Passwd fallback for the home directory when $HOME is absent
+# (the XDG helper is internal; see src/xdg.rs).
+libc = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-dirs = "5.0"
 # Session-exit cleanup: SIGTERM/SIGINT restore the files piuma edits.
 signal-hook = "0.3"
 # System tray (StatusNotifierItem): async D-Bus client/watcher.

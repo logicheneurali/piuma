@@ -8,7 +8,7 @@ use crate::sensors;
 use crate::tray;
 use crate::{
     panel_font, placement_rect, popup_output_option, popup_style, styled_box, FindSensorRect,
-    GraphPopup, Message, Panel, SCREEN_HEIGHT, SCREEN_WIDTH,
+    GraphPopup, Message, Panel,
 };
 use iced::widget::container::Style as ContainerStyle;
 use iced::widget::{container, text, Column, MouseArea, Row, Stack};
@@ -143,9 +143,14 @@ pub(crate) fn graph_hover_sync(
         eprintln!("[piuma] graph: no cursor position yet, waiting for the motion event");
         return Command::batch(cmds);
     };
-    let (sw, sh) = unsafe { (SCREEN_WIDTH as i32, SCREEN_HEIGHT as i32) };
+    let (sw, sh) = crate::focused_screen_size();
     let (anchor, margin) = menu_placement(x, y, GRAPH_POPUP_W, GRAPH_POPUP_H, sw, sh);
     let rect = placement_rect(anchor, &margin, GRAPH_POPUP_W, GRAPH_POPUP_H, sw, sh);
+    // The bar this sensor belongs to (its edge and origin inside the
+    // output), not the shared state's first-panel anchor: the popup must
+    // shift past THAT bar's reservation and the connector must start
+    // from the sensor there.
+    let (bar_anchor, bar_origin) = crate::tooltip::cursor_bar(panel);
     let (id, open) = Message::layershell_open(NewLayerShellSettings {
         size: LayerSize::px(GRAPH_POPUP_W, GRAPH_POPUP_H),
         layer: Layer::Overlay,
@@ -165,6 +170,8 @@ pub(crate) fn graph_hover_sync(
         sensor,
         rect,
         anchor,
+        bar_anchor,
+        bar_origin,
         sensor_rect: None,
         pointer_on_popup: false,
         missed: 0,
@@ -240,7 +247,7 @@ pub(crate) fn graph_link_geometry(
 ) -> Option<(graphs::Connector, (i32, i32), (u32, u32))> {
     let gp = panel.graph_popup.as_ref()?;
     let sensor = gp.sensor_rect?;
-    let popup = popup_surface_rect(gp, panel.last_anchor, panel.last_exclusive_zone);
+    let popup = popup_surface_rect(gp, gp.bar_anchor, panel.last_exclusive_zone);
     let st = popup_style(&panel.config, panel.palette.as_ref());
     let (d1, d2, path) = graphs::connector_geometry(sensor, popup);
     // The surface is the connector's bounding box (the end dots are
@@ -520,6 +527,43 @@ mod tests {
             "bottom bar + bottom popup: -28 on y"
         );
     }
+    /// A sensor on a bottom bar: the popup opens above it, so the link
+    /// must leave the sensor's top edge and land exactly on the popup's
+    /// nearest (bottom) edge — the shared state's first-panel anchor used
+    /// to lift the sensor to y=0 and end the link a zone inside the popup.
+    #[test]
+    fn bottom_bar_link_runs_from_the_sensor_to_the_nearest_popup_edge() {
+        let (sw, sh, thickness) = (2560, 1600, 28);
+        let (ox, oy) = tray::bar_origin_for(Anchor::Bottom, thickness, sw, sh);
+        assert_eq!(
+            (ox, oy),
+            (0, sh - thickness),
+            "a bottom bar sits at the output's bottom edge"
+        );
+        let sensor = (ox + 100, oy + 4, ox + 200, oy + 24);
+
+        // Cursor on the sensor: the popup flips above it and the bar's
+        // reservation pushes the surface up by one thickness.
+        let (anchor, margin) = menu_placement(150, sh - 15, 260, 140, sw, sh);
+        let rect = placement_rect(anchor, &margin, 260, 140, sw, sh);
+        let popup = shifted_surface_rect(rect, anchor, Anchor::Bottom, thickness);
+        assert_eq!(
+            popup.3,
+            sh - thickness - 15,
+            "the popup's bottom edge clears the bar"
+        );
+
+        let (d1, d2, _) = graphs::connector_geometry(sensor, popup);
+        assert_eq!(
+            d1.y, sensor.1 as f32,
+            "leaves the sensor's edge facing the popup"
+        );
+        assert_eq!(
+            d2.y, popup.3 as f32,
+            "lands on the popup's nearest edge, not inside it"
+        );
+    }
+
     /// The tick reaps a popup whose sensor and surface both lost the
     /// cursor — but only after the grace, and never while a sensor is
     /// under the cursor or the pointer sits on the surface. The flag
@@ -533,6 +577,8 @@ mod tests {
             sensor: 0,
             rect: (0, 0, 10, 10),
             anchor: Anchor::Top,
+            bar_anchor: Anchor::Top,
+            bar_origin: (0, 0),
             sensor_rect: None,
             pointer_on_popup: false,
             missed: 0,

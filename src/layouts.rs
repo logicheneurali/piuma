@@ -193,13 +193,52 @@ pub fn tick(state: &mut LayoutState, rows: &[WinRow]) -> String {
                     eprintln!("[piuma] layout applied: {name}");
                     state.applied_flash = Some(Instant::now());
                     state.applied_layout = Some(name.clone());
+                    // The dispatches (moving windows between workspaces
+                    // above all) can pull the focus off the application
+                    // that just opened: remember it before the pass and
+                    // put it back afterwards.
+                    let focus = focus_after_apply(trigger, rows);
                     apply(rows, entries);
+                    // A focus dispatch is not free: Hyprland warps the
+                    // pointer to the focused window's centre (and steals
+                    // focus from an open menu), so only restore when the
+                    // dispatches really moved the focus.
+                    if let Some(address) = focus {
+                        if focus_is_needed(&address, hypr::fresh_clients().as_deref()) {
+                            windows::focus(&address);
+                        }
+                    }
                 }
             }
             None => state.matched = false,
         }
     }
     status_text(state)
+}
+
+/// Whether the restore dispatch is needed at all: another window must
+/// hold the focus. A redundant `focus` dispatch in Hyprland 0.57 warps the
+/// cursor to that window's centre (closing an open menu), and no focused
+/// client means a menu/layer holds it — both cases skip. `None` (the query
+/// failed) keeps the old restore.
+fn focus_is_needed(address: &str, current: Option<&[WinRow]>) -> bool {
+    current.map_or(true, |rows| {
+        rows.iter()
+            .find(|row| row.focused)
+            .is_some_and(|row| row.address != address)
+    })
+}
+
+/// The window to re-focus after a layout pass: only a create/close pass
+/// runs right after an application opened, and the dispatches can leave
+/// it unfocused. A workspace move must not yank the focus back.
+fn focus_after_apply(trigger: Trigger, rows: &[WinRow]) -> Option<String> {
+    if trigger != Trigger::CreatedOrClosed {
+        return None;
+    }
+    rows.iter()
+        .find(|row| row.focused)
+        .map(|row| row.address.clone())
 }
 
 /// What changed since the last check. A create/close starts a new window
@@ -662,6 +701,58 @@ mod tests {
             fullscreen: false,
             visible: true,
         }
+    }
+
+    /// A layout pass caused by a window create/close restores the focus
+    /// the dispatches may have stolen (the app that just opened); a
+    /// workspace move keeps the user's current focus.
+    #[test]
+    fn focus_is_restored_only_after_a_created_window_set() {
+        let mut opened = row("0xA", "kitty", "shell", "1", false);
+        opened.focused = true;
+        let other = row("0xB", "vivaldi", "web", "1", false);
+        assert_eq!(
+            focus_after_apply(Trigger::CreatedOrClosed, &[other.clone(), opened.clone()]),
+            Some("0xA".to_string())
+        );
+        assert_eq!(
+            focus_after_apply(Trigger::WorkspaceOnly, &[opened.clone()]),
+            None,
+            "a workspace move must not yank the focus back"
+        );
+        assert_eq!(focus_after_apply(Trigger::CreatedOrClosed, &[other]), None);
+    }
+
+    /// The restore dispatch is skipped when nobody else stole the focus:
+    /// a redundant `focus` warps the cursor to the window's centre and
+    /// closes an open menu. A pass with no focused client (a menu/layer
+    /// holds it) must not yank it either; a failed query keeps the old
+    /// restore.
+    #[test]
+    fn restore_dispatch_is_skipped_when_focus_did_not_move() {
+        let mut kitty = row("0xA", "kitty", "shell", "1", false);
+        kitty.focused = true;
+        let mut other = row("0xB", "vivaldi", "web", "1", false);
+        assert!(
+            !focus_is_needed("0xA", Some(&[kitty.clone(), other.clone()])),
+            "already focused: no dispatch, no warp"
+        );
+
+        other.focused = true;
+        kitty.focused = false;
+        assert!(
+            focus_is_needed("0xA", Some(&[kitty.clone(), other])),
+            "another window took the focus: restore it"
+        );
+
+        assert!(
+            !focus_is_needed("0xA", Some(&[kitty.clone()])),
+            "no focused client (menu/layer): do not steal it"
+        );
+        assert!(
+            focus_is_needed("0xA", None),
+            "unverifiable: keep the old restore"
+        );
     }
 
     /// The trigger of the check: a window created or closed starts a new

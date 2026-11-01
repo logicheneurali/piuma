@@ -165,17 +165,13 @@ pub(crate) fn icon_theme_options(current: Option<&str>) -> Vec<String> {
 /// The XDG data dirs of the lookup: the user's data home, then
 /// $XDG_DATA_DIRS (defaulting to /usr/local/share and /usr/share).
 pub(crate) fn xdg_data_dirs() -> Vec<PathBuf> {
-    let mut dirs_: Vec<PathBuf> = dirs::data_dir().into_iter().collect();
-    let data_dirs =
-        std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".to_string());
-    dirs_.extend(data_dirs.split(':').filter(|d| !d.is_empty()).map(PathBuf::from));
-    dirs_
+    crate::xdg::data_search_dirs()
 }
 
 /// Theme roots: the XDG data dirs' `icons` plus the legacy ~/.icons.
 pub(crate) fn icon_theme_roots() -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = xdg_data_dirs().iter().map(|d| d.join("icons")).collect();
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = crate::xdg::home() {
         roots.push(home.join(".icons"));
     }
     roots
@@ -885,6 +881,34 @@ pub(crate) fn audio_devices() -> Vec<String> {
                     String::from_utf8_lossy(&out.stdout)
                         .lines()
                         .filter_map(|line| line.split_whitespace().nth(1).map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .clone()
+}
+
+/// Monitor names from `hyprctl monitors -j` (read once); an absent or
+/// unparsable answer leaves the list empty and the picklist keeps the
+/// current value.
+pub(crate) fn monitor_outputs() -> Vec<String> {
+    static CACHE: OnceLock<Vec<String>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            std::process::Command::new("hyprctl")
+                .args(["monitors", "-j"])
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .and_then(|out| {
+                    serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout).ok()
+                })
+                .map(|monitors| {
+                    monitors
+                        .iter()
+                        .filter_map(|monitor| {
+                            monitor.get("name")?.as_str().map(str::to_string)
+                        })
                         .collect()
                 })
                 .unwrap_or_default()

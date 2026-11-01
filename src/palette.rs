@@ -24,6 +24,112 @@ pub struct Palette {
     pub text_hover: String,
 }
 
+/// Lightness of the light variant: soft surfaces, dark text.
+const L_BG_LIGHT: f32 = 0.94;
+const L_CARD_LIGHT: f32 = 0.88;
+const L_CARD_HOVER_LIGHT: f32 = 0.52;
+const L_TEXT_LIGHT: f32 = 0.16;
+const L_TEXT_HOVER_LIGHT: f32 = 0.10;
+
+impl Palette {
+    /// The light variant of this seed: the same hues, lightness
+    /// inverted. Surfaces keep a low saturation so a vivid wallpaper
+    /// does not produce a neon theme; the hover accent stays the
+    /// vibrant hue.
+    pub fn light(&self) -> Palette {
+        let (h, s, _) = self.hsl_bg();
+        let (vh, vs, _) = self.hsl_hover();
+        Palette {
+            bg: hex(hsl_to_rgb(h, s.min(0.22), L_BG_LIGHT)),
+            card: hex(hsl_to_rgb(h, s.min(0.18), L_CARD_LIGHT)),
+            card_hover: hex(hsl_to_rgb(
+                vh,
+                vs.clamp(0.35, 0.60),
+                L_CARD_HOVER_LIGHT,
+            )),
+            text: hex(hsl_to_rgb(h, (s * 0.25).min(0.12), L_TEXT_LIGHT)),
+            text_hover: hex(hsl_to_rgb(
+                h,
+                (s * 0.20).min(0.10),
+                L_TEXT_HOVER_LIGHT,
+            )),
+        }
+    }
+
+    fn hsl_bg(&self) -> (f32, f32, f32) {
+        self.hsl(&self.bg)
+    }
+
+    fn hsl_hover(&self) -> (f32, f32, f32) {
+        self.hsl(&self.card_hover)
+    }
+
+    fn hsl(&self, tone: &str) -> (f32, f32, f32) {
+        match config::parse_color(tone) {
+            Ok(c) => rgb_to_hsl(c.r * 255.0, c.g * 255.0, c.b * 255.0),
+            Err(_) => (0.0, 0.0, 0.5),
+        }
+    }
+}
+
+/// The palette the bar draws with in the requested mode: the extracted
+/// seed in the matching variant, or a synthetic seed from the configured
+/// colours when light mode has no wallpaper palette. Dark mode keeps the
+/// historic behaviour (no palette when none was extracted).
+pub fn active(seed: Option<&Palette>, panel: &config::PanelConfig) -> Option<Palette> {
+    if config::light_mode(panel) {
+        Some(
+            seed.map(Palette::light)
+                .unwrap_or_else(|| seed_from_panel(panel).light()),
+        )
+    } else {
+        seed.cloned()
+    }
+}
+
+/// A seed palette built from the configured panel colours, used by the
+/// light variant when no wallpaper palette is active. Missing values
+/// fall back to the bar's built-in dark defaults, so the derivation is
+/// always possible.
+pub fn seed_from_panel(panel: &config::PanelConfig) -> Palette {
+    let parse = |value: Option<&String>, fallback: (f32, f32, f32)| {
+        value
+            .and_then(|v| config::parse_color(v).ok())
+            .map(|c| (c.r, c.g, c.b))
+            .unwrap_or(fallback)
+    };
+    let sensors = panel.sensor_defaults.as_ref();
+    let sections = panel.section_defaults.as_ref();
+    // The bar's built-in dark tones (DEFAULT_BG_COLOR / TEXT_COLOR).
+    let bg = parse(panel.default_bg_color.as_ref(), (0.06, 0.06, 0.08));
+    let text = parse(panel.default_text_color.as_ref(), (0.88, 0.88, 0.94));
+    let card = parse(
+        sensors
+            .and_then(|d| d.bg_color.as_ref())
+            .or_else(|| sections.and_then(|d| d.bg_color.as_ref())),
+        (bg.0 + (1.0 - bg.0) * 0.07, bg.1 + (1.0 - bg.1) * 0.07, bg.2 + (1.0 - bg.2) * 0.07),
+    );
+    let card_hover = parse(
+        sensors.and_then(|d| d.bg_color_hover.as_ref()),
+        (card.0 + (1.0 - card.0) * 0.10, card.1 + (1.0 - card.1) * 0.10, card.2 + (1.0 - card.2) * 0.10),
+    );
+    let text_hover = parse(
+        sensors.and_then(|d| d.text_color_hover.as_ref()),
+        text,
+    );
+    let hex01 = |(r, g, b): (f32, f32, f32)| {
+        let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        hex((byte(r), byte(g), byte(b)))
+    };
+    Palette {
+        bg: hex01(bg),
+        card: hex01(card),
+        card_hover: hex01(card_hover),
+        text: hex01(text),
+        text_hover: hex01(text_hover),
+    }
+}
+
 /// The tone with the CONFIGURED colour's alpha when it isn't opaque: a
 /// transparent config stays transparent in the wallpaper's hue (a
 /// `#15306000` section card becomes the tone with `a = 0`). An absent,
@@ -221,6 +327,39 @@ fn hex((r, g, b): (u8, u8, u8)) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// WCAG relative luminance of a `#rrggbb` string.
+    fn luminance(hex: &str) -> f32 {
+        let c = config::parse_color(hex).unwrap();
+        let f = |v: f32| if v <= 0.039_28 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+        0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b)
+    }
+
+    #[test]
+    fn light_variant_is_light_and_has_readable_text() {
+        let dark = Palette {
+            bg: "#153060".to_string(),
+            card: "#1b3a70".to_string(),
+            card_hover: "#586e89".to_string(),
+            text: "#eeeeee".to_string(),
+            text_hover: "#ffffff".to_string(),
+        };
+        let light = dark.light();
+        assert!(lightness(&light.bg) > 0.85, "light bg: {}", light.bg);
+        assert!(lightness(&light.text) < 0.25, "light text: {}", light.text);
+        let contrast = (luminance(&light.bg) + 0.05) / (luminance(&light.text) + 0.05);
+        assert!(contrast >= 4.5, "light text contrast: {contrast}");
+    }
+
+    #[test]
+    fn light_mode_without_a_wallpaper_palette_uses_the_configured_seed() {
+        let mut panel = crate::config::default_config().panel;
+        panel.theme_mode = Some("light".to_string());
+        let derived = active(None, &panel).expect("light mode always has a palette");
+        assert!(lightness(&derived.bg) > 0.85);
+        panel.theme_mode = None;
+        assert!(active(None, &panel).is_none(), "dark mode keeps the historic behaviour");
+    }
 
     /// Lightness of a `#rrggbb` string (HSL's `l`).
     fn lightness(hex: &str) -> f32 {

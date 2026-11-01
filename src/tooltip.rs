@@ -8,7 +8,7 @@ use crate::text_width;
 use crate::tray;
 use crate::{
     panel_anchor, panel_font, panel_thickness, popup_output_option, popup_style, styled_box,
-    BarTooltip, DEFAULT_FONT_SIZE, SCREEN_HEIGHT, SCREEN_WIDTH,
+    BarTooltip, DEFAULT_FONT_SIZE,
 };
 use crate::{Message, Panel};
 use iced::font::Font;
@@ -98,6 +98,57 @@ pub(crate) fn tooltip_cursor_point(panel: &Panel) -> (i32, i32) {
     tray::cursor_output_point(panel).unwrap_or((0, 0))
 }
 
+/// The focused output's logical size, the surface the tooltip must be
+/// clamped into. Reading it live avoids the global `SCREEN_*` values
+/// written by whichever panel rendered last (two bars on different
+/// resolutions would otherwise place the tooltip with the wrong height).
+pub(crate) fn tooltip_screen_size() -> (i32, i32) {
+    crate::focused_screen_size()
+}
+
+/// The bar edge under the cursor, from a point inside the bar: the
+/// layout's orientation decides which axis to inspect, so a bottom bar
+/// gets a tooltip above it even when the global config anchor says
+/// "top".
+pub(crate) fn bar_edge(
+    at: (i32, i32),
+    thickness: i32,
+    sw: i32,
+    sh: i32,
+    vertical: bool,
+) -> Option<Anchor> {
+    let gap = TOOLTIP_GAP as i32;
+    if vertical {
+        if at.0 <= thickness + gap {
+            Some(Anchor::Left)
+        } else if at.0 >= sw - thickness - gap {
+            Some(Anchor::Right)
+        } else {
+            None
+        }
+    } else if at.1 <= thickness + gap {
+        Some(Anchor::Top)
+    } else if at.1 >= sh - thickness - gap {
+        Some(Anchor::Bottom)
+    } else {
+        None
+    }
+}
+
+/// The bar's anchored edge and its surface origin inside the output,
+/// inferred from the live cursor. The shared state only carries the
+/// first panel's anchor, so every popup opened from a secondary bar
+/// (tooltip, graph link and calendar) must derive its own.
+pub(crate) fn cursor_bar(panel: &Panel) -> (Anchor, (i32, i32)) {
+    let at = tooltip_cursor_point(panel);
+    let thickness = panel_thickness(&panel.config) as i32;
+    let (sw, sh) = tooltip_screen_size();
+    let vertical = panel.config.panel.section_layout.as_deref() == Some("vertical");
+    let anchor =
+        bar_edge(at, thickness, sw, sh, vertical).unwrap_or_else(|| panel_anchor(&panel.config));
+    (anchor, tray::bar_origin_for(anchor, thickness, sw, sh))
+}
+
 /// The cursor's global position straight from the compositor.
 pub(crate) fn hyprctl_cursor_global() -> Option<(i32, i32)> {
     let out = std::process::Command::new("hyprctl")
@@ -151,15 +202,17 @@ pub(crate) fn tooltip_open(panel: &mut Panel, id: String, text: String) -> Comma
     }
     let font = panel_font(&panel.config);
     let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
-    let (sw, sh) = unsafe { (SCREEN_WIDTH as i32, SCREEN_HEIGHT as i32) };
+    let (sw, sh) = tooltip_screen_size();
     let budget = (sw as u32 / 2).saturating_sub(2 * MENU_PAD);
     let (text_w, text_h, fitted) = tooltip_fit(&font, font_size, &text, budget);
     let w = text_w.saturating_add(2 * MENU_PAD).max(48);
     let h = text_h.saturating_add(2 * MENU_PAD);
     let at = tooltip_cursor_point(panel);
     let thickness = panel_thickness(&panel.config) as i32;
-    let (anchor, margin) =
-        tooltip_placement(panel_anchor(&panel.config), at, w, h, thickness, sw, sh);
+    let vertical = panel.config.panel.section_layout.as_deref() == Some("vertical");
+    let anchor = bar_edge(at, thickness, sw, sh, vertical)
+        .unwrap_or_else(|| panel_anchor(&panel.config));
+    let (anchor, margin) = tooltip_placement(anchor, at, w, h, thickness, sw, sh);
     let (win, open) = Message::layershell_open(NewLayerShellSettings {
         size: LayerSize::px(w, h),
         layer: Layer::Overlay,
@@ -260,6 +313,18 @@ mod tests {
     /// inner side of the screen — a top bar's drops below the surface —
     /// centred on the cursor and clamped inside the output.
     #[test]
+    fn bar_edge_follows_the_cursor_side() {
+        assert_eq!(bar_edge((100, 10), 28, 1920, 1080, false), Some(Anchor::Top));
+        assert_eq!(
+            bar_edge((100, 1070), 28, 1920, 1080, false),
+            Some(Anchor::Bottom),
+            "a bottom bar gets its tooltip above"
+        );
+        assert_eq!(bar_edge((100, 500), 28, 1920, 1080, false), None);
+        assert_eq!(bar_edge((10, 500), 28, 1920, 1080, true), Some(Anchor::Left));
+        assert_eq!(bar_edge((1910, 500), 28, 1920, 1080, true), Some(Anchor::Right));
+    }
+
     fn tooltip_placement_sits_off_the_bar_and_inside_the_output() {
         // Top bar: below the surface (bar 30 + gap 8), centred on x.
         let (a, m) = tooltip_placement(Anchor::Top, (100, 15), 80, 20, 30, 1920, 1080);

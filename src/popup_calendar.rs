@@ -9,7 +9,7 @@ use crate::text_width;
 use crate::tray;
 use crate::{
     corner_radius, panel_font, placement_rect, popup_output_option, popup_style, styled_box,
-    CalendarPopup, Message, Panel, DEFAULT_FONT_SIZE, SCREEN_HEIGHT, SCREEN_WIDTH,
+    CalendarPopup, Message, Panel, DEFAULT_FONT_SIZE,
 };
 use iced::widget::container::Style as ContainerStyle;
 use iced::widget::{container, text, Column, MouseArea, Row, Space};
@@ -75,14 +75,16 @@ pub(crate) fn calendar_hover_sync(
     }
     let weekdays = calendar::weekday_labels();
     let (w, h) = calendar_size(&panel.config, &weekdays);
-    let (sw, sh) = unsafe { (SCREEN_WIDTH as i32, SCREEN_HEIGHT as i32) };
+    let (sw, sh) = crate::focused_screen_size();
     let (anchor, margin) = menu_placement(x, y, w, h, sw, sh);
     let rect = placement_rect(anchor, &margin, w, h, sw, sh);
     // Where the surface really lands: the bar's reservation on the
     // shared edge pushes it, so the pointer tests below must not use
     // the intended rect (it contains the cursor while the surface,
-    // e.g. for a top bar, sits a zone lower).
-    let surface = shifted_surface_rect(rect, anchor, panel.last_anchor, panel.last_exclusive_zone);
+    // e.g. for a top bar, sits a zone lower). The bar edge comes from
+    // the cursor, not the shared state's first-panel anchor.
+    let (bar_anchor, _) = crate::tooltip::cursor_bar(panel);
+    let surface = shifted_surface_rect(rect, anchor, bar_anchor, panel.last_exclusive_zone);
     let (id, open) = Message::layershell_open(NewLayerShellSettings {
         size: LayerSize::px(w, h),
         layer: Layer::Overlay,

@@ -39,14 +39,19 @@ pub(crate) fn panel_size(
     let vertical = layout == "vertical";
     let thickness = panel_thickness(config);
 
+    // Mirror mode: one surface per output, so the main axis fills
+    // whatever monitor the compositor binds it to instead of one
+    // monitor's size.
+    let all = config.panel.output.as_deref() == Some("all");
+    let fill = iced_exwlshell::settings::Extent::Fill;
     let (width, height) = if vertical {
         (
             iced_exwlshell::settings::Extent::px(thickness),
-            iced_exwlshell::settings::Extent::px(screen_height),
+            if all { fill } else { iced_exwlshell::settings::Extent::px(screen_height) },
         )
     } else {
         (
-            iced_exwlshell::settings::Extent::px(screen_width),
+            if all { fill } else { iced_exwlshell::settings::Extent::px(screen_width) },
             iced_exwlshell::settings::Extent::px(thickness),
         )
     };
@@ -67,6 +72,11 @@ pub(crate) fn panel_size(
 /// * vertical,   left   -> `Left`
 /// * vertical,   right  -> `Right`
 pub(crate) fn panel_anchor(config: &config::Config) -> Anchor {
+    panel_anchor_for(config, config.panel.anchor.as_deref())
+}
+
+/// Anchor from an explicit per-layout value (`panel.anchor` when `None`).
+pub(crate) fn panel_anchor_for(config: &config::Config, anchor: Option<&str>) -> Anchor {
     let vertical = config
         .panel
         .section_layout
@@ -78,11 +88,7 @@ pub(crate) fn panel_anchor(config: &config::Config) -> Anchor {
     // Edge from `anchor` (default: top for horizontal, left for vertical);
     // `align` positions the panel INSIDE the surface, it does not pick the
     // edge — reading it here ignored `panel.anchor` completely.
-    let anchor = config
-        .panel
-        .anchor
-        .as_deref()
-        .unwrap_or(if vertical { "left" } else { "top" });
+    let anchor = anchor.unwrap_or(if vertical { "left" } else { "top" });
 
     if vertical {
         match anchor {
@@ -105,16 +111,35 @@ pub(crate) fn panel_anchor(config: &config::Config) -> Anchor {
 /// `fill` keeps the first/last section at the panel ends (both flush when a
 /// single section fills the row), `left`/`top` parks only the first one
 /// there, `right`/`bottom` only the last, `center` none.
+#[cfg(test)]
 pub(crate) fn section_touch(config: &config::Config, idx: usize, count: usize) -> [bool; 4] {
+    section_touch_for(
+        config,
+        panel_anchor(config),
+        config.panel.align.as_deref().unwrap_or("center"),
+        idx,
+        count,
+    )
+}
+
+/// Touch sides of section `idx` of `count` on one panel: the section
+/// borders that sit against the screen edge for that panel's anchor and
+/// align. The shared styles resolve the root panel's values; the view
+/// recomputes with the layout it is drawing.
+pub(crate) fn section_touch_for(
+    config: &config::Config,
+    anchor: Anchor,
+    align: &str,
+    idx: usize,
+    count: usize,
+) -> [bool; 4] {
     let vertical = config.panel.section_layout.as_deref() == Some("vertical");
-    let anchor = panel_anchor(config);
     let mut touch = [
         anchor.contains(Anchor::Top),
         anchor.contains(Anchor::Right),
         anchor.contains(Anchor::Bottom),
         anchor.contains(Anchor::Left),
     ];
-    let align = config.panel.align.as_deref().unwrap_or("center");
     let at_start = if vertical {
         align == "top"
     } else {
@@ -206,6 +231,21 @@ mod tests {
         assert_eq!(section_touch(&cfg, 0, 2), [true, false, false, true]);
         assert_eq!(section_touch(&cfg, 1, 2), [false, false, false, true]);
     }
+    /// A section on a secondary panel squares the sides of THAT panel:
+    /// bottom-anchored, right-aligned, the last section touches bottom+right.
+    #[test]
+    fn section_touch_for_follows_the_panel_anchor() {
+        let cfg = crate::config::default_config();
+        assert_eq!(
+            section_touch_for(&cfg, Anchor::Bottom, "right", 1, 2),
+            [false, true, true, false]
+        );
+        assert_eq!(
+            section_touch_for(&cfg, Anchor::Top, "left", 0, 2),
+            [true, false, false, true]
+        );
+    }
+
     /// A corner squares when either of its sides touches (roadmap M3): a
     /// top-anchored row's first section keeps only the bottom-right rounding,
     /// and a section touching nothing keeps the pre-M3 look on all corners.

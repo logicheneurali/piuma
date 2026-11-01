@@ -1352,7 +1352,7 @@ fn source_previews_carry_a_sample_reading() {
         }
     }
     assert_eq!(crate::preview::sample_value("perc_cpu"), "12%");
-    assert_eq!(crate::preview::sample_value("media"), "▶  Song — Artist");
+    assert_eq!(crate::preview::sample_value("media"), "⏵  Song — Artist");
 }
 
 /// WCAG contrast: identical colours are 1:1, black on white ~21:1, and
@@ -1504,4 +1504,83 @@ fn scroll_target_converts_window_coordinates() {
     assert_eq!(scroll_target(100.0, 0.0, 500.0), 392.0);
     assert_eq!(scroll_target(100.0, 200.0, 500.0), 592.0);
     assert_eq!(scroll_target(100.0, 0.0, 50.0), 0.0);
+}
+
+/// The light/dark variant roundtrips through the edited file and the
+/// panel switch maps dark back to the absent key.
+#[test]
+fn theme_mode_roundtrips_and_switches() {
+    let mut s = fixture();
+    s.load_from_json(r#"{"panel":{"theme_mode":"light","sections":[]}}"#)
+        .expect("theme_mode must load");
+    assert_eq!(s.config.theme_mode.as_deref(), Some("light"));
+    let out = s.serialize().unwrap();
+    assert!(out.contains("\"theme_mode\": \"light\""), "got: {out}");
+    let _ = update(&mut s, Message::ThemeModeChanged("dark".to_string()));
+    assert!(s.config.theme_mode.is_none(), "dark keeps the file minimal");
+    let _ = update(&mut s, Message::ThemeModeChanged("light".to_string()));
+    assert_eq!(s.config.theme_mode.as_deref(), Some("light"));
+}
+
+/// The output setting roundtrips and `auto` drops the key again.
+#[test]
+fn output_roundtrips_and_auto_clears() {
+    let mut s = fixture();
+    s.load_from_json(r#"{"panel":{"output":"HDMI-A-2","sections":[]}}"#)
+        .expect("output must load");
+    assert_eq!(s.config.output.as_deref(), Some("HDMI-A-2"));
+    let out = s.serialize().unwrap();
+    assert!(out.contains("\"output\": \"HDMI-A-2\""), "got: {out}");
+    let _ = update(&mut s, Message::OutputChanged("auto".to_string()));
+    assert!(s.config.output.is_none(), "auto is the absent key");
+    let _ = update(&mut s, Message::OutputChanged("eDP-1".to_string()));
+    assert_eq!(s.config.output.as_deref(), Some("eDP-1"));
+}
+
+/// Multiple panels: the first layout fills the root panel fields, extras
+/// stay separate, and save writes the whole array again.
+#[test]
+fn panels_roundtrip_and_edit() {
+    let mut s = fixture();
+    s.load_from_json(
+        r#"{"panel":{"sections":[
+            {"name":"Workspace","sensors":[]},
+            {"name":"Stats","sensors":[]}
+        ]},"panels":[
+            {"output":"HDMI-A-2","anchor":"top","sections":["Workspace"]},
+            {"output":"eDP-1","anchor":"bottom","align":"fill","sections":["Stats"]}
+        ]}"#,
+    )
+    .expect("panels must load");
+    assert_eq!(s.config.output.as_deref(), Some("HDMI-A-2"));
+    assert_eq!(s.config.visible_sections, Some(vec!["Workspace".to_string()]));
+    assert_eq!(s.config.panels.len(), 1);
+    assert_eq!(s.config.panels[0].output.as_deref(), Some("eDP-1"));
+    assert_eq!(s.config.panels[0].sections_text, "Stats");
+
+    let out = s.serialize().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let layouts = json["panels"].as_array().expect("panels array");
+    assert_eq!(layouts.len(), 2, "{out}");
+    assert_eq!(layouts[1]["anchor"], "bottom");
+
+    let _ = update(&mut s, Message::PanelAdded);
+    assert!(
+        s.field_err("panels[2].sections").is_some(),
+        "an empty secondary panel is flagged"
+    );
+    let _ = update(&mut s, Message::PanelSectionsChanged(1, "Workspace, Stats".to_string()));
+    assert_eq!(s.config.panels.len(), 2);
+    assert!(
+        s.field_err("panels[2].sections").is_none(),
+        "sections clear the error"
+    );
+    assert_eq!(
+        s.config.panels[1].sections,
+        Some(vec!["Workspace".to_string(), "Stats".to_string()])
+    );
+    let _ = update(&mut s, Message::PanelRemoved(1));
+    assert_eq!(s.config.panels.len(), 1);
+    let _ = update(&mut s, Message::RootSectionsChanged("Stats".to_string()));
+    assert_eq!(s.config.visible_sections, Some(vec!["Stats".to_string()]));
 }

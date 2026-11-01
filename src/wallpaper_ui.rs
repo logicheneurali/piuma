@@ -105,6 +105,14 @@ pub(crate) fn sync_wallpaper(panel: &mut Panel) -> Command<Message> {
 /// the next rebuild resolves the user's own configured colours again:
 /// nothing is ever written back to the config file.
 pub(crate) fn sync_palette(panel: &mut Panel) -> Command<Message> {
+    // The mode may have changed on a config reload: switch the active
+    // variant before anything else reads it.
+    if apply_variant(panel) {
+        restyle(panel);
+        if let Some(path) = crate::CONFIG_PATH.get() {
+            crate::app_theme::sync(Path::new(path), &panel.config.panel, panel.palette.as_ref());
+        }
+    }
     let cfg = &panel.config.panel;
     let wanted = cfg
         .wallpaper_palette
@@ -124,18 +132,20 @@ pub(crate) fn sync_palette(panel: &mut Panel) -> Command<Message> {
                 .then_some((w.path.clone(), mtime))
         });
     let Some(key) = wanted else {
-        // Dropping a palette that was live re-resolves the chains
-        // back to the configured colours (see `restyle`); an already
-        // empty palette needs no work.
-        if panel.palette.is_some() {
-            panel.palette = None;
-            panel.palette_key = None;
+        // Dropping a palette that was live re-resolves the chains back
+        // to the configured colours (light mode still derives its
+        // synthetic light seed from them).
+        let had = panel.palette_seed.is_some() || panel.palette.is_some();
+        panel.palette_seed = None;
+        panel.palette_key = None;
+        if had && apply_variant(panel) {
             restyle(panel);
-            // The app themes derive from the same tones: re-render them
-            // with the configured colours, or they would keep the
-            // wallpaper palette after it was switched off.
             if let Some(path) = crate::CONFIG_PATH.get() {
-                crate::app_theme::sync(std::path::Path::new(path), &panel.config.panel, None);
+                crate::app_theme::sync(
+                    Path::new(path),
+                    &panel.config.panel,
+                    panel.palette.as_ref(),
+                );
             }
         }
         return Command::none();
@@ -154,6 +164,18 @@ pub(crate) fn sync_palette(panel: &mut Panel) -> Command<Message> {
         },
         move |pal| Message::PaletteReady(pal, key),
     )
+}
+
+/// Point `panel.palette` at the active variant of the extracted seed (or
+/// at the synthetic light seed when there is none). Returns whether it
+/// changed, so the caller re-styles only then.
+fn apply_variant(panel: &mut Panel) -> bool {
+    let next = palette::active(panel.palette_seed.as_ref(), &panel.config.panel);
+    if panel.palette == next {
+        return false;
+    }
+    panel.palette = next;
+    true
 }
 
 /// Pure part of the wallpaper sync: outputs that still need a window

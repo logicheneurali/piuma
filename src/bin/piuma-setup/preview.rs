@@ -44,7 +44,7 @@ pub(crate) fn sample_value(source_type: &str) -> &'static str {
         "window" => "Firefox — Piuma",
         "workspace" => "2",
         "workspace_dots" => "",
-        "media" => "▶  Song — Artist",
+        "media" => "⏵  Song — Artist",
         "tray" => "",
         "notifications" => "3 new",
         "taskbar" => "",
@@ -137,16 +137,31 @@ fn parse(value: Option<&String>) -> Option<Color> {
 fn paint(cfg: &PiumaConfig, section: Option<&Section>, sensor: &Sensor) -> Paint {
     let defaults = &cfg.sensor_defaults;
     let sec = section;
-    let text = parse(sensor.text_color.as_ref())
+    let light = cfg.theme_mode.as_deref() == Some("light");
+    let mut text = parse(sensor.text_color.as_ref())
         .or_else(|| parse(defaults.text_color.as_ref()))
         .or_else(|| sec.and_then(|s| parse(s.text_color.as_ref())))
         .or_else(|| parse(cfg.section_defaults.text_color.as_ref()))
         .or_else(|| parse(cfg.default_text_color.as_ref()))
         .unwrap_or(SETUP_DEFAULT_FG);
-    let bg = parse(sensor.bg_color.as_ref())
+    let mut bg = parse(sensor.bg_color.as_ref())
         .or_else(|| parse(defaults.bg_color.as_ref()))
         .or_else(|| sec.and_then(|s| parse(s.bg_color.as_ref())))
         .or_else(|| parse(cfg.section_defaults.bg_color.as_ref()));
+    if light {
+        // Explicit sensor AND section colours are user accents and stay
+        // as they are; inherited/default surfaces follow the variant.
+        let explicit_text = sensor.text_color.is_some()
+            || sec.and_then(|s| s.text_color.as_ref()).is_some();
+        let explicit_bg = sensor.bg_color.is_some()
+            || sec.and_then(|s| s.bg_color.as_ref()).is_some();
+        if !explicit_text {
+            text = crate::style::light_text(text);
+        }
+        if !explicit_bg {
+            bg = bg.map(|c| crate::style::light_surface(c, 0.90));
+        }
+    }
     let border = parse(sensor.border_color.as_ref())
         .or_else(|| parse(defaults.border_color.as_ref()))
         .or_else(|| sec.and_then(|s| parse(s.border_color.as_ref())))

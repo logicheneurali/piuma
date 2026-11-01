@@ -41,6 +41,7 @@ mod hypr;
 mod icons;
 mod instance_lock;
 mod layouts;
+mod logging;
 mod menus;
 mod mpris;
 mod notifications;
@@ -59,10 +60,15 @@ mod volume_ui;
 mod wallpaper_ui;
 mod windows;
 mod workspace;
+#[allow(dead_code)]
+mod xdg;
 
 use corners::{corners_view, sync_corners};
 use fill_sections::FillSections;
-use geometry::{corner_radius, panel_anchor, panel_size, panel_thickness, placement_rect};
+use geometry::{
+    corner_radius, panel_anchor, panel_anchor_for, panel_size, panel_thickness, placement_rect,
+    section_touch_for,
+};
 use menus::{
     fit_menu_labels, menu_arrow_h, menu_placement, menu_row_h, menu_size_shown,
     taskbar_menu_size, taskbar_menu_view, tray_menu_view, MENU_MAX_ROWS, MENU_PAD,
@@ -204,10 +210,6 @@ pub(crate) struct SectionData {
     pub(crate) border_width: u16,
     pub(crate) border_radius: u16,
     pub(crate) border_type: String,
-    /// Which sides `[top, right, bottom, left]` sit flush on a screen edge
-    /// with `section_defaults.respect_screen_edges` active (roadmap M3):
-    /// those sides render square instead of rounded.
-    pub(crate) touch: [bool; 4],
     pub(crate) sensors: Vec<SensorValue>,
 }
 
@@ -257,7 +259,6 @@ pub(crate) struct SectionStyle {
     pub(crate) border_width: u16,
     pub(crate) border_radius: u16,
     pub(crate) border_type: String,
-    pub(crate) touch: [bool; 4],
     pub(crate) sensors: Vec<SensorStyle>,
 }
 
@@ -410,10 +411,12 @@ pub(crate) struct Panel {
     /// empty while the feature is off.
     pub(crate) corners: Vec<(String, iced::window::Id)>,
     /// Colours derived from the wallpaper (`panel.wallpaper_palette`):
-    /// applied over the configured defaults while present, dropped when
-    /// the option or the wallpaper turns off. Runtime-only — never
-    /// written back to the config file.
+    /// the active dark/light variant the bar draws with. Runtime-only —
+    /// never written back to the config file.
     pub(crate) palette: Option<palette::Palette>,
+    /// The extracted dark seed: `palette` is its active variant (light
+    /// when `panel.theme_mode` asks for it).
+    pub(crate) palette_seed: Option<palette::Palette>,
     /// The wallpaper file (path + mtime) the current palette was
     /// extracted from: the extraction re-runs only when this changes.
     pub(crate) palette_key: Option<(String, SystemTime)>,
@@ -425,6 +428,20 @@ pub(crate) struct Panel {
     /// check, which layouts already applied and the "✓ saved" flash
     /// clock.
     pub(crate) layout_state: layouts::LayoutState,
+}
+
+/// The runtime root: one shared `Panel` state (sections, readings, tray,
+/// notifications) and one window per configured layout. The layouts only
+/// choose output/placement and which named sections each window draws;
+/// section definitions stay global, so the same reading feeds every bar.
+pub(crate) struct App {
+    pub(crate) state: Panel,
+    pub(crate) layouts: Vec<config::PanelLayout>,
+    /// Logical size of each layout's output (used for popup geometry).
+    pub(crate) screens: Vec<(u32, u32)>,
+    /// Layershell window → layout index. The initial window (created by
+    /// the daemon) is not in the map and defaults to layout 0.
+    pub(crate) windows: HashMap<iced::window::Id, usize>,
 }
 
 /// One open tray menu: which item it belongs to (the item's bus + path
@@ -479,6 +496,13 @@ pub(crate) struct GraphPopup {
     /// past the bar's reserved strip, so the real surface rect derives
     /// from `rect` + the anchor (see `popup_surface_rect`).
     pub(crate) anchor: Anchor,
+    /// The edge the bar this sensor belongs to anchors to, and that
+    /// bar's origin inside its output. Snapshot at open: the shared
+    /// state's `last_anchor` is the first panel's, so a popup opened
+    /// from a bottom bar must carry its own to shift the surface and
+    /// lift the sensor rect correctly.
+    pub(crate) bar_anchor: Anchor,
+    pub(crate) bar_origin: (i32, i32),
     /// The sensor box's on-screen rect in output space, as answered by
     /// `FindSensorRect`: the connector window is pinned to it.
     pub(crate) sensor_rect: Option<(i32, i32, i32, i32)>,
@@ -1151,7 +1175,6 @@ fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<Command<Mess
             border_width: section_style.border_width,
             border_radius: section_style.border_radius,
             border_type: section_style.border_type.clone(),
-            touch: section_style.touch,
             sensors,
         });
     }
@@ -1207,7 +1230,14 @@ fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<Command<Mess
     cmds
 }
 
-fn update(panel: &mut Panel, message: Message) -> Command<Message> {
+/// Top-level update: every panel window shares one `Panel` state (one set
+/// of readings, tray items and notifications), so the messages need no
+/// panel index; the layouts only change rendering and window placement.
+fn update(app: &mut App, message: Message) -> Command<Message> {
+    update_panel(&mut app.state, message)
+}
+
+fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
     match message {
         Message::OpenSetup => {
             open_setup();
@@ -1349,7 +1379,8 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
         Message::PaletteReady(pal, key) => {
             // The next view applies the tones — or resolves the user's
             // own colours again when the extraction failed (`None`).
-            panel.palette = pal;
+            panel.palette_seed = pal;
+            panel.palette = palette::active(panel.palette_seed.as_ref(), &panel.config.panel);
             panel.palette_key = Some(key);
             // The palette feeds the same colour chains as the config
             // (`restyle`): every chain re-resolves once, not per tick.
@@ -1579,7 +1610,7 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             }
             let font = panel_font(&panel.config);
             let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
-            let (sw, sh) = unsafe { (SCREEN_WIDTH as i32, SCREEN_HEIGHT as i32) };
+            let (sw, sh) = crate::focused_screen_size();
             // Cap the visible rows by both the private maximum and the
             // output height, so an over-long menu (a 116-row update menu)
             // scrolls instead of opening with its first rows off-screen.
@@ -1927,7 +1958,7 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
             let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
             let font = panel_font(&panel.config);
             let (w, h) = taskbar_menu_size(&font, font_size);
-            let (sw, sh) = unsafe { (SCREEN_WIDTH as i32, SCREEN_HEIGHT as i32) };
+            let (sw, sh) = crate::focused_screen_size();
             let (anchor, margin) = menu_placement(at.0, at.1, w, h, sw, sh);
             let (id, open) = Message::layershell_open(NewLayerShellSettings {
                 size: LayerSize::px(w, h),
@@ -2052,11 +2083,12 @@ fn update(panel: &mut Panel, message: Message) -> Command<Message> {
         }
         Message::SensorRectFound(section, sensor, rect) => {
             // The queried bounds are in the bar window's coordinates:
-            // lift them to output space (the bar sits inside the output
-            // at its anchor) — the popup's own rects live there too.
-            let (ox, oy) = tray::bar_origin(panel);
+            // lift them to output space by the origin of the bar this
+            // popup opened from (a bottom bar's window starts at the
+            // output's bottom edge, not at y=0).
             if let Some(gp) = panel.graph_popup.as_mut() {
                 if (gp.section, gp.sensor) == (section, sensor) {
+                    let (ox, oy) = gp.bar_origin;
                     gp.sensor_rect = Some((rect.0 + ox, rect.1 + oy, rect.2 + ox, rect.3 + oy));
                 }
             }
@@ -2093,7 +2125,8 @@ pub(crate) fn icons_theme(config: &config::Config) -> Option<&str> {
 
 // ── subscription (timer + iced events) ──────────────────────────────
 
-fn subscription(panel: &Panel) -> Subscription<Message> {
+fn subscription(app: &App) -> Subscription<Message> {
+    let panel = &app.state;
     // The tray's D-Bus side runs only while a tray sensor is configured;
     // dropping it releases the watcher/host bus names automatically.
     let tray_sub = panel
@@ -2153,7 +2186,24 @@ pub(crate) static FONT_NAMES: std::sync::Mutex<Vec<(&'static str, String)>> =
 
 
 
-fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> {
+/// Root view: pick the layout for this window, publish its logical size
+/// (popup geometry reads the globals) and render the shared panel state.
+fn view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> {
+    let index = app.windows.get(&window).copied().unwrap_or(0);
+    let layout = app.layouts.get(index).unwrap_or(&app.layouts[0]);
+    let (width, height) = app.screens.get(index).copied().unwrap_or((1920, 1080));
+    unsafe {
+        SCREEN_WIDTH = width;
+        SCREEN_HEIGHT = height;
+    }
+    bar_view(&app.state, window, layout)
+}
+
+fn bar_view<'a>(
+    panel: &'a Panel,
+    window: iced::window::Id,
+    layout: &'a config::PanelLayout,
+) -> Element<'a, Message> {
     // Side windows render their own trees; only bar calls feed BAR_ID.
     if panel.wallpaper.iter().any(|(_, id)| *id == window) {
         return wallpaper_view(panel, window);
@@ -2222,7 +2272,42 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
         .value_effect
         .as_deref()
         .unwrap_or("off");
-    for (section_idx, section) in panel.sections.iter().enumerate() {
+    // The sections assigned to this panel, in bar order. An empty list is
+    // an empty panel (secondary panels must name at least one section).
+    let visible: Vec<usize> = panel
+        .sections
+        .iter()
+        .enumerate()
+        .filter_map(|(index, section)| match &layout.sections {
+            Some(names) => names.iter().any(|name| name == &section.name).then_some(index),
+            None => Some(index),
+        })
+        .collect();
+    // Screen-edge rounding follows THIS panel's anchor/align, not the
+    // root panel's: a section moved to a bottom panel must square its
+    // bottom (and only its bottom) side.
+    let respect_edges = panel
+        .config
+        .panel
+        .section_defaults
+        .as_ref()
+        .and_then(|defaults| defaults.respect_screen_edges)
+        .unwrap_or(false);
+    let touch_anchor = panel_anchor_for(&panel.config, layout.anchor.as_deref());
+    let touch_align = layout.align.as_deref().unwrap_or("center");
+    for (position, section_idx) in visible.iter().copied().enumerate() {
+        let section = &panel.sections[section_idx];
+        let touch = if respect_edges {
+            section_touch_for(
+                &panel.config,
+                touch_anchor,
+                touch_align,
+                position,
+                visible.len(),
+            )
+        } else {
+            [false; 4]
+        };
         let section_bg = section.bg_color;
         let section_text = section.text_color;
         // The `panel.section_title` toggle can hide the title entirely.
@@ -2716,7 +2801,7 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
             section.border_width,
             section.border_radius,
             &section.border_type,
-            section.touch,
+            touch,
             iced::Padding::ZERO,
             if vertical { Length::Fill } else { Length::Shrink },
             if vertical { Length::Shrink } else { Length::Fill },
@@ -2727,12 +2812,7 @@ fn view<'a>(panel: &'a Panel, window: iced::window::Id) -> Element<'a, Message> 
 
     // `align` decides how the sections are spread inside the surface; read
     // it before building the layout so `fill` can pick its own container.
-    let align = panel
-        .config
-        .panel
-        .align
-        .as_deref()
-        .unwrap_or("center");
+    let align = layout.align.as_deref().unwrap_or("center");
     let fill = align == "fill";
 
     // Build the full panel layout. The main axis shrinks to the content (so
@@ -3171,7 +3251,7 @@ fn hover_sync(panel: &mut Panel, section: usize, sensor: usize, hovered: bool) -
 
 // ── style ───────────────────────────────────────────────────────────
 
-fn style(_panel: &Panel, _theme: &iced::Theme) -> iced::theme::Style {
+fn style(_app: &App, _theme: &iced::Theme) -> iced::theme::Style {
     // Root stays transparent: the panel background is drawn by the inner
     // container, and a root background would force the surface to the whole
     // screen.
@@ -3187,11 +3267,8 @@ fn main() -> Result<(), iced_exwlshell::Error> {
     // Parse CLI args for config path.
     let config_path = parse_config_arg();
 
-    // Initialise logging.
-    let _ = simple_logger::SimpleLogger::new()
-        .env()
-        .with_utc_timestamps()
-        .init();
+    // Initialise logging (RUST_LOG level, UTC timestamps on stderr).
+    logging::init();
 
     eprintln!("[piuma] Starting …");
 
@@ -3254,10 +3331,30 @@ fn main() -> Result<(), iced_exwlshell::Error> {
     // so the palette does not leak into a Plasma/GNOME session.
     app_theme::install_exit_cleanup(resolved_config_path.clone(), config.panel.clone());
 
-    // Best-effort primary monitor dimensions for screen-wide surface sizing.
+    // One window per configured layout; the first one is the daemon's
+    // initial surface, the others are opened from the boot task below.
+    let layouts = config::panel_layouts(&config);
+    let screens: Vec<(u32, u32)> = layouts
+        .iter()
+        .map(|layout| screen_size_for(layout.output.as_deref()))
+        .collect();
     unsafe {
-        SCREEN_WIDTH = active_screen_width().unwrap_or(1920);
-        SCREEN_HEIGHT = active_screen_height().unwrap_or(1080);
+        SCREEN_WIDTH = screens[0].0;
+        SCREEN_HEIGHT = screens[0].1;
+    }
+    for (index, layout) in layouts.iter().enumerate() {
+        if let Some(name) = layout
+            .output
+            .as_deref()
+            .filter(|o| !o.is_empty() && *o != "auto" && *o != "all")
+        {
+            if !monitor_names().iter().any(|output| output == name) {
+                eprintln!(
+                    "[piuma] panel {}: output {name:?} not found — falling back to the focused monitor",
+                    index + 1
+                );
+            }
+        }
     }
 
     let _ = CONFIG.set(config.clone());
@@ -3270,25 +3367,29 @@ fn main() -> Result<(), iced_exwlshell::Error> {
     let handle = std::thread::Builder::new()
         .name("piuma-panel".to_string())
         .spawn(move || {
+            let boot_layouts = layouts.clone();
+            let boot_screens = screens.clone();
             let outcome = daemon(
-                || {
+                move || {
                     let cfg = CONFIG
                         .get()
                         .cloned()
                         .unwrap_or_else(|| config::default_config());
+                    let layouts = boot_layouts.clone();
+                    let screens = boot_screens.clone();
                     // Initial geometry (size, anchor, exclusive zone) must
                     // match what wl_settings applies at startup, so reloads
                     // only emit LayoutChange/ExclusiveZoneChange on change.
-                    let size = panel_size(&cfg, unsafe { SCREEN_WIDTH }, unsafe { SCREEN_HEIGHT });
-                    let anchor = panel_anchor(&cfg);
+                    let size = panel_size(&cfg, screens[0].0, screens[0].1);
+                    let anchor = panel_anchor_for(&cfg, layouts[0].anchor.as_deref());
                     let zone = panel_thickness(&cfg) as i32;
                     let graphs = graphs::History::new(&cfg.panel.sections);
                     // Colour chains resolve once, off the tick (see
                     // `restyle`): the palette starts absent, so the
                     // configured defaults lead until one arrives.
                     let styles = resolve_styles(&cfg, None);
-                    Panel {
-                        config: cfg,
+                    let state = Panel {
+                        config: cfg.clone(),
                         sections: Vec::new(),
                         styles,
                         read_pending: false,
@@ -3323,10 +3424,39 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         wallpaper_hidden: Vec::new(),
                         corners: Vec::new(),
                         palette: None,
+                        palette_seed: None,
                         palette_key: None,
                         hypr: None,
                         layout_state: layouts::LayoutState::default(),
+                    };
+                    let mut app = App {
+                        state,
+                        layouts,
+                        screens,
+                        windows: HashMap::new(),
+                    };
+                    // The daemon owns the first window; open one more
+                    // layershell per extra panel and remember the mapping.
+                    let mut task: Command<Message> = Command::none();
+                    for index in 1..app.layouts.len() {
+                        let layout = app.layouts[index].clone();
+                        let (width, height) = app.screens[index];
+                        let (id, open) = Message::layershell_open(NewLayerShellSettings {
+                            size: panel_size(&cfg, width, height),
+                            layer: Layer::Top,
+                            anchor: panel_anchor_for(&cfg, layout.anchor.as_deref()),
+                            exclusive_zone: Some(panel_thickness(&cfg) as i32),
+                            margin: None,
+                            keyboard_interactivity: KeyboardInteractivity::None,
+                            output_option: layout_output_option(&layout),
+                            events_transparent: false,
+                            namespace: Some(format!("piuma-{}", index + 1)),
+                            blur_option: Default::default(),
+                        });
+                        app.windows.insert(id, index);
+                        task = Command::batch([task, open]);
                     }
+                    (app, task)
                 },
                 namespace,
                 update,
@@ -3336,13 +3466,13 @@ fn main() -> Result<(), iced_exwlshell::Error> {
             .style(style)
             .wl_settings(ExWlSettings {
                 layer_settings: LayerShellSettings {
-                    size: panel_size(&panel_config, unsafe { SCREEN_WIDTH }, unsafe { SCREEN_HEIGHT }),
+                    size: panel_size(&panel_config, screens[0].0, screens[0].1),
                     // Reserve exactly the configured thickness: a constant
                     // here would leave dead space whenever thickness != 32.
                     exclusive_zone: panel_thickness(&panel_config) as i32,
-                    anchor: panel_anchor(&panel_config),
+                    anchor: panel_anchor_for(&panel_config, layouts[0].anchor.as_deref()),
                     layer: Layer::Top,
-                    start_mode: StartMode::Active,
+                    start_mode: start_mode_for_layout(&layouts[0]),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -3373,33 +3503,95 @@ fn main() -> Result<(), iced_exwlshell::Error> {
 }
 
 /// Best-effort primary monitor width, via `hyprctl`.
-fn active_screen_width() -> Option<u32> {
-    let output = std::process::Command::new("hyprctl")
-        .args(["monitors", "-j"])
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    // Take the first monitor's width field.
-    let key = "\"width\"";
-    let mut parts = text.rsplitn(2, key);
-    let after = parts.next()?;
-    let num_part = after.split(':').next()?;
-    num_part.trim().trim_matches(|c: char| c == ',' || c.is_whitespace()).parse::<u32>().ok()
+/// The layer-shell start mode selected by `panel.output`: a named output,
+/// or the compositor's focused one for `auto`/absent.
+#[cfg(test)]
+fn start_mode_for(panel: &config::PanelConfig) -> StartMode {
+    start_mode_from(panel.output.as_deref())
 }
 
-/// Best-effort primary monitor height, via `hyprctl`.
-fn active_screen_height() -> Option<u32> {
-    let output = std::process::Command::new("hyprctl")
+fn start_mode_for_layout(layout: &config::PanelLayout) -> StartMode {
+    start_mode_from(layout.output.as_deref())
+}
+
+fn start_mode_from(output: Option<&str>) -> StartMode {
+    match output.map(str::trim).filter(|name| !name.is_empty() && *name != "auto") {
+        Some("all") => StartMode::AllScreens,
+        Some(name) => StartMode::TargetScreen(name.to_string()),
+        None => StartMode::Active,
+    }
+}
+
+/// Output for an additional panel window: an explicit monitor, otherwise
+/// the focused one (`all` is a property of the first panel only).
+fn layout_output_option(layout: &config::PanelLayout) -> OutputOption {
+    match layout
+        .output
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && *name != "auto" && *name != "all")
+    {
+        Some(name) => OutputOption::OutputName(name.to_string()),
+        None => OutputOption::Active,
+    }
+}
+
+/// `(width, height)` of the requested output, else the focused one, else
+/// the first monitor. Pure: the caller passes the `hyprctl monitors -j`
+/// document.
+pub(crate) fn screen_size_in(json: &str, output: Option<&str>) -> Option<(u32, u32)> {
+    let monitors = serde_json::from_str::<Vec<serde_json::Value>>(json).ok()?;
+    let size = |monitor: &serde_json::Value| {
+        // Hyprland reports PHYSICAL pixels; layer-shell sizes are logical,
+        // so a scaled output must be divided by its scale (eDP 2560@2 →
+        // 1280 wide).
+        let scale = monitor
+            .get("scale")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1.0)
+            .max(0.01);
+        let width = monitor.get("width")?.as_u64()? as f64 / scale;
+        let height = monitor.get("height")?.as_u64()? as f64 / scale;
+        Some((width.round() as u32, height.round() as u32))
+    };
+    let named = output
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && *name != "auto")
+        .and_then(|name| {
+            monitors
+                .iter()
+                .find(|m| m.get("name").and_then(|v| v.as_str()) == Some(name))
+        })
+        .and_then(size);
+    named
+        .or_else(|| {
+            monitors
+                .iter()
+                .find(|m| m.get("focused").and_then(|v| v.as_bool()) == Some(true))
+                .and_then(size)
+        })
+        .or_else(|| monitors.first().and_then(size))
+}
+
+/// Logical size of the focused output: popups/menus opened under the
+/// cursor must clamp to the monitor they actually open on, not to the
+/// last panel that happened to render.
+pub(crate) fn focused_screen_size() -> (i32, i32) {
+    focused_output()
+        .map(|(name, _, _)| screen_size_for(Some(&name)))
+        .map(|(width, height)| (width as i32, height as i32))
+        .unwrap_or(unsafe { (SCREEN_WIDTH as i32, SCREEN_HEIGHT as i32) })
+}
+
+/// [`screen_size_in`] against the live compositor; 1920×1080 when
+/// `hyprctl` cannot answer.
+pub(crate) fn screen_size_for(output: Option<&str>) -> (u32, u32) {
+    std::process::Command::new("hyprctl")
         .args(["monitors", "-j"])
         .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    // Take the first monitor's height field.
-    let key = "\"height\"";
-    let mut parts = text.rsplitn(2, key);
-    let after = parts.next()?;
-    let num_part = after.split(':').next()?;
-    num_part.trim().trim_matches(|c: char| c == ',' || c.is_whitespace()).parse::<u32>().ok()
+        .ok()
+        .and_then(|out| screen_size_in(&String::from_utf8_lossy(&out.stdout), output))
+        .unwrap_or((1920, 1080))
 }
 
 /// Parse `-c <path>` or `--config <path>` from CLI args.
@@ -3422,8 +3614,44 @@ fn parse_config_arg() -> Option<String> {
 mod tests {
     use super::{
         config, focused_output_in, icons_theme, monitor_names_json, palette, popup_card_h,
-        popup_style, setup_binary_path, HoverGate, PopupStyle,
+        popup_style, screen_size_in, setup_binary_path, start_mode_for, HoverGate, PopupStyle,
+        StartMode,
     };
+
+    /// `panel.output` selects the monitor: the size must be that output's,
+    /// with the focused monitor as the fallback.
+    #[test]
+    fn output_selects_the_screen_size_and_start_mode() {
+        let json = r#"[
+            {"name":"HDMI-A-2","width":1920,"height":1080,"scale":1.0,"focused":false},
+            {"name":"eDP-1","width":2560,"height":1600,"scale":2.0,"focused":true}
+        ]"#;
+        assert_eq!(screen_size_in(json, Some("HDMI-A-2")), Some((1920, 1080)));
+        assert_eq!(
+            screen_size_in(json, Some("eDP-1")),
+            Some((1280, 800)),
+            "physical pixels are divided by the output scale"
+        );
+        assert_eq!(screen_size_in(json, Some("auto")), Some((1280, 800)));
+        assert_eq!(screen_size_in(json, None), Some((1280, 800)));
+        assert_eq!(
+            screen_size_in(json, Some("missing")),
+            Some((1280, 800)),
+            "a missing output falls back to the focused one"
+        );
+
+        let mut panel = config::default_config().panel;
+        assert!(matches!(start_mode_for(&panel), StartMode::Active));
+        panel.output = Some("auto".to_string());
+        assert!(matches!(start_mode_for(&panel), StartMode::Active));
+        panel.output = Some("HDMI-A-2".to_string());
+        assert!(matches!(
+            start_mode_for(&panel),
+            StartMode::TargetScreen(name) if name == "HDMI-A-2"
+        ));
+        panel.output = Some("all".to_string());
+        assert!(matches!(start_mode_for(&panel), StartMode::AllScreens));
+    }
 
     /// The right-click entry point starts the installer from the same
     /// folder as the running bar, whatever that folder is.

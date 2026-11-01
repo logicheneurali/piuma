@@ -1181,16 +1181,22 @@ pub fn row<'a>(icons: &'a [TrayIcon], per_line: u16) -> Element<'a, Message> {
 /// The bar surface's corner inside the output (the bar sits at its
 /// anchor): lifts window-relative coordinates to output space.
 pub fn bar_origin(panel: &crate::Panel) -> (i32, i32) {
-    let thickness = crate::panel_thickness(&panel.config) as i32;
-    let (sw, sh) = (
+    bar_origin_for(
+        panel.last_anchor,
+        crate::panel_thickness(&panel.config) as i32,
         unsafe { crate::SCREEN_WIDTH } as i32,
         unsafe { crate::SCREEN_HEIGHT } as i32,
-    );
-    // The bar spans the output along its long axis, so only the anchored
-    // edge shifts it inside the output.
-    if panel.last_anchor == Anchor::Right {
+    )
+}
+
+/// The bar surface's origin inside its output: the bar spans the output
+/// along its long axis, so only the anchored edge shifts it. Explicit
+/// anchor/size let a secondary panel (whose edge is not the shared
+/// state's `last_anchor`) compute its own origin.
+pub fn bar_origin_for(anchor: Anchor, thickness: i32, sw: i32, sh: i32) -> (i32, i32) {
+    if anchor.contains(Anchor::Right) {
         (sw - thickness, 0)
-    } else if panel.last_anchor == Anchor::Bottom {
+    } else if anchor.contains(Anchor::Bottom) {
         (0, sh - thickness)
     } else {
         (0, 0)
@@ -1198,9 +1204,28 @@ pub fn bar_origin(panel: &crate::Panel) -> (i32, i32) {
 }
 
 pub fn cursor_output_point(panel: &crate::Panel) -> Option<(i32, i32)> {
+    // The live compositor point is output-relative once the focused
+    // output's origin is removed: it follows the bar the cursor is on,
+    // regardless of which panel last rendered. `last_cursor`/`bar_origin`
+    // remain only as a fallback, because `bar_origin` carries the shared
+    // state's anchor (top) and would put a bottom bar's menu at the top.
+    if let Some((gx, gy)) = global_cursor() {
+        let (ox, oy) = output_origin();
+        return Some((gx - ox, gy - oy));
+    }
     let (cx, cy) = panel.last_cursor?;
     let (wx, wy) = bar_origin(panel);
     Some((wx + cx as i32, wy + cy as i32))
+}
+
+/// The cursor's global logical position (`hyprctl cursorpos -j`).
+pub fn global_cursor() -> Option<(i32, i32)> {
+    let out = std::process::Command::new("hyprctl")
+        .args(["cursorpos", "-j"])
+        .output()
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    Some((v["x"].as_i64()? as i32, v["y"].as_i64()? as i32))
 }
 
 /// Screen coordinates for an SNI activation hint (hints are advisory in

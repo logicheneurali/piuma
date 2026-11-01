@@ -132,7 +132,7 @@ pub(crate) fn palette(cfg: &PiumaConfig) -> Palette {
         .border_radius
         .map(|r| (r.max(0) as f32).min(16.0))
         .unwrap_or(6.0);
-    Palette {
+    let dark = Palette {
         bg,
         fg,
         muted: mix(fg, bg, 0.45),
@@ -145,7 +145,109 @@ pub(crate) fn palette(cfg: &PiumaConfig) -> Palette {
         accent_hover,
         radius,
         pill,
+    };
+    if cfg.theme_mode.as_deref() == Some("light") {
+        light_palette(dark)
+    } else {
+        dark
     }
+}
+
+/// The light variant of the editor's tokens: configured colours are the
+/// seed (their hue survives, lightness is inverted), per-element sensor
+/// overrides keep their own colours in the previews.
+fn light_palette(dark: Palette) -> Palette {
+    let bg = light_surface(dark.bg, 0.95);
+    let fg = light_text(dark.fg);
+    let card = mix(light_surface(dark.card, 0.92), Color::BLACK, 0.05);
+    let accent = light_accent(dark.accent);
+    let accent_text = if contrast(accent, Color::WHITE) >= contrast(accent, Color::BLACK) {
+        Color::WHITE
+    } else {
+        Color::BLACK
+    };
+    Palette {
+        bg,
+        fg,
+        muted: mix(fg, bg, 0.45),
+        card,
+        card_border: mix(fg, bg, 0.82),
+        chrome: mix(bg, card, 0.4),
+        inset: mix(card, bg, 0.5),
+        accent,
+        accent_text,
+        accent_hover: mix(accent, Color::BLACK, 0.15),
+        radius: dark.radius,
+        pill: dark.pill,
+    }
+}
+
+/// Invert a surface's lightness, keeping its hue and a calm saturation.
+pub(crate) fn light_surface(c: Color, lightness: f32) -> Color {
+    let (h, s, _) = rgb_hsl(c);
+    hsl_rgb(h, s.min(0.18), lightness, c.a)
+}
+
+/// A dark text tone from the given hue.
+pub(crate) fn light_text(c: Color) -> Color {
+    let (h, s, _) = rgb_hsl(c);
+    hsl_rgb(h, s.min(0.12), 0.16, c.a)
+}
+
+fn light_accent(c: Color) -> Color {
+    let (h, s, _) = rgb_hsl(c);
+    hsl_rgb(h, s.clamp(0.35, 0.65), 0.55, c.a)
+}
+
+fn rgb_hsl(c: Color) -> (f32, f32, f32) {
+    let (r, g, b) = (c.r, c.g, c.b);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let l = (max + min) / 2.0;
+    if (max - min).abs() < f32::EPSILON {
+        return (0.0, 0.0, l);
+    }
+    let d = max - min;
+    let s = if l > 0.5 { d / (2.0 - max - min) } else { d / (max + min) };
+    let h = if max == r {
+        ((g - b) / d + if g < b { 6.0 } else { 0.0 }) / 6.0
+    } else if max == g {
+        ((b - r) / d + 2.0) / 6.0
+    } else {
+        ((r - g) / d + 4.0) / 6.0
+    };
+    (h, s, l)
+}
+
+fn hsl_rgb(h: f32, s: f32, l: f32, a: f32) -> Color {
+    if s <= 0.0 {
+        return Color { r: l, g: l, b: l, a };
+    }
+    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let p = 2.0 * l - q;
+    let channel = |mut t: f32| {
+        if t < 0.0 { t += 1.0; }
+        if t > 1.0 { t -= 1.0; }
+        if t < 1.0 / 6.0 {
+            p + (q - p) * 6.0 * t
+        } else if t < 1.0 / 2.0 {
+            q
+        } else if t < 2.0 / 3.0 {
+            p + (q - p) * (2.0 / 3.0 - t) * 6.0
+        } else {
+            p
+        }
+    };
+    Color { r: channel(h + 1.0 / 3.0), g: channel(h), b: channel(h - 1.0 / 3.0), a }
+}
+
+fn contrast(a: Color, b: Color) -> f32 {
+    let lum = |c: Color| {
+        let f = |v: f32| if v <= 0.039_28 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+        0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b)
+    };
+    let (la, lb) = (lum(a), lum(b));
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
 }
 
 /// Text style in the palette's primary colour (shared by the explicit
@@ -270,5 +372,25 @@ pub(crate) fn inset_style(pal: Palette) -> impl Fn(&Theme) -> container::Style {
             radius: 4.0.into(),
         },
         ..container::Style::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::PiumaConfig;
+
+    /// Light mode makes the editor itself light, deriving it from the
+    /// configured colours.
+    #[test]
+    fn light_mode_produces_a_light_editor() {
+        let mut cfg = PiumaConfig::default();
+        cfg.theme_mode = Some("light".to_string());
+        let light = palette(&cfg);
+        assert!(light.bg.r > 0.8 && light.bg.g > 0.8 && light.bg.b > 0.8);
+        assert!(light.fg.r < 0.3 && light.fg.g < 0.3 && light.fg.b < 0.3);
+        cfg.theme_mode = None;
+        let dark = palette(&cfg);
+        assert!(dark.bg.r < 0.3, "dark mode unchanged: {:?}", dark.bg);
     }
 }

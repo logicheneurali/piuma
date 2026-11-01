@@ -70,6 +70,10 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
             // Absent means off: keep the file minimal when disabled.
             state.config.value_effect = (value != "off").then_some(value);
         }
+        Message::ThemeModeChanged(value) => {
+            // Absent means dark (the historic default); light is explicit.
+            state.config.theme_mode = (value == "light").then_some(value);
+        }
         Message::WallpaperEnabled(value) => {
             // The toggle only flips `enabled`: the chosen path survives
             // both directions (the surface opens/closes on save + reload).
@@ -237,6 +241,42 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
         Message::DefaultTextColorChanged(value) => state.config.default_text_color = if value.is_empty() { None } else { Some(value) },
         Message::AnchorChanged(value) => state.config.anchor = if value.is_empty() { None } else { Some(value) },
         Message::AlignChanged(value) => state.config.align = if value.is_empty() { None } else { Some(value) },
+        Message::OutputChanged(value) => {
+            state.config.output = (value != "auto" && !value.is_empty()).then_some(value);
+        }
+        Message::RootSectionsChanged(value) => {
+            state.config.visible_sections = parse_sections(&value);
+            state.config.root_sections_text = value;
+        }
+        Message::PanelAdded => {
+            state.config.panels.push(PanelDraft::default());
+        }
+        Message::PanelRemoved(index) => {
+            if index < state.config.panels.len() {
+                state.config.panels.remove(index);
+            }
+        }
+        Message::PanelOutputChanged(index, value) => {
+            if let Some(panel) = state.config.panels.get_mut(index) {
+                panel.output = (value != "auto" && !value.is_empty()).then_some(value);
+            }
+        }
+        Message::PanelAnchorChanged(index, value) => {
+            if let Some(panel) = state.config.panels.get_mut(index) {
+                panel.anchor = (value != "default" && !value.is_empty()).then_some(value);
+            }
+        }
+        Message::PanelAlignChanged(index, value) => {
+            if let Some(panel) = state.config.panels.get_mut(index) {
+                panel.align = (value != "default" && !value.is_empty()).then_some(value);
+            }
+        }
+        Message::PanelSectionsChanged(index, value) => {
+            if let Some(panel) = state.config.panels.get_mut(index) {
+                panel.sections = parse_sections(&value);
+                panel.sections_text = value;
+            }
+        }
         Message::NotificationsEnabled(on) => {
             // Enabling from scratch seeds the defaults; disabling drops the
             // block, which is what turns piuma's D-Bus server off.

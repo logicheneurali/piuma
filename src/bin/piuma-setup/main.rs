@@ -30,6 +30,11 @@ mod autostart;
 #[path = "../../icons.rs"]
 mod icons;
 
+// XDG paths shared with the bar (same defaults and fallbacks).
+#[allow(dead_code)]
+#[path = "../../xdg.rs"]
+mod xdg;
+
 mod controls;
 mod hyprland_wallpaper;
 mod model;

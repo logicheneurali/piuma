@@ -239,9 +239,57 @@ and piuma never launches itself. Absent (the default) the feature is
 dormant — nothing is scanned or spawned. The toggle lives in
 piuma-setup's *Panel Settings* card.
 
+`panel.theme_mode: "light"` generates the light variant of the bar and
+of every theme below; absent (or `"dark"`) keeps the historic dark one.
+The light palette is derived from the same seed — the wallpaper palette
+when it is active, otherwise the configured colours — with the same hues
+and inverted lightness, and the text/selection/cursor tones keep their
+WCAG contrast. Explicit per-sensor colour overrides keep their own
+colours. The switch lives in piuma-setup's *Panel Settings* card and
+applies to the bar without a restart; applications and terminals must be
+reopened (or reloaded) to pick up the regenerated themes.
+
+`panel.output` binds the bar to one monitor, by name (`"HDMI-A-2"`);
+absent or `"auto"` leaves the compositor's focused output, and `"all"`
+mirrors the same bar on every monitor (one surface per output, the main
+axis filled to each monitor's size). `all` is the multi-monitor mode:
+the same sections are shown everywhere; independent per-monitor content
+is not part of this setting. A layer surface cannot move between outputs
+at runtime: a change applies at the next piuma start. The setup's *Panel
+Settings* card offers `auto`, `all` and the detected outputs, and notes
+the restart requirement.
+
+**Multiple panels.** The root `panels` array holds one layout per bar, each with
+its own `output`, `anchor`, `align` and an optional `sections` list of
+section names. The section definitions and styles stay global in
+`panel.sections`, so the same section/readings can be shown on several
+monitors without duplication:
+
+```json
+"panels": [
+  { "output": "HDMI-A-2", "anchor": "top", "sections": ["Workspace"] },
+  { "output": "eDP-1", "anchor": "bottom", "sections": ["Stats"] }
+]
+```
+
+Sections are assigned **exclusively**: the first panel (the legacy
+`panel` placement) shows the sections **not** claimed by the later
+entries, so adding a secondary panel does not duplicate the main bar. An
+explicit first-panel `sections` list overrides that; listing the same
+section in two panels is an intentional explicit duplicate. A secondary
+panel needs at least one section (validation rejects an empty one). A
+file without `panels` keeps the single bar with every section. Windows
+are created at startup — changing the number/output of panels needs a
+piuma restart. Piuma-setup's *Panel Settings* card lists the extra
+panels, their output/anchor/align and their comma-separated section
+names; the sections themselves are edited once in *Sections*. Per-panel
+copies of the same section (different styles/readings on two monitors)
+are not in this version: panels share the section definitions.
+
 `panel.app_theme: true` generates a complete GTK theme at
-`~/.local/share/themes/Piuma`: piuma copies the Adwaita stylesheets of
-`adw-gtk3-dark` (the widget rules, for GTK3 and GTK4) and appends its
+`~/.local/share/themes/Piuma`: piuma copies the Adwaita stylesheets of the matching `adw-gtk3` variant
+(`adw-gtk3-dark` for dark, `adw-gtk3` for light; the widget rules, for
+GTK3 and GTK4) and appends its
 own palette block, so the theme is self-contained and follows the
 Adwaita schema. The block maps the bar's three layers: **windows**
 (window, headerbar, sidebar, dialog) use the panel palette,
@@ -378,7 +426,7 @@ Each sensor's `source` object has a `type` plus the parameters listed
 | `command`        | shell command stdout                                         | `command`                                                               |
 | `env_var`        | environment variable value                                   | `env_var`                                                               |
 | `static_text`    | text/icon: fixed text, or just the sensor `icon` when the text is empty | `static_text` (optional with an `icon`)                        |
-| `media`          | MPRIS player: `▶  title — artist` (25 chars each); click play/pause, wheel prev/next | —                                                        |
+| `media`          | MPRIS player: `⏵  title — artist` (25 chars each); click play/pause, wheel prev/next | —                                                        |
 | `tray`           | system tray icons (StatusNotifierItem)                       | —                                                                       |
 | `notifications`  | newest active notification (`N6 newest (5)`)                 | —                                                                       |
 
@@ -527,7 +575,9 @@ move only re-evaluates the match: a layout already applied for the
 current window set is **not** applied again, so dragging a window
 between workspaces is never undone. An extra window on the layout's own
 workspace keeps it unapplied (other workspaces never veto). Moving
-windows by hand in between is never fought.
+windows by hand in between is never fought. When a layout fires right
+after an application opens, the window that had the focus is re-focused
+once the moves have landed, so the new app does not lose it.
 
 ```json
 { "name": "Layout", "source": { "type": "layout" } }
@@ -644,4 +694,7 @@ up/down in the panel order (the arrow is disabled on the first/last item).
 
 ## License
 
-Apache-2.0
+Apache-2.0. The licenses of every dependency compiled into the Linux
+binaries are listed in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md);
+the MPL-2.0 text applying to `option-ext` is in
+[LICENSES/MPL-2.0.txt](LICENSES/MPL-2.0.txt).

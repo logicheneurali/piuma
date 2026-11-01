@@ -34,6 +34,8 @@ pub enum Message {
     SectionTitleChanged(bool),
     /// Panel value-change effect: `off`, `underline` or `sheen`.
     ValueEffectChanged(String),
+    /// Bar and app-theme variant: `dark` or `light`.
+    ThemeModeChanged(String),
     /// Wallpaper enable toggle (roadmap2 #1).
     WallpaperEnabled(bool),
     /// Wallpaper image path, from the scanned list or a hand-typed
@@ -77,6 +79,17 @@ pub enum Message {
     DefaultTextColorChanged(String),
     AnchorChanged(String),
     AlignChanged(String),
+    /// Monitor the bar binds to: a name, or `"auto"` (absent).
+    OutputChanged(String),
+    /// Section subset of the first panel (comma-separated names).
+    RootSectionsChanged(String),
+    /// Additional panels: add/remove and per-field edits.
+    PanelAdded,
+    PanelRemoved(usize),
+    PanelOutputChanged(usize, String),
+    PanelAnchorChanged(usize, String),
+    PanelAlignChanged(usize, String),
+    PanelSectionsChanged(usize, String),
     /// `panel.notifications` editor: presence gates piuma's D-Bus server.
     NotificationsEnabled(bool),
     NotificationsTimeoutChanged(u32),
@@ -196,7 +209,7 @@ pub(crate) const DEFAULT_FILE: &str = "piuma.json";
 
 /// Directory holding the piuma configs (~/.config/piuma).
 pub(crate) fn config_dir() -> PathBuf {
-    dirs::config_dir().map(|d| d.join("piuma")).unwrap_or_else(|| PathBuf::from("."))
+    crate::xdg::config().map(|d| d.join("piuma")).unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// Full path of a config file name inside the piuma config directory.
