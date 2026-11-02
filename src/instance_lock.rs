@@ -122,7 +122,7 @@ mod tests {
     fn lock_cmdline_only_matches_the_bar_binary() {
         assert!(cmdline_is_piuma(b"./target/release/piuma\0"));
         assert!(cmdline_is_piuma(
-            b"/home/effedi/Documenti/Rust/Piuma/target/release/piuma\0"
+            b"/home/user/piuma/target/release/piuma\0"
         ));
         assert!(cmdline_is_piuma(b"piuma\0"));
         assert!(!cmdline_is_piuma(b"/usr/bin/piuma-setup\0"));
