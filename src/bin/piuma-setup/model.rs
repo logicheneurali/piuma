@@ -61,6 +61,38 @@ pub(crate) fn corners_set(config: &mut PiumaConfig, edit: impl FnOnce(&mut Scree
     edit(config.screen_corners.get_or_insert_with(ScreenCornersCfg::default));
 }
 
+/// The `panel.tweaks` block (Tweaks tab): session settings that patch
+/// the compositor at runtime instead of the bar's own look.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TweaksCfg {
+    pub dynamic_gaps: Option<DynamicGapsCfg>,
+}
+
+/// `panel.tweaks.dynamic_gaps`: shrink Hyprland's `gaps_in` as more
+/// windows open. Defaults match the bar's serde fallbacks (off, 4..16).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DynamicGapsCfg {
+    pub enabled: bool,
+    pub min: i32,
+    pub max: i32,
+}
+
+impl Default for DynamicGapsCfg {
+    fn default() -> Self {
+        Self { enabled: false, min: 4, max: 16 }
+    }
+}
+
+/// Applies one dynamic-gaps edit, creating the blocks (with the bar's
+/// defaults) on first use: absent = the tweak does nothing.
+pub(crate) fn dynamic_gaps_mut(config: &mut PiumaConfig) -> &mut DynamicGapsCfg {
+    config
+        .tweaks
+        .get_or_insert_with(|| TweaksCfg { dynamic_gaps: None })
+        .dynamic_gaps
+        .get_or_insert_with(DynamicGapsCfg::default)
+}
+
 /// One extra bar managed by the setup: placement plus the named sections
 /// it shows (section definitions stay global).
 #[derive(Debug, Clone, Default)]
@@ -132,6 +164,8 @@ pub struct PiumaConfig {
     /// `panel.notifications`: presence gates piuma's D-Bus server, so
     /// `None` and `Some` are meaningful states (the GUI toggle).
     pub notifications: Option<NotificationsCfg>,
+    /// `panel.tweaks`: absent = every session tweak off.
+    pub tweaks: Option<TweaksCfg>,
     pub sections: Vec<Section>,
 }
 
@@ -277,6 +311,12 @@ pub struct SourceConfig {
     pub format: Option<String>,
     /// `workspace_dots`: number of circles (absent = 10).
     pub count: Option<u32>,
+    /// `command`: minimum seconds between two runs (absent/0 = every
+    /// tick); keeps expensive commands off the 1 Hz loop.
+    pub interval: Option<u32>,
+    /// Raw draft of the interval field (not serialized): the text input
+    /// borrows it, so partial input ("3" before the "0") stays visible.
+    pub interval_text: String,
 }
 
 impl Default for PiumaConfig {
@@ -309,6 +349,7 @@ impl Default for PiumaConfig {
             sensor_defaults: SensorDefaults::default(),
             section_defaults: SectionDefaults::default(),
             notifications: None,
+            tweaks: None,
             sections: vec![Section::default()],
         }
     }
@@ -368,6 +409,8 @@ impl Default for SourceConfig {
             device: None,
             format: None,
             count: None,
+            interval: None,
+            interval_text: String::new(),
         }
     }
 }
@@ -439,6 +482,21 @@ impl PiumaSetup {
             sc.insert("color".to_string(), JsonValue::String(c.color.clone()));
             sc.insert("radius".to_string(), JsonValue::Number(c.radius.into()));
             panel.insert("screen_corners".to_string(), JsonValue::Object(sc));
+        }
+        // Session tweaks: the block is written only after the user
+        // touched the tab (absent = every tweak off).
+        if let Some(t) = &self.config.tweaks {
+            let mut tw = Map::new();
+            if let Some(g) = &t.dynamic_gaps {
+                let mut dg = Map::new();
+                dg.insert("enabled".to_string(), JsonValue::Bool(g.enabled));
+                dg.insert("min".to_string(), JsonValue::Number(g.min.into()));
+                dg.insert("max".to_string(), JsonValue::Number(g.max.into()));
+                tw.insert("dynamic_gaps".to_string(), JsonValue::Object(dg));
+            }
+            if !tw.is_empty() {
+                panel.insert("tweaks".to_string(), JsonValue::Object(tw));
+            }
         }
         panel.insert("section_layout".to_string(), JsonValue::String(self.config.section_layout.clone()));
         panel.insert("default_section_weight".to_string(), JsonValue::Number(self.config.default_section_weight.into()));
@@ -624,6 +682,9 @@ impl PiumaSetup {
                 if let Some(cmd) = &sensor.source_config.command {
                     map.insert("command".to_string(), JsonValue::String(cmd.clone()));
                 }
+                if let Some(interval) = sensor.source_config.interval.filter(|i| *i > 0) {
+                    map.insert("interval".to_string(), JsonValue::Number(interval.into()));
+                }
             }
             "env_var" => {
                 if let Some(ev) = &sensor.source_config.env_var {
@@ -804,6 +865,7 @@ impl PiumaSetup {
             sensor_defaults: SensorDefaults::default(),
             section_defaults: SectionDefaults::default(),
             notifications: None,
+            tweaks: None,
             sections: Vec::new(),
         };
 
@@ -874,6 +936,19 @@ impl PiumaSetup {
                 enable: o.get("enable").and_then(JsonValue::as_bool).unwrap_or(false),
                 color: o.get("color").and_then(JsonValue::as_str).unwrap_or("#000000").to_string(),
                 radius: o.get("radius").and_then(JsonValue::as_u64).unwrap_or(32) as u32,
+            })
+        });
+        // Absent `tweaks` stays `None` (every session tweak off). A
+        // partial block falls back per field, like the bar's serde.
+        self.config.tweaks = panel.get("tweaks").and_then(|v| {
+            v.as_object().map(|o| TweaksCfg {
+                dynamic_gaps: o.get("dynamic_gaps").and_then(|g| {
+                    g.as_object().map(|g| DynamicGapsCfg {
+                        enabled: g.get("enabled").and_then(JsonValue::as_bool).unwrap_or(false),
+                        min: g.get("min").and_then(JsonValue::as_i64).unwrap_or(4) as i32,
+                        max: g.get("max").and_then(JsonValue::as_i64).unwrap_or(16) as i32,
+                    })
+                }),
             })
         });
         // Absent `wallpaper_palette` stays `None` (reset default): the
@@ -1132,6 +1207,10 @@ impl PiumaSetup {
             if let Some(command) = source.get("command").and_then(|v| v.as_str()) {
                 sensor.source_config.command = Some(command.to_string());
             }
+            if let Some(interval) = source.get("interval").and_then(|v| v.as_u64()) {
+                sensor.source_config.interval = Some(interval as u32);
+                sensor.source_config.interval_text = interval.to_string();
+            }
             if let Some(ev) = source.get("env_var").and_then(|v| v.as_str()) {
                 sensor.source_config.env_var = Some(ev.to_string());
             }
@@ -1271,7 +1350,8 @@ pub(crate) const SOURCE_TYPES: &[&str] = &[
     // temp_ — temperatures
     "temp_cpu",
     // no numeric category
-    "net_state", "uptime", "clock", "calendar", "window", "workspace",
+    "net_state", "net_info", "power_profile", "bluetooth", "keyboard",
+    "uptime", "clock", "calendar", "window", "workspace",
     "workspace_dots", "command", "env_var", "static_text", "volume_meter",
     "media", "tray", "notifications", "taskbar", "layout",
 ];
@@ -1315,6 +1395,10 @@ pub(crate) fn source_label(canonical: &str) -> &'static str {
         "detail_disk" => "Disk used/total",
         "temp_cpu" => "CPU temperature",
         "net_state" => "Net state",
+        "net_info" => "Network info (Wi-Fi/VPN)",
+        "power_profile" => "Power profile",
+        "bluetooth" => "Bluetooth",
+        "keyboard" => "Keyboard layout",
         "uptime" => "Uptime",
         "clock" => "Clock",
         "calendar" => "Calendar",

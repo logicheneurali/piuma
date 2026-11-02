@@ -440,16 +440,20 @@ pub(crate) fn sensor_view<'a>(
             };
             combo("format", "Format", current, options_with_current(presets, current))
         }
-        "command" => column![
-            input("Command", sensor.source_config.command.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "command".to_string(), value))
-                .width(Length::Fill),
-            text("The command's first output line becomes the value, e.g. `date +%H:%M`.")
-                .size(10)
-                .style(muted_text(pal)),
-        ]
-        .spacing(2)
-        .width(Length::Fill)
-        .into(),
+        "command" => {
+            column![
+                input("Command", sensor.source_config.command.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "command".to_string(), value))
+                    .width(Length::Fill),
+                input("Interval (s, 0 = every tick)", &sensor.source_config.interval_text, move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "interval".to_string(), value))
+                    .width(Length::Fill),
+                text("The command's first output line becomes the value, e.g. `date +%H:%M`. An interval keeps expensive commands off the 1 Hz loop.")
+                    .size(10)
+                    .style(muted_text(pal)),
+            ]
+            .spacing(2)
+            .width(Length::Fill)
+            .into()
+        }
         "env_var" => input("Env Var", sensor.source_config.env_var.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "env_var".to_string(), value))
             .width(Length::Fill)
             .into(),
@@ -462,9 +466,14 @@ pub(crate) fn sensor_view<'a>(
             .into(),
     };
 
-    let source_error = state.field_err(&format!(
+    let source_path = format!(
         "panel.sections[{section_index}].sensors[{sensor_index}].source"
-    ));
+    );
+    // A field-level source error (e.g. the command interval) is shown
+    // under the same row as the source itself.
+    let source_error = state
+        .field_err(&format!("{source_path}.interval"))
+        .or_else(|| state.field_err(&source_path));
     let source = form_cell("Source", invalid_under(
         Row::new()
             .push(type_card)

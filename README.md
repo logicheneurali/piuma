@@ -418,17 +418,34 @@ Each sensor's `source` object has a `type` plus the parameters listed
 | `detail_disk`    | fs used/total (`619G/950G`)                                  | —                                                                       |
 | `temp_cpu`       | CPU package temperature (`65°C`, hwmon `coretemp`/`k10temp`) | —                                                                       |
 | `net_state`      | interface state (`connected`)                                | `interface`                                                             |
+| `net_info`       | active NetworkManager connection: VPN, Wi-Fi SSID or wired name (`offline` when none) | —                                                     |
+| `power_profile`  | power-profiles-daemon profile (`Balanced`); click cycles it   | —                                                                       |
+| `bluetooth`      | BlueZ adapter (`Off`, `On`, `On (2)` or the connected device); click toggles it | —                                                     |
+| `keyboard`       | main keyboard layout (`IT`, `IT CAPS`, `IT NUM`); click switches layout | —                                                              |
 | `uptime`         | uptime (`up 2 hours, 30 minutes`)                            | —                                                                       |
 | `clock`          | time (`10:12:42`); `format: "date"` = date only              | `format`                                                                |
 | `window`         | focused window title (cut at 80 chars + `...`)               | —                                                                       |
 | `workspace`      | current workspace                                            | —                                                                       |
 | `workspace_dots` | graphical workspace dots: active filled, others outlined     | `count` (default 10, 1–50)                                               |
-| `command`        | shell command stdout                                         | `command`                                                               |
+| `command`        | shell command stdout                                         | `command`, `interval` (s, 0/absent = every tick)                        |
 | `env_var`        | environment variable value                                   | `env_var`                                                               |
 | `static_text`    | text/icon: fixed text, or just the sensor `icon` when the text is empty | `static_text` (optional with an `icon`)                        |
 | `media`          | MPRIS player: `⏵  title — artist` (25 chars each); click play/pause, wheel prev/next | —                                                        |
 | `tray`           | system tray icons (StatusNotifierItem)                       | —                                                                       |
 | `notifications`  | newest active notification (`N6 newest (5)`)                 | —                                                                       |
+
+`net_info`, `power_profile`, `bluetooth` and `keyboard` are the
+runtime-state sensors. `net_info` reads the active NetworkManager
+connection (display only; a configured `action` can bind a click, e.g.
+`nm-connection-editor`). The other three probe their daemon at most
+every five seconds (no fork per tick) and their click controls the
+state: `power_profile` cycles balanced → performance → power-saver,
+`bluetooth` toggles the adapter, `keyboard` advances the layout (a
+configured `action` is ignored there, like on the media sensor). A
+command source with `interval` reuses its last answer until the
+interval elapses, so expensive commands (`checkupdates`, network probes,
+API calls) stay off the 1 Hz loop; failures are cached for the same
+interval.
 
 Network rates and the CPU percentage are computed from consecutive
 counter samples (`/proc/net/dev`, `/proc/stat`): the very first refresh
@@ -621,6 +638,40 @@ their window set.)
   the same state; layout files edited by hand — or deletions made in
   the setup — reach the running bar on its next restart; monitor
   placement is derived from the saved pixel position only.
+
+### Tweaks
+
+Session settings that patch the compositor at runtime instead of the
+bar's own look. They live in `panel.tweaks` and every block is
+optional: an absent key changes nothing and costs nothing (no query, no
+dispatch).
+
+```json
+"tweaks": {
+  "dynamic_gaps": { "enabled": true, "min": 4, "max": 16 }
+}
+```
+
+**Dynamic gaps** shrink Hyprland's gaps as more windows open. The gap
+to the screen edge (`general:gaps_out`) follows the configured value:
+with `min` 4 and `max` 16 it starts at **16** with one window and loses
+**25% of the `max - min` range** (3 px) per extra open window:
+16 → 13 → 10 → 7 → 4, then it stays at the minimum. The gap between
+windows (`general:gaps_in`) is **half** of it (rounded down): 8 → 6 → 5
+→ 3 → 2.
+The count is every **open window**, not just the active workspace's: the
+Hyprland value is global, so a per-workspace count would re-tile every
+monitor on every workspace switch. Special workspaces (scratchpads) are
+excluded; floating windows count. Zero windows keep the maximum.
+
+The bar applies the gap on its 1 Hz tick, only when the count or the
+range changed, and always before the layout engine so its measured
+resizes start from the new tiling. The value the user's own Hyprland
+config had before the first override is captured once and restored when
+the tweak is turned **off** and when piuma exits cleanly (both gaps,
+per-side values included); a Hyprland
+config reload while piuma runs resets the gap and the next window
+open/close re-applies it. Without the bar running nothing is applied.
 
 ### Portability
 

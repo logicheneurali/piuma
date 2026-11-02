@@ -47,6 +47,7 @@ mod view;
 mod view_layouts;
 mod view_panel;
 mod view_sections;
+mod view_tweaks;
 mod view_wallpaper;
 
 // Re-exported at the root: the shared `icons.rs` (also used by the bar)

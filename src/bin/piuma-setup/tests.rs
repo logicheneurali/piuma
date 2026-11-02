@@ -695,11 +695,102 @@ fn sidebar_tab_selection_switches_the_active_tab() {
     assert_eq!(state.active_tab, Tab::Sections);
     let _ = update(&mut state, Message::TabSelected(Tab::Notifications));
     assert_eq!(state.active_tab, Tab::Notifications);
+    let _ = update(&mut state, Message::TabSelected(Tab::Tweaks));
+    assert_eq!(state.active_tab, Tab::Tweaks);
     assert_eq!(
         state.serialize().expect("serialize must succeed"),
         before,
         "switching tabs must not change the edited config"
     );
+    assert_eq!(
+        Tab::ALL.last(),
+        Some(&Tab::Tweaks),
+        "Tweaks is the last sidebar category"
+    );
+}
+
+/// The Tweaks tab creates the block on first touch, writes concrete
+/// min/max, and the range is checked by the same validation the save
+/// uses (the bar parses the identical shape).
+#[test]
+fn dynamic_gaps_tweaks_roundtrip() {
+    let mut s = test_state();
+    let json: JsonValue = serde_json::from_str(&s.serialize().unwrap()).unwrap();
+    assert!(json["panel"].get("tweaks").is_none(), "absent until touched");
+
+    let _ = update(&mut s, Message::DynamicGapsEnabled(true));
+    assert_eq!(
+        s.config.tweaks.as_ref().and_then(|t| t.dynamic_gaps.as_ref()).map(|g| (g.min, g.max)),
+        Some((4, 16)),
+        "first touch seeds the bar's defaults"
+    );
+    let _ = update(&mut s, Message::GapMinChanged(6));
+    let _ = update(&mut s, Message::GapMaxChanged(12));
+
+    let saved = s.serialize().unwrap();
+    let parsed: config::Config = serde_json::from_str(&saved).unwrap();
+    let gaps = parsed
+        .panel
+        .tweaks
+        .as_ref()
+        .and_then(|t| t.dynamic_gaps.as_ref())
+        .expect("the block must reach the bar");
+    assert!(gaps.enabled);
+    assert_eq!((gaps.min, gaps.max), (6, 12));
+    assert!(config::validate_config(&parsed).is_empty());
+
+    // Inverted range: the field is flagged by the shared validation.
+    let _ = update(&mut s, Message::GapMaxChanged(3));
+    let bad: config::Config = serde_json::from_str(&s.serialize().unwrap()).unwrap();
+    assert!(config::validate_config(&bad)
+        .iter()
+        .any(|e| e.path == "panel.tweaks.dynamic_gaps"));
+}
+
+/// The runtime-state sensors and a command's interval survive the
+/// editor's save path and validate against the bar's schema.
+#[test]
+fn runtime_sensors_and_command_interval_roundtrip() {
+    let mut s = test_state();
+    let sensor = |name: &str, source_type: &str| Sensor {
+        name: Some(name.to_string()),
+        source_type: source_type.to_string(),
+        ..Sensor::default()
+    };
+    let mut command = sensor("CMD", "command");
+    command.source_config = SourceConfig {
+        command: Some("date +%s".to_string()),
+        interval: Some(30),
+        interval_text: "30".to_string(),
+        ..SourceConfig::default()
+    };
+    s.config.sections[0].sensors = vec![
+        sensor("NET", "net_info"),
+        sensor("PWR", "power_profile"),
+        sensor("BT", "bluetooth"),
+        sensor("KBD", "keyboard"),
+        command,
+    ];
+
+    let saved = s.serialize().unwrap();
+    let parsed: config::Config = serde_json::from_str(&saved).unwrap();
+    assert!(
+        config::validate_config(&parsed).is_empty(),
+        "the editor must save a config the bar accepts"
+    );
+    let sources: Vec<&config::SensorSource> = parsed.panel.sections[0]
+        .sensors
+        .iter()
+        .map(|sensor| &sensor.source)
+        .collect();
+    assert!(matches!(sources[0], config::SensorSource::NetInfo {}));
+    assert!(matches!(sources[1], config::SensorSource::PowerProfile {}));
+    assert!(matches!(sources[2], config::SensorSource::Bluetooth {}));
+    assert!(matches!(sources[3], config::SensorSource::Keyboard {}));
+    assert!(matches!(
+        sources[4],
+        config::SensorSource::Command { interval: Some(30), .. }
+    ));
 }
 
 /// The editor writes all three keys when enabled (defaults on a fresh

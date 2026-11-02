@@ -223,26 +223,19 @@ pub(crate) fn popup_view(panel: &Panel) -> Element<'_, Message> {
         } else {
             (st.text, st.bg, st.border)
         };
-        // Icon: image-data wins (handle cached per notification — one
-        // decode, not one per frame), a real file path follows; anything
-        // else (e.g. a themed icon name) renders without an icon.
-        let icon: Option<Image> = match &card.icon {
-            Some(notifications::CardIcon::Image) => {
-                notifications::icon_handle(card.id).map(|handle| {
-                    Image::new(handle)
-                        .width(32)
-                        .height(32)
-                        .content_fit(iced::ContentFit::Contain)
-                })
-            }
-            Some(notifications::CardIcon::Path(p)) => std::path::Path::new(p).exists().then(|| {
-                Image::new(iced::widget::image::Handle::from_path(p.clone()))
+        // Icon: the server decodes and downscales it at insert (see
+        // `notifications::fit_icon`), the handle is cached per
+        // notification — never rebuilt per frame, never full-size.
+        let icon: Option<Image> = card
+            .icon
+            .then(|| notifications::icon_handle(card.id))
+            .flatten()
+            .map(|handle| {
+                Image::new(handle)
                     .width(32)
                     .height(32)
                     .content_fit(iced::ContentFit::Contain)
-            }),
-            None => None,
-        };
+            });
         let mut lines: Column<'_, Message> = Column::new().spacing(2).push(
             text(card.summary)
                 .size(st.font_size + 3)

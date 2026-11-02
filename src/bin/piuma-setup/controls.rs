@@ -14,7 +14,7 @@ use crate::config;
 use crate::icons;
 use crate::style::{
     btn_primary, btn_secondary, error_text_style, hex_color, inset_style, muted_text, palette,
-    Palette, BODY, ERROR_RED, LABEL_WIDTH,
+    text_input_style, Palette, BODY, ERROR_RED, LABEL_WIDTH,
 };
 use crate::model::{PiumaConfig, Section, Sensor};
 use crate::state::Message;
@@ -32,7 +32,10 @@ pub(crate) fn form_cell<'a>(label: &'a str, control: Element<'a, Message>) -> Ro
 
 /// Text input using the standard body font size.
 pub(crate) fn input<'a>(placeholder: &'a str, value: &'a str, on_input: impl Fn(String) -> Message + 'a) -> TextInput<'a, Message> {
-    TextInput::new(placeholder, value).on_input(on_input).size(BODY)
+    TextInput::new(placeholder, value)
+        .on_input(on_input)
+        .size(BODY)
+        .style(text_input_style)
 }
 
 /// Pick list using the standard body font size.
@@ -527,7 +530,7 @@ pub(crate) fn color_control_over<'a>(
     let field = input(placeholder, value, on_input)
         .width(Length::Fill)
         .style(move |t: &Theme, status| {
-            let mut style = iced::widget::text_input::default(t, status);
+            let mut style = text_input_style(t, status);
             if invalid.is_some() {
                 style.border = Border { width: 1.0, color: error_color, radius: 3.0.into() };
             }

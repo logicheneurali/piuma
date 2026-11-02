@@ -54,6 +54,10 @@ pub enum Message {
     CornersEnabled(bool),
     CornersColorChanged(String),
     CornersRadiusChanged(u32),
+    /// Tweaks tab: Hyprland dynamic gaps (toggle, minimum, maximum).
+    DynamicGapsEnabled(bool),
+    GapMinChanged(i32),
+    GapMaxChanged(i32),
     /// Sidebar category switch (roadmap N4).
     TabSelected(Tab),
     ThicknessChanged(u32),
@@ -262,11 +266,12 @@ pub enum Tab {
     Wallpaper,
     AutostartApps,
     Layouts,
+    Tweaks,
 }
 
 impl Tab {
     /// Sidebar order.
-    pub(crate) const ALL: [Tab; 8] = [
+    pub(crate) const ALL: [Tab; 9] = [
         Tab::Panel,
         Tab::Notifications,
         Tab::SectionDefaults,
@@ -275,6 +280,7 @@ impl Tab {
         Tab::Wallpaper,
         Tab::AutostartApps,
         Tab::Layouts,
+        Tab::Tweaks,
     ];
 
     /// Glyph leading the sidebar label (a visual cue, not an icon theme
@@ -289,6 +295,7 @@ impl Tab {
             Tab::Wallpaper => "▩",
             Tab::AutostartApps => "▷",
             Tab::Layouts => "⊞",
+            Tab::Tweaks => "⚙",
         }
     }
 
@@ -303,6 +310,7 @@ impl Tab {
             Tab::Wallpaper => "Wallpaper",
             Tab::AutostartApps => "Autostart apps",
             Tab::Layouts => "Layouts",
+            Tab::Tweaks => "Tweaks",
         }
     }
 }
@@ -522,6 +530,9 @@ impl PiumaSetup {
                 "history_size" => "History size",
                 "popup_margin_h" => "Popup margin H",
                 "popup_margin_v" => "Popup margin V",
+                "interval" => "Interval",
+                "min" => "Minimum gap",
+                "max" => "Maximum gap",
                 other => other,
             }
         }
@@ -535,6 +546,8 @@ impl PiumaSetup {
                 "sensor_defaults" => "Sensor defaults",
                 "section_defaults" => "Section defaults",
                 "notifications" => "Notifications",
+                "tweaks" => "Tweaks",
+                "tweaks.dynamic_gaps" => "Dynamic gaps",
                 other => other,
             };
             return format!("{group} › {}: {}", label(field), error.message);

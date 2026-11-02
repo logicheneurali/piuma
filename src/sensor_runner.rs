@@ -5,6 +5,8 @@ use crate::graphs;
 use crate::notifications;
 use crate::sensors;
 use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// What one sensor run produced: the text for the bar and — for the
 /// graphable sources — the very same reading as a number with its
@@ -112,6 +114,47 @@ fn maybe_measured(text: String, source: &SensorSource) -> Read {
     }
 }
 
+/// The command source's shell run: five seconds at most, output trimmed.
+/// shortcut: the 5s cap (coreutils `timeout`) keeps a command that never
+/// exits — `--follow` streams, listeners, hung pipelines — from freezing
+/// every reading for good: `read_pending` never clears without a reply,
+/// so no further pass would ever run. Raise the cap when a legitimate
+/// command needs longer.
+fn run_command(command: &str) -> String {
+    match std::process::Command::new("timeout")
+        .args(["-k", "1", "5", "sh", "-c", command])
+        .output()
+    {
+        Ok(out) if out.status.success() => String::from(String::from_utf8_lossy(&out.stdout).trim()),
+        _ => "ERROR".to_string(),
+    }
+}
+
+/// Cached runs of `command` sources that ask for an `interval`: the bar
+/// polls at 1 Hz, so an expensive command returns its last answer until
+/// the interval elapses. Keyed by the command line alone — two sensors
+/// sharing a command share the result, and the shortest interval wins by
+/// running it more often. Failures are cached too (no retry storm).
+static COMMAND_RUNS: OnceLock<Mutex<HashMap<String, (Instant, Read)>>> = OnceLock::new();
+
+fn command_cached(command: &str, interval: u64) -> Option<Read> {
+    let map = COMMAND_RUNS.get_or_init(Default::default).lock().ok()?;
+    let (at, read) = map.get(command)?;
+    (at.elapsed() < Duration::from_secs(interval)).then(|| read.clone())
+}
+
+fn command_store(command: &str, read: &Read) {
+    let Ok(mut map) = COMMAND_RUNS.get_or_init(Default::default).lock() else {
+        return;
+    };
+    // Bounded: the map only grows with distinct commands across config
+    // reloads; clearing on overflow is cheaper than a stale-entry sweep.
+    if map.len() > 64 {
+        map.clear();
+    }
+    map.insert(command.to_string(), (Instant::now(), read.clone()));
+}
+
 /// Run a sensor source and return its value (text + optional sample).
 /// `hypr` is the tick's shared compositor snapshot (`None` = the read
 /// was not taken; the Hyprland-backed sources show their fallback).
@@ -124,18 +167,19 @@ pub fn run(source: &SensorSource, hypr: Option<&crate::hypr::Snapshot>) -> Read 
         // from freezing every reading for good: `read_pending` never
         // clears without a reply, so no further pass would ever run.
         // Raise the cap when a legitimate command needs longer.
-        SensorSource::Command { command } => maybe_measured(
-            match std::process::Command::new("timeout")
-                .args(["-k", "1", "5", "sh", "-c", command])
-                .output()
-            {
-                Ok(out) if out.status.success() => {
-                    String::from(String::from_utf8_lossy(&out.stdout).trim())
+        SensorSource::Command { command, interval } => {
+            let ttl = interval.unwrap_or(0);
+            if ttl > 0 {
+                if let Some(read) = command_cached(command, ttl) {
+                    return read;
                 }
-                _ => "ERROR".to_string(),
-            },
-            source,
-        ),
+            }
+            let read = maybe_measured(run_command(command), source);
+            if ttl > 0 {
+                command_store(command, &read);
+            }
+            read
+        }
         SensorSource::EnvVar { env_var } => {
             maybe_measured(std::env::var(env_var).unwrap_or("N/A".to_string()), source)
         }
@@ -169,6 +213,10 @@ pub fn run(source: &SensorSource, hypr: Option<&crate::hypr::Snapshot>) -> Read 
         // temp_ — temperatures
         SensorSource::TempCpu {} => optional(sensors::cpu_temp(), source),
         // everything else (no numeric category)
+        SensorSource::NetInfo {} => plain(sensors::net_info()),
+        SensorSource::PowerProfile {} => plain(sensors::power_profile()),
+        SensorSource::Bluetooth {} => plain(sensors::bluetooth_info()),
+        SensorSource::Keyboard {} => plain(sensors::keyboard_info()),
         SensorSource::Uptime {} => plain(sensors::uptime()),
         SensorSource::NetState { interface } => plain(sensors::network_info(interface)),
         SensorSource::Clock { format } => {
@@ -220,19 +268,20 @@ pub struct Reads {
 /// worker, see `spawn_read`): one pass forks the compositor documents
 /// every Hyprland-backed source shares and then each sensor in turn —
 /// but duplicated sensors share one run (see the cache below).
-pub fn read_all(sources: &[SensorSource]) -> Reads {
-    let needs_hypr = sources.iter().any(|s| {
-        matches!(
-            s,
-            SensorSource::Window {}
-                | SensorSource::Workspace {}
-                | SensorSource::WorkspaceDots { .. }
-                | SensorSource::Taskbar {}
-                // The layout engine matches and saves against the same
-                // snapshot `apply_read` receives.
-                | SensorSource::Layout { .. }
-        )
-    });
+pub fn read_all(sources: &[SensorSource], want_hypr: bool) -> Reads {
+    let needs_hypr = want_hypr
+        || sources.iter().any(|s| {
+            matches!(
+                s,
+                SensorSource::Window {}
+                    | SensorSource::Workspace {}
+                    | SensorSource::WorkspaceDots { .. }
+                    | SensorSource::Taskbar {}
+                    // The layout engine matches and saves against the same
+                    // snapshot `apply_read` receives.
+                    | SensorSource::Layout { .. }
+            )
+        });
     let hypr = needs_hypr.then(crate::hypr::snapshot);
     // One run per DISTINCT source per pass: two `df` disk sensors, two
     // `date` clocks and the like showed the same numbers when each
@@ -315,6 +364,7 @@ mod tests {
 
         let source = SensorSource::Command {
             command: String::new(),
+            interval: None,
         };
         let read = maybe_measured("49°C".into(), &source);
         assert_eq!(read.graph.map(|(v, _)| v), Some(49.0));
@@ -322,6 +372,27 @@ mod tests {
         let read = maybe_measured("hello".into(), &source);
         assert!(read.graph.is_none());
         assert_eq!(read.text, "hello");
+    }
+
+    /// A command with an interval reuses its last reading until the
+    /// interval elapses; interval 0 never caches (every tick).
+    #[test]
+    fn interval_commands_reuse_their_last_reading() {
+        let command = "piuma-test-interval-command"; // unique to this test
+        assert!(command_cached(command, 60).is_none(), "nothing cached yet");
+        command_store(command, &plain("value".to_string()));
+        assert_eq!(
+            command_cached(command, 60).map(|read| read.text),
+            Some("value".to_string())
+        );
+        assert!(
+            command_cached(command, 0).is_none(),
+            "interval 0 never serves a cached value"
+        );
+        assert!(
+            command_cached("piuma-test-other-command", 60).is_none(),
+            "the cache is per command"
+        );
     }
 
     /// Duplicated sensors share one reading per pass (no second fork
@@ -341,7 +412,7 @@ mod tests {
                 static_text: "other".into(),
             },
         ];
-        let reads = read_all(&sources);
+        let reads = read_all(&sources, false);
         assert_eq!(reads.values.len(), 3);
         assert_eq!(reads.values[0].text, "same");
         assert_eq!(

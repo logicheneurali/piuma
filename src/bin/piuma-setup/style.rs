@@ -33,6 +33,24 @@ pub(crate) fn theme(state: &PiumaSetup) -> Theme {
 // View helpers: cards, aligned form rows and collapsible blocks
 // ---------------------------------------------------------------------------
 
+/// Text-input style: the theme default with a visible selection. The
+/// extended palette's `primary.weak` is a 40% background mix, which
+/// disappears whenever the accent is a near-background tone (the setup
+/// derives it from the bar's neutral sensor default). A translucent
+/// text-colour highlight reads on both the dark and the light variant
+/// and keeps the glyphs readable on top of it.
+pub(crate) fn text_input_style(
+    theme: &Theme,
+    status: iced::widget::text_input::Status,
+) -> iced::widget::text_input::Style {
+    let mut style = iced::widget::text_input::default(theme, status);
+    style.selection = Color {
+        a: 0.35,
+        ..style.value
+    };
+    style
+}
+
 /// Fixed label column width so every form row lines up and labels never
 /// overlap their controls (`Length` only accepts u32).
 pub(crate) const LABEL_WIDTH: u32 = 110;

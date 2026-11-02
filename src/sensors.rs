@@ -966,4 +966,268 @@ mod tests {
         assert_eq!(cut.chars().count(), WINDOW_TITLE_MAX + 3);
         assert!(cut.ends_with("..."));
     }
+
+    /// The keyboard sensor's short codes cover the common Hyprland
+    /// keymap names; anything else becomes its first two letters.
+    #[test]
+    fn keymap_codes_are_short() {
+        assert_eq!(keymap_code("Italian"), "IT");
+        assert_eq!(keymap_code("English (US)"), "EN");
+        assert_eq!(keymap_code("English (UK)"), "UK");
+        assert_eq!(keymap_code("German"), "DE");
+        assert_eq!(keymap_code("Workman"), "WO");
+        assert_eq!(truncate_chars("short", 10), "short");
+        assert_eq!(truncate_chars("0123456789", 5), "0123…");
+    }
+}
+// ── runtime state: NetworkManager, power profiles, BlueZ, keyboard ──
+
+/// How often the CLI probes behind these sensors run: the values change
+/// on human timescales and the bar polls at 1 Hz, so one fork every
+/// [`PROBE_TTL`] keeps them fresh without spawning per tick. Failures
+/// are cached too (a missing daemon does not spawn a process a second).
+const PROBE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+type ProbeSlot = OnceLock<Mutex<Option<(Instant, Option<String>)>>>;
+
+static NET_INFO_PROBE: ProbeSlot = OnceLock::new();
+static POWER_PROFILE_PROBE: ProbeSlot = OnceLock::new();
+static BLUETOOTH_PROBE: ProbeSlot = OnceLock::new();
+
+/// A cached CLI probe: the command runs at most every `ttl`; `None`
+/// means "no reading" and the sensor shows N/A.
+fn cached_probe(
+    slot: &'static ProbeSlot,
+    ttl: std::time::Duration,
+    read: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    let mut cached = slot.get_or_init(Default::default).lock().ok()?;
+    if let Some((at, value)) = cached.as_ref() {
+        if at.elapsed() < ttl {
+            return value.clone();
+        }
+    }
+    let value = read();
+    *cached = Some((Instant::now(), value.clone()));
+    value
+}
+
+/// Drop a probe's cached answer after an action changed the state, so
+/// the next tick re-reads it instead of showing the old value for `ttl`.
+fn invalidate_probe(slot: &'static ProbeSlot) {
+    if let Some(lock) = slot.get() {
+        if let Ok(mut cached) = lock.lock() {
+            *cached = None;
+        }
+    }
+}
+
+/// Cut `text` to `max` chars (multibyte-safe) with a trailing ellipsis.
+fn truncate_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(max.saturating_sub(1)).collect();
+    format!("{cut}…")
+}
+
+/// The active NetworkManager connection: VPN, then Wi-Fi (its SSID),
+/// then wired, then anything else; `offline` when nothing is up.
+pub fn net_info() -> String {
+    cached_probe(&NET_INFO_PROBE, PROBE_TTL, || {
+        let out = Command::new("nmcli")
+            .args([
+                "-t", "--escape", "no", "-f", "NAME,TYPE,DEVICE", "connection", "show",
+                "--active",
+            ])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut best: Option<(u8, String)> = None;
+        for line in text.lines() {
+            let mut parts = line.splitn(3, ':');
+            let (Some(name), Some(kind)) = (parts.next(), parts.next()) else {
+                continue;
+            };
+            if kind == "loopback" {
+                continue;
+            }
+            let rank = match kind {
+                "vpn" | "wireguard" => 0,
+                "802-11-wireless" => 1,
+                "802-3-ethernet" => 2,
+                _ => 3,
+            };
+            if best.as_ref().is_none_or(|(current, _)| rank < *current) {
+                best = Some((rank, name.to_string()));
+            }
+        }
+        Some(best.map_or_else(|| "offline".to_string(), |(_, name)| truncate_chars(&name, 24)))
+    })
+    .unwrap_or_else(|| "N/A".to_string())
+}
+
+/// power-profiles-daemon's active profile, as a readable label.
+pub fn power_profile() -> String {
+    cached_probe(&POWER_PROFILE_PROBE, PROBE_TTL, || {
+        let out = Command::new("powerprofilesctl").arg("get").output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!raw.is_empty()).then_some(raw)
+    })
+    .map(|raw| match raw.as_str() {
+        "balanced" => "Balanced".to_string(),
+        "performance" => "Performance".to_string(),
+        "power-saver" => "Power saver".to_string(),
+        other => other.to_string(),
+    })
+    .unwrap_or_else(|| "N/A".to_string())
+}
+
+/// Click on the power-profile sensor: balanced → performance →
+/// power-saver → balanced. Spawned off the UI thread.
+pub fn cycle_power_profile() {
+    let current = Command::new("powerprofilesctl")
+        .arg("get")
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string());
+    let next = match current.as_deref() {
+        Some("performance") => "power-saver",
+        Some("power-saver") => "balanced",
+        _ => "performance",
+    };
+    let _ = Command::new("powerprofilesctl").args(["set", next]).status();
+    invalidate_probe(&POWER_PROFILE_PROBE);
+}
+
+/// BlueZ adapter state: `Off`, `On`, `On (N)` or the single connected
+/// device's name.
+pub fn bluetooth_info() -> String {
+    cached_probe(&BLUETOOTH_PROBE, PROBE_TTL, || {
+        let show = Command::new("bluetoothctl").arg("show").output().ok()?;
+        if !show.status.success() {
+            return None;
+        }
+        let powered = String::from_utf8_lossy(&show.stdout)
+            .lines()
+            .any(|line| line.trim() == "Powered: yes");
+        if !powered {
+            return Some("Off".to_string());
+        }
+        let devices = Command::new("bluetoothctl")
+            .args(["devices", "Connected"])
+            .output()
+            .ok()?;
+        let names: Vec<String> = String::from_utf8_lossy(&devices.stdout)
+            .lines()
+            .filter_map(|line| line.strip_prefix("Device "))
+            .filter_map(|rest| rest.split_once(' ').map(|(_, name)| name.trim().to_string()))
+            .filter(|name| !name.is_empty())
+            .collect();
+        Some(match names.len() {
+            0 => "On".to_string(),
+            1 => truncate_chars(&names[0], 20),
+            count => format!("On ({count})"),
+        })
+    })
+    .unwrap_or_else(|| "N/A".to_string())
+}
+
+/// Click on the Bluetooth sensor: toggle the adapter (off disconnects
+/// every device — that is the user's click).
+pub fn toggle_bluetooth() {
+    let on = Command::new("bluetoothctl")
+        .arg("show")
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .is_some_and(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .any(|line| line.trim() == "Powered: yes")
+        });
+    let _ = Command::new("bluetoothctl")
+        .args(["power", if on { "off" } else { "on" }])
+        .status();
+    invalidate_probe(&BLUETOOTH_PROBE);
+}
+
+/// The `main` keyboard (falling back to the first), from the `devices`
+/// document.
+fn main_keyboard(json: &serde_json::Value) -> Option<&serde_json::Value> {
+    let keyboards = json["keyboards"].as_array()?;
+    keyboards
+        .iter()
+        .find(|keyboard| keyboard["main"].as_bool() == Some(true))
+        .or_else(|| keyboards.first())
+}
+
+/// Short code for a Hyprland keymap name (`Italian` → `IT`).
+fn keymap_code(name: &str) -> String {
+    match name.to_lowercase().as_str() {
+        "italian" => "IT",
+        "english (us)" | "english (usa)" | "us" => "EN",
+        "english (uk)" | "gb" => "UK",
+        "german" | "de" => "DE",
+        "french" | "fr" => "FR",
+        "spanish" | "es" => "ES",
+        "portuguese" | "pt" => "PT",
+        "russian" | "ru" => "RU",
+        _ => {
+            let code: String = name
+                .chars()
+                .filter(|c| c.is_ascii_alphabetic())
+                .take(2)
+                .collect();
+            return code.to_uppercase();
+        }
+    }
+    .to_string()
+}
+
+/// Hyprland's main keyboard layout and lock state: `IT`, `IT CAPS`,
+/// `IT NUM`, both when active (plain words: the layout font is the
+/// user's, and the arrow glyphs are not guaranteed to exist).
+pub fn keyboard_info() -> String {
+    let Ok(out) = Command::new("hyprctl").args(["-j", "devices"]).output() else {
+        return "N/A".to_string();
+    };
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
+        return "N/A".to_string();
+    };
+    let Some(keyboard) = main_keyboard(&json) else {
+        return "N/A".to_string();
+    };
+    let mut text = keymap_code(keyboard["active_keymap"].as_str().unwrap_or(""));
+    if keyboard["capsLock"].as_bool() == Some(true) {
+        text.push_str(" CAPS");
+    }
+    if keyboard["numLock"].as_bool() == Some(true) {
+        text.push_str(" NUM");
+    }
+    text
+}
+
+/// Click on the keyboard sensor: next configured layout on the main
+/// keyboard (a single-layout setup stays put).
+pub fn keyboard_next_layout() {
+    let Ok(out) = Command::new("hyprctl").args(["-j", "devices"]).output() else {
+        return;
+    };
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
+        return;
+    };
+    let Some(name) = main_keyboard(&json).and_then(|keyboard| keyboard["name"].as_str()) else {
+        return;
+    };
+    let _ = Command::new("hyprctl")
+        .args(["switchxkblayout", name, "next"])
+        .status();
 }

@@ -315,25 +315,15 @@ pub fn spawn_closed_signal(id: u32) {
 
 // ── popup-facing snapshots (F3) ────────────────────────────────────
 
-/// Icon a card can render: image-data (the handle comes from
-/// `icon_handle`, cached per notification) or a path from
-/// `image-path`/`app_icon` (a themed icon *name* simply yields no
-/// icon).
-pub enum CardIcon {
-    /// The entry carries `image-data`; the view fetches the handle by
-    /// notification id, so the payload itself is never cloned here.
-    Image,
-    Path(String),
-}
-
 /// One popup card: the fields the view draws, cloned out so the history
 /// lock is never held across rendering.
 pub struct Card {
     pub id: u32,
     pub summary: String,
     pub body: String,
-    /// Priority per spec: image-data first, path as fallback.
-    pub icon: Option<CardIcon>,
+    /// The entry carries an icon (`image`, already downscaled at insert;
+    /// the handle comes from `icon_handle`, cached per notification).
+    pub icon: bool,
 }
 
 /// The active notifications, newest first, at most `max` (the stack
@@ -350,11 +340,7 @@ pub fn active_cards(max: usize) -> Vec<Card> {
             id: n.id,
             summary: n.summary.clone(),
             body: n.body.clone(),
-            icon: n
-                .image
-                .as_ref()
-                .map(|_| CardIcon::Image)
-                .or_else(|| (!n.icon.is_empty()).then(|| CardIcon::Path(n.icon.clone()))),
+            icon: n.image.is_some(),
         })
         .collect()
 }
@@ -389,8 +375,7 @@ pub fn icon_handle(id: u32) -> Option<iced::widget::image::Handle> {
         .iter()
         .find(|n| n.id == id && n.closed.is_none())?
         .image
-        .as_ref()?;
-    let handle = iced::widget::image::Handle::from_rgba(
+        .as_ref()?;    let handle = iced::widget::image::Handle::from_rgba(
         img.width as u32,
         img.height as u32,
         img.data.clone(),
@@ -516,8 +501,7 @@ fn hint_string(hints: &HashMap<String, OwnedValue>, key: &str) -> Option<String>
 /// rowstride, has_alpha, bits_per_sample, **channels**, data): 8-bit
 /// samples over `rowstride * height` rows, repacked here to tight RGBA
 /// (padding stripped per row, alpha added when the payload is RGB).
-fn parse_image_data(hints: &HashMap<String, OwnedValue>) -> Option<ImageData> {
-    let value = hint(hints, "image-data")?;
+fn parse_image_data(hints: &HashMap<String, OwnedValue>) -> Option<ImageData> {    let value = hint(hints, "image-data")?;
     let (width, height, rowstride, has_alpha, bits, channels, data) = value
         .downcast::<(i32, i32, i32, bool, i32, i32, Vec<u8>)>()
         .ok()?;
@@ -547,11 +531,49 @@ fn parse_image_data(hints: &HashMap<String, OwnedValue>) -> Option<ImageData> {
             rgba.push(if channels == 4 { px[3] } else { 255 });
         }
     }
-    Some(ImageData {
+    Some(fit_icon(ImageData {
         width: width as i32,
         height: height as i32,
         data: rgba,
-    })
+    }))
+}
+
+/// Longest edge kept for a card icon. The popup draws it at 32 px, so a
+/// full picture (a 1080p preview is 8 MB decoded, 4K one 33 MB) is pure
+/// waste both in the history and on the GPU.
+const ICON_PX: u32 = 64;
+
+/// Shrink an RGBA picture so its longest edge is `ICON_PX`, keeping the
+/// aspect ratio. Small images pass through untouched.
+fn fit_icon(image: ImageData) -> ImageData {
+    let (w, h) = (image.width as u32, image.height as u32);
+    if w <= ICON_PX && h <= ICON_PX {
+        return image;
+    }
+    let rgba = image::RgbaImage::from_raw(w, h, image.data)
+        .expect("RGBA buffer is exactly width*height*4");
+    let scale = ICON_PX as f32 / w.max(h) as f32;
+    let (tw, th) = (
+        ((w as f32 * scale).round() as u32).max(1),
+        ((h as f32 * scale).round() as u32).max(1),
+    );
+    ImageData {
+        width: tw as i32,
+        height: th as i32,
+        data: image::imageops::thumbnail(&rgba, tw, th).into_raw(),
+    }
+}
+
+/// Decode an `image-path`/`app_icon` file once, at card size: keeping
+/// the full picture would cost megabytes per notification for a 32 px
+/// icon. A themed icon *name* is not a path and yields no image.
+fn read_icon_path(path: &str) -> Option<ImageData> {
+    let rgba = image::open(path).ok()?.into_rgba8();
+    Some(fit_icon(ImageData {
+        width: rgba.width() as i32,
+        height: rgba.height() as i32,
+        data: rgba.into_raw(),
+    }))
 }
 
 // ── D-Bus interface ────────────────────────────────────────────────
@@ -576,10 +598,12 @@ impl Notifications {
         expire_timeout: i32,
     ) -> zbus::fdo::Result<u32> {
         let urgency = hint_u8(&hints, "urgency").unwrap_or(1).min(2);
-        let image = parse_image_data(&hints);
         let icon = hint_string(&hints, "image-path")
             .filter(|p| !p.is_empty())
             .unwrap_or(app_icon);
+        // image-data wins; a real icon file is decoded here, at card
+        // size, so the history and the GPU never hold a full picture.
+        let image = parse_image_data(&hints).or_else(|| read_icon_path(&icon));
         let n = Notification {
             id: 0,
             app: app_name,
@@ -904,6 +928,29 @@ mod tests {
         assert_eq!(REASON_EXPIRED, 1, "expired");
         assert_eq!(REASON_DISMISSED, 2, "dismissed by the user");
         assert_eq!(REASON_CLOSED, 3, "closed by CloseNotification");
+    }
+
+    #[test]
+    fn large_icons_are_downscaled_to_card_size() {
+        // A 200x100 picture becomes 64x32: longest edge capped, aspect
+        // kept, buffer sized 64*32*4 (a 32 px card icon needs no more).
+        let out = fit_icon(ImageData {
+            width: 200,
+            height: 100,
+            data: vec![0; 200 * 100 * 4],
+        });
+        assert_eq!((out.width, out.height), (64, 32));
+        assert_eq!(out.data.len(), 64 * 32 * 4);
+
+        // Already small: passed through untouched (no re-encode).
+        let small = ImageData {
+            width: 32,
+            height: 32,
+            data: vec![7; 32 * 32 * 4],
+        };
+        let out = fit_icon(small);
+        assert_eq!((out.width, out.height), (32, 32));
+        assert_eq!(out.data.len(), 32 * 32 * 4);
     }
 
     #[test]

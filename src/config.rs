@@ -230,7 +230,44 @@ pub struct PanelConfig {
     /// Freedesktop Desktop Notifications server (`notifications.rs`);
     /// present ⇔ the D-Bus server runs.
     pub notifications: Option<NotificationsConfig>,
+    /// Session tweaks that patch the compositor at runtime (Tweaks tab);
+    /// absent = every tweak off, nothing is queried or dispatched.
+    pub tweaks: Option<TweaksConfig>,
     pub sections: Vec<SectionConfig>,
+}
+
+/// `panel.tweaks`: settings that do not belong to the panel's own
+/// appearance. Every block is optional, so an absent key costs nothing.
+#[derive(Deserialize, serde::Serialize, Clone)]
+pub struct TweaksConfig {
+    /// Shrink the gap between windows as more of them open.
+    #[serde(default)]
+    pub dynamic_gaps: Option<DynamicGapsConfig>,
+}
+
+/// `panel.tweaks.dynamic_gaps`: the bar patches Hyprland's
+/// `general:gaps_in` from the open-window count. `max` with one window,
+/// then a 25% of the `max - min` range less per extra window, never
+/// below `min`. The count is every open window (a global Hyprland value
+/// must not re-tile on every workspace switch).
+#[derive(Deserialize, serde::Serialize, Clone)]
+pub struct DynamicGapsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Gap with one (or zero) windows; also the default when absent.
+    #[serde(default = "default_gap_min")]
+    pub min: i32,
+    /// Gap floor reached after enough windows.
+    #[serde(default = "default_gap_max")]
+    pub max: i32,
+}
+
+fn default_gap_min() -> i32 {
+    4
+}
+
+fn default_gap_max() -> i32 {
+    16
 }
 
 /// `panel.wallpaper`: the desktop background the bar draws on the
@@ -446,7 +483,14 @@ pub struct SensorConfig {
 #[allow(clippy::upper_variable_names)]
 pub enum SensorSource {
     #[serde(rename = "command", alias = "Command")]
-    Command { command: String },
+    Command {
+        command: String,
+        /// Minimum seconds between two runs; absent/0 = every tick.
+        /// The bar polls at 1 Hz, so expensive commands (network
+        /// probes, `checkupdates`, …) opt into a slower cadence.
+        #[serde(default)]
+        interval: Option<u64>,
+    },
     #[serde(rename = "env_var", alias = "EnvVar")]
     EnvVar { env_var: String },
     #[serde(rename = "static_text", alias = "StaticText")]
@@ -511,6 +555,22 @@ pub enum SensorSource {
     Uptime {},
     #[serde(rename = "net_state", alias = "Network")]
     NetState { interface: String },
+    /// Active NetworkManager connection: Wi-Fi SSID, VPN or wired name
+    /// (`offline` when nothing is up).
+    #[serde(rename = "net_info")]
+    NetInfo {},
+    /// power-profiles-daemon's active profile (balanced, performance,
+    /// power-saver); click cycles it.
+    #[serde(rename = "power_profile")]
+    PowerProfile {},
+    /// BlueZ adapter state and connected devices; click toggles the
+    /// adapter.
+    #[serde(rename = "bluetooth")]
+    Bluetooth {},
+    /// Hyprland keyboard layout and Caps/Num lock of the main keyboard;
+    /// click switches to the next configured layout.
+    #[serde(rename = "keyboard")]
+    Keyboard {},
     #[serde(rename = "clock", alias = "Clock")]
     Clock { format: Option<String> },
     /// Date/time on the bar (arbitrary `date` strftime, like `clock`)
@@ -613,6 +673,7 @@ pub fn default_config() -> Config {
             sensor_defaults: None,
             section_defaults: None,
             notifications: None,
+            tweaks: None,
             sections: vec![section],
         },
     }
@@ -799,6 +860,18 @@ pub fn validate_config(cfg: &Config) -> Vec<ConfigError> {
         err_range_u32(&mut errors, "panel.screen_corners.radius", Some(c.radius), 1, 256);
     }
 
+    if let Some(g) = p.tweaks.as_ref().and_then(|t| t.dynamic_gaps.as_ref()) {
+        let path = "panel.tweaks.dynamic_gaps";
+        err_range(&mut errors, &format!("{path}.min"), Some(g.min), 0, 200);
+        err_range(&mut errors, &format!("{path}.max"), Some(g.max), 0, 200);
+        if g.min > g.max {
+            errors.push(ConfigError {
+                path: path.to_string(),
+                message: "the minimum gap cannot exceed the maximum".to_string(),
+            });
+        }
+    }
+
     if let Some(d) = &p.sensor_defaults {
         err_sensor_style(
             &mut errors,
@@ -918,6 +991,14 @@ pub fn validate_config(cfg: &Config) -> Vec<ConfigError> {
                     errors.push(ConfigError {
                         path: format!("{spath}.source.count"),
                         message: format!("{count}: expected 1..=50"),
+                    });
+                }
+            }
+            if let SensorSource::Command { interval: Some(interval), .. } = &sensor.source {
+                if *interval > 86_400 {
+                    errors.push(ConfigError {
+                        path: format!("{spath}.source.interval"),
+                        message: format!("{interval}: expected 0..=86400"),
                     });
                 }
             }
@@ -1532,6 +1613,73 @@ mod tests {
         assert!(validate_config(&empty)
             .iter()
             .any(|e| e.path == "panels[1].sections"));
+    }
+
+    /// The Tweaks block is optional (absent = every tweak off) and the
+    /// dynamic-gaps range must not be inverted.
+    #[test]
+    fn dynamic_gaps_tweaks_parse_and_validate() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[],"tweaks":{"dynamic_gaps":{"enabled":true}}}}"#,
+        )
+        .expect("tweaks must parse");
+        let gaps = cfg
+            .panel
+            .tweaks
+            .as_ref()
+            .and_then(|t| t.dynamic_gaps.as_ref())
+            .expect("dynamic gaps");
+        assert!(gaps.enabled);
+        assert_eq!((gaps.min, gaps.max), (4, 16), "serde defaults");
+        assert!(validate_config(&cfg).is_empty());
+
+        let bad: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[],"tweaks":{"dynamic_gaps":{"enabled":true,"min":20,"max":10}}}}"#,
+        )
+        .unwrap();
+        assert!(validate_config(&bad)
+            .iter()
+            .any(|e| e.path == "panel.tweaks.dynamic_gaps"));
+    }
+
+    /// The runtime-state sources parse with no parameters, and a
+    /// command's interval is bounded like every other numeric field.
+    #[test]
+    fn runtime_sensors_parse_and_command_interval_is_bounded() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[{"sensors":[
+                {"name":"N","source":{"type":"net_info"}},
+                {"name":"P","source":{"type":"power_profile"}},
+                {"name":"B","source":{"type":"bluetooth"}},
+                {"name":"K","source":{"type":"keyboard"}},
+                {"name":"C","source":{"type":"command","command":"date","interval":30}}
+            ]}]}}"#,
+        )
+        .expect("sources must parse");
+        let sources: Vec<&SensorSource> = cfg.panel.sections[0]
+            .sensors
+            .iter()
+            .map(|sensor| &sensor.source)
+            .collect();
+        assert!(matches!(sources[0], SensorSource::NetInfo {}));
+        assert!(matches!(sources[1], SensorSource::PowerProfile {}));
+        assert!(matches!(sources[2], SensorSource::Bluetooth {}));
+        assert!(matches!(sources[3], SensorSource::Keyboard {}));
+        assert!(matches!(
+            sources[4],
+            SensorSource::Command { interval: Some(30), .. }
+        ));
+        assert!(validate_config(&cfg).is_empty());
+
+        let bad: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[{"sensors":[
+                {"name":"C","source":{"type":"command","command":"date","interval":90000}}
+            ]}]}}"#,
+        )
+        .unwrap();
+        assert!(validate_config(&bad)
+            .iter()
+            .any(|error| error.path == "panel.sections[0].sensors[0].source.interval"));
     }
 
     /// The output selection roundtrips; absent means "focused output".

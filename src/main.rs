@@ -56,6 +56,7 @@ mod text_util;
 mod text_width;
 mod tooltip;
 mod tray;
+mod tweaks;
 mod volume_ui;
 mod wallpaper_ui;
 mod windows;
@@ -1002,8 +1003,17 @@ fn spawn_read(panel: &mut Panel) -> Command<Message> {
         .flat_map(|sec| &sec.sensors)
         .map(|s| s.source.clone())
         .collect();
+    // Dynamic gaps count the open windows every pass; off = no snapshot
+    // unless a configured sensor already needs it.
+    let dynamic_gaps = panel
+        .config
+        .panel
+        .tweaks
+        .as_ref()
+        .and_then(|t| t.dynamic_gaps.as_ref())
+        .is_some_and(|g| g.enabled);
     Command::perform(
-        smol::unblock(move || sensor_runner::read_all(&sources)),
+        smol::unblock(move || sensor_runner::read_all(&sources, dynamic_gaps)),
         move |reads| Message::SensorsReady(cfg_gen, reads),
     )
 }
@@ -1014,6 +1024,12 @@ fn spawn_read(panel: &mut Panel) -> Command<Message> {
 /// the window commands the caller batches.
 fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<Command<Message>> {
     let sensor_runner::Reads { hypr, values } = data;
+    // Dynamic gaps first: the layout pass below measures the tiling the
+    // new gap produces, never one it invalidates right after.
+    tweaks::sync(
+        &panel.config.panel,
+        hypr.as_ref().and_then(|h| h.clients.as_deref()),
+    );
     // ── Layout engine (roadmap layout-automatici) ──
     // One shared text for every `layout` sensor, computed here from the
     // engine's own state (the runner knows nothing about it). The
@@ -1738,6 +1754,32 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
                 mpris::play_pause();
                 return Command::none();
             }
+            // The runtime-state sensors' click is their control: the
+            // power profile cycles, Bluetooth toggles, the keyboard
+            // layout advances. Like the media sensor, a configured shell
+            // action has no useful meaning here.
+            let control = panel
+                .config
+                .panel
+                .sections
+                .get(section_index)
+                .and_then(|sec| sec.sensors.get(sensor_index))
+                .map(|s| &s.source);
+            match control {
+                Some(config::SensorSource::PowerProfile {}) => {
+                    std::thread::spawn(sensors::cycle_power_profile);
+                    return Command::none();
+                }
+                Some(config::SensorSource::Bluetooth {}) => {
+                    std::thread::spawn(sensors::toggle_bluetooth);
+                    return Command::none();
+                }
+                Some(config::SensorSource::Keyboard {}) => {
+                    std::thread::spawn(sensors::keyboard_next_layout);
+                    return Command::none();
+                }
+                _ => {}
+            }
             let action = action.filter(|a| !a.trim().is_empty());
             match action.as_deref() {
                 Some(ACTION_CLOSE_PANEL) => {
@@ -1830,6 +1872,11 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
                     {
                         sensor_value.value = notifications::display_value();
                     }
+                    return Command::none();
+                }
+                if matches!(source, Some(config::SensorSource::PowerProfile {})) {
+                    // Wheel cycles the profile like a click.
+                    std::thread::spawn(sensors::cycle_power_profile);
                     return Command::none();
                 }
                 let volume_device = match source {
@@ -3264,6 +3311,16 @@ fn style(_app: &App, _theme: &iced::Theme) -> iced::theme::Style {
 // ── main ────────────────────────────────────────────────────────────
 
 fn main() -> Result<(), iced_exwlshell::Error> {
+    // glibc raises its dynamic mmap threshold after the first multi-MB
+    // free, so later image decodes (notification icons, wallpaper) come
+    // from the heap and stay there: measured ~0.7 MB of RSS per icon,
+    // never returned (88 icons ≈ +70 MB). A fixed trim threshold hands
+    // the top of the heap back on free (+14 MB in the same test).
+    #[cfg(target_env = "gnu")]
+    unsafe {
+        libc::mallopt(libc::M_TRIM_THRESHOLD, 128 * 1024);
+    }
+
     // Parse CLI args for config path.
     let config_path = parse_config_arg();
 
@@ -3496,6 +3553,8 @@ fn main() -> Result<(), iced_exwlshell::Error> {
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
     eprintln!("[piuma] close_panel requested — exiting …");
+    // Restore the gaps the bar patched at runtime before leaving.
+    tweaks::restore_on_exit();
 
     // Detach the iced thread so the process exit terminates it.
     std::mem::forget(handle);

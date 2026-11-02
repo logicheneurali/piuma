@@ -133,6 +133,13 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
         Message::CornersRadiusChanged(value) => {
             corners_set(&mut state.config, |c| c.radius = value);
         }
+        Message::DynamicGapsEnabled(value) => {
+            // The toggle flips `enabled`: min/max survive both directions,
+            // and the bar only starts querying Hyprland while it is on.
+            dynamic_gaps_mut(&mut state.config).enabled = value;
+        }
+        Message::GapMinChanged(value) => dynamic_gaps_mut(&mut state.config).min = value,
+        Message::GapMaxChanged(value) => dynamic_gaps_mut(&mut state.config).max = value,
         Message::TabSelected(tab) => {
             // The Layouts tab reads the bar's file on every selection,
             // so layouts saved meanwhile show up without a restart; an
@@ -565,6 +572,14 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                         "env_var" => sensor.source_config.env_var = if value.is_empty() { None } else { Some(value) },
                         "text" => sensor.source_config.static_text = if value.is_empty() { None } else { Some(value) },
                         "count" => sensor.source_config.count = value.parse::<u32>().ok(),
+                        "interval" => {
+                            sensor.source_config.interval = value
+                                .trim()
+                                .parse::<u32>()
+                                .ok()
+                                .filter(|interval| *interval > 0);
+                            sensor.source_config.interval_text = value;
+                        }
                         _ => {}
                     }
                 }

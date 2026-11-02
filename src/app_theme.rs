@@ -161,6 +161,9 @@ pub fn install_exit_cleanup(config_path: std::path::PathBuf, panel: config::Pane
     std::thread::spawn(move || {
         if signals.forever().next().is_some() {
             sync(&config_path, &disabled, None);
+            // The dynamic-gaps tweak patched Hyprland at runtime: put the
+            // user's own value back before leaving.
+            crate::tweaks::restore_on_exit();
             std::process::exit(0);
         }
     });
