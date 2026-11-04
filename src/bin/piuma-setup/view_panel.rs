@@ -4,9 +4,10 @@ use iced::widget::{button, column, container, scrollable, text, toggler, Column,
 use iced::{Element, Length};
 
 use crate::controls::{
-    align_row, anchor_grid, border_type_options, color_control, color_control_over, form_grid,
-    icon_theme_options, input, invalid_under, monitor_outputs, notif_position_grid, picklist,
-    slider_control, theme_cell, SYSTEM_ICON_THEME,
+    align_row, anchor_grid, border_type_options, color_control, color_control_over, font_families,
+    form_grid, icon_theme_options, input, invalid_under, monitor_outputs, notif_position_grid,
+    options_with_current, picklist, slider_control, theme_cell, DEFAULT_OPTION,
+    SYSTEM_ICON_THEME,
 };
 use crate::style::*;
 use crate::state::{Message, PiumaSetup};
@@ -29,9 +30,10 @@ pub(crate) fn panel_settings(state: &PiumaSetup) -> Element<'_, Message> {
     // Font Size / Thickness keep their u32 sliders inline: a shared generic
     // slider helper would need `num_traits` bounds, which this binary doesn't depend on.
     let fields = vec![
-        ("Font", input("Font name", state.config.font.as_deref().unwrap_or(""), Message::FontChanged)
-            .width(Length::Fill)
-            .into()),
+        (
+            "Font",
+            font_cell(state.config.font.as_deref().unwrap_or("")),
+        ),
         ("Font Size", invalid_under(
             Row::new()
                 .push(Slider::new(8..=32, font_size, Message::FontSizeChanged).width(Length::Fill))
@@ -276,7 +278,7 @@ fn additional_panels(state: &PiumaSetup) -> Element<'_, Message> {
     );
     column![
         text("Additional panels").size(12).style(fg_text(pal)),
-        text("Sections are assigned exclusively: the main panel shows the ones not listed here; a secondary panel needs at least one. Comma-separated names; placement applies at the next piuma start.")
+        text("Sections are assigned exclusively: the main panel shows the ones not listed here; a secondary panel needs at least one. Comma-separated names; placement applies at the next piuma start (or via Reload Piuma in the footer).")
             .size(10)
             .style(muted_text(pal)),
         list,
@@ -471,4 +473,33 @@ pub(crate) fn notifications_settings<'a>(state: &'a PiumaSetup) -> Element<'a, M
         .width(Length::Fill),
     )
     .into()
+}
+
+/// The Font cell: the installed families (the renderer's own list) next
+/// to the free-text field, like the sensor-source combos. The sentinel
+/// clears the key, so the bar's default family applies.
+fn font_cell(current: &str) -> Element<'_, Message> {
+    let selected = if current.is_empty() {
+        DEFAULT_OPTION.to_string()
+    } else {
+        current.to_string()
+    };
+    let pick = picklist(
+        options_with_current(font_families().to_vec(), current),
+        Some(selected),
+        |value: String| {
+            Message::FontChanged(if value == DEFAULT_OPTION {
+                String::new()
+            } else {
+                value
+            })
+        },
+    )
+    .width(Length::Fixed(170.0));
+    Row::new()
+        .push(pick)
+        .push(input("Font name", current, Message::FontChanged).width(Length::Fill))
+        .spacing(6)
+        .width(Length::Fill)
+        .into()
 }

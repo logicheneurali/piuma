@@ -454,6 +454,31 @@ pub(crate) fn sensor_view<'a>(
             .width(Length::Fill)
             .into()
         }
+        "list" => {
+            column![
+                input("Command", sensor.source_config.command.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "command".to_string(), value))
+                    .width(Length::Fill),
+                input("Interval (s, 0 = every tick)", &sensor.source_config.interval_text, move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "interval".to_string(), value))
+                    .width(Length::Fill),
+                slider_control(
+                    1i32..=200,
+                    sensor.source_config.count.unwrap_or(10) as i32,
+                    None,
+                    move |value| Message::SensorSourceTypeConfigChanged(
+                        section_index,
+                        sensor_index,
+                        "count".to_string(),
+                        value.to_string(),
+                    ),
+                ),
+                text("The sensor shows its name, or the command's first line when the name is empty. Hovering lists up to this many lines of its output.")
+                    .size(10)
+                    .style(muted_text(pal)),
+            ]
+            .spacing(2)
+            .width(Length::Fill)
+            .into()
+        }
         "env_var" => input("Env Var", sensor.source_config.env_var.as_deref().unwrap_or(""), move |value| Message::SensorSourceTypeConfigChanged(section_index, sensor_index, "env_var".to_string(), value))
             .width(Length::Fill)
             .into(),

@@ -63,9 +63,137 @@ pub(crate) fn corners_set(config: &mut PiumaConfig, edit: impl FnOnce(&mut Scree
 
 /// The `panel.tweaks` block (Tweaks tab): session settings that patch
 /// the compositor at runtime instead of the bar's own look.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TweaksCfg {
     pub dynamic_gaps: Option<DynamicGapsCfg>,
+    pub window_menu: Option<WindowMenuCfg>,
+    pub shadows: Option<ShadowsCfg>,
+    pub borders: Option<BordersCfg>,
+}
+
+/// `panel.tweaks.borders`: Hyprland's window borders. Defaults mirror
+/// the bar's serde fallbacks (Hyprland's own values).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BordersCfg {
+    pub enabled: bool,
+    pub size: i32,
+    pub active: String,
+    pub inactive: String,
+}
+
+/// Hyprland's own border colours (`rgba(33ccffee)` / `rgba(595959aa)`),
+/// shown when the block is absent and the live value cannot be read.
+pub(crate) const BORDER_ACTIVE: &str = "#33ccffee";
+pub(crate) const BORDER_INACTIVE: &str = "#595959aa";
+
+impl Default for BordersCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            size: 1,
+            active: BORDER_ACTIVE.to_string(),
+            inactive: BORDER_INACTIVE.to_string(),
+        }
+    }
+}
+
+/// The border block, created with the bar's defaults on first use.
+pub(crate) fn borders_mut(config: &mut PiumaConfig) -> &mut BordersCfg {
+    config
+        .tweaks
+        .get_or_insert_with(|| TweaksCfg {
+            dynamic_gaps: None,
+            window_menu: None,
+            shadows: None,
+            borders: None,
+        })
+        .borders
+        .get_or_insert_with(BordersCfg::default)
+}
+
+/// `panel.tweaks.shadows`: Hyprland's `decoration:shadow:*`. Defaults
+/// mirror the bar's serde fallbacks (Hyprland's own values).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShadowsCfg {
+    pub enabled: bool,
+    pub range: i32,
+    pub render_power: i32,
+    pub sharp: bool,
+    pub color: String,
+    pub color_inactive: String,
+    pub offset: [i32; 2],
+    pub scale: f32,
+}
+
+/// Hyprland's own shadow colours (`0x99000000` / `0xffffffff`) in the
+/// config's RGBA order: the editor shows them when the block is absent.
+pub(crate) const SHADOW_COLOR: &str = "#00000099";
+pub(crate) const SHADOW_COLOR_INACTIVE: &str = "#ffffffff";
+
+impl Default for ShadowsCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            range: 10,
+            render_power: 1,
+            sharp: false,
+            color: SHADOW_COLOR.to_string(),
+            color_inactive: SHADOW_COLOR_INACTIVE.to_string(),
+            offset: [0, 0],
+            scale: 1.0,
+        }
+    }
+}
+
+/// The shadow block, created with the bar's defaults on first use: an
+/// absent block means nothing is written to Hyprland.
+pub(crate) fn shadows_mut(config: &mut PiumaConfig) -> &mut ShadowsCfg {
+    config
+        .tweaks
+        .get_or_insert_with(|| TweaksCfg {
+            dynamic_gaps: None,
+            window_menu: None,
+            shadows: None,
+            borders: None,
+        })
+        .shadows
+        .get_or_insert_with(ShadowsCfg::default)
+}
+
+/// `panel.tweaks.window_menu`: the floating close/float/sticky menu that
+/// follows the focused window. Defaults match the bar (off, top-center).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowMenuCfg {
+    pub enabled: bool,
+    pub position: String,
+}
+
+impl Default for WindowMenuCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            position: "top-center".to_string(),
+        }
+    }
+}
+
+/// The positions the bar accepts, in picker order: (config value, label).
+pub(crate) const WINDOW_MENU_POSITIONS: [(&str, &str); 6] = [
+    ("top-left", "Top left"),
+    ("top-center", "Top center"),
+    ("top-right", "Top right"),
+    ("bottom-left", "Bottom left"),
+    ("bottom-center", "Bottom center"),
+    ("bottom-right", "Bottom right"),
+];
+
+/// The menu's label for a stored position ("top-center" → "Top center").
+pub(crate) fn window_menu_label(position: &str) -> &'static str {
+    WINDOW_MENU_POSITIONS
+        .iter()
+        .find(|(key, _)| *key == position)
+        .map(|(_, label)| *label)
+        .unwrap_or("Top center")
 }
 
 /// `panel.tweaks.dynamic_gaps`: shrink Hyprland's `gaps_in` as more
@@ -88,9 +216,29 @@ impl Default for DynamicGapsCfg {
 pub(crate) fn dynamic_gaps_mut(config: &mut PiumaConfig) -> &mut DynamicGapsCfg {
     config
         .tweaks
-        .get_or_insert_with(|| TweaksCfg { dynamic_gaps: None })
+        .get_or_insert_with(|| TweaksCfg {
+            dynamic_gaps: None,
+            window_menu: None,
+            shadows: None,
+            borders: None,
+        })
         .dynamic_gaps
         .get_or_insert_with(DynamicGapsCfg::default)
+}
+
+/// The window-menu edit, creating the blocks on first use: absent means
+/// the menu is off and the bar never opens its socket.
+pub(crate) fn window_menu_mut(config: &mut PiumaConfig) -> &mut WindowMenuCfg {
+    config
+        .tweaks
+        .get_or_insert_with(|| TweaksCfg {
+            dynamic_gaps: None,
+            window_menu: None,
+            shadows: None,
+            borders: None,
+        })
+        .window_menu
+        .get_or_insert_with(WindowMenuCfg::default)
 }
 
 /// One extra bar managed by the setup: placement plus the named sections
@@ -494,6 +642,35 @@ impl PiumaSetup {
                 dg.insert("max".to_string(), JsonValue::Number(g.max.into()));
                 tw.insert("dynamic_gaps".to_string(), JsonValue::Object(dg));
             }
+            if let Some(w) = &t.window_menu {
+                let mut wm = Map::new();
+                wm.insert("enabled".to_string(), JsonValue::Bool(w.enabled));
+                wm.insert("position".to_string(), JsonValue::String(w.position.clone()));
+                tw.insert("window_menu".to_string(), JsonValue::Object(wm));
+            }
+            if let Some(s) = &t.shadows {
+                let mut sh = Map::new();
+                sh.insert("enabled".to_string(), JsonValue::Bool(s.enabled));
+                sh.insert("range".to_string(), JsonValue::Number(s.range.into()));
+                sh.insert("render_power".to_string(), JsonValue::Number(s.render_power.into()));
+                sh.insert("sharp".to_string(), JsonValue::Bool(s.sharp));
+                sh.insert("color".to_string(), JsonValue::String(s.color.clone()));
+                sh.insert("color_inactive".to_string(), JsonValue::String(s.color_inactive.clone()));
+                sh.insert(
+                    "offset".to_string(),
+                    JsonValue::Array(vec![s.offset[0].into(), s.offset[1].into()]),
+                );
+                sh.insert("scale".to_string(), JsonValue::from(s.scale as f64));
+                tw.insert("shadows".to_string(), JsonValue::Object(sh));
+            }
+            if let Some(b) = &t.borders {
+                let mut bd = Map::new();
+                bd.insert("enabled".to_string(), JsonValue::Bool(b.enabled));
+                bd.insert("size".to_string(), JsonValue::Number(b.size.into()));
+                bd.insert("active".to_string(), JsonValue::String(b.active.clone()));
+                bd.insert("inactive".to_string(), JsonValue::String(b.inactive.clone()));
+                tw.insert("borders".to_string(), JsonValue::Object(bd));
+            }
             if !tw.is_empty() {
                 panel.insert("tweaks".to_string(), JsonValue::Object(tw));
             }
@@ -699,6 +876,18 @@ impl PiumaSetup {
             "workspace_dots" => {
                 if let Some(count) = sensor.source_config.count {
                     map.insert("count".to_string(), JsonValue::Number(count.into()));
+                }
+            }
+            // The same `count` field, under the key the bar expects.
+            "list" => {
+                if let Some(cmd) = &sensor.source_config.command {
+                    map.insert("command".to_string(), JsonValue::String(cmd.clone()));
+                }
+                if let Some(interval) = sensor.source_config.interval.filter(|i| *i > 0) {
+                    map.insert("interval".to_string(), JsonValue::Number(interval.into()));
+                }
+                if let Some(lines) = sensor.source_config.count {
+                    map.insert("max_lines".to_string(), JsonValue::Number(lines.into()));
                 }
             }
             _ => {}
@@ -947,6 +1136,71 @@ impl PiumaSetup {
                         enabled: g.get("enabled").and_then(JsonValue::as_bool).unwrap_or(false),
                         min: g.get("min").and_then(JsonValue::as_i64).unwrap_or(4) as i32,
                         max: g.get("max").and_then(JsonValue::as_i64).unwrap_or(16) as i32,
+                    })
+                }),
+                window_menu: o.get("window_menu").and_then(|w| {
+                    w.as_object().map(|w| WindowMenuCfg {
+                        enabled: w.get("enabled").and_then(JsonValue::as_bool).unwrap_or(false),
+                        position: w
+                            .get("position")
+                            .and_then(JsonValue::as_str)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| WindowMenuCfg::default().position),
+                    })
+                }),
+                shadows: o.get("shadows").and_then(|v| {
+                    v.as_object().map(|v| {
+                        let d = ShadowsCfg::default();
+                        let offset = v
+                            .get("offset")
+                            .and_then(JsonValue::as_array)
+                            .map(|list| {
+                                [
+                                    list.first().and_then(JsonValue::as_i64).unwrap_or(0) as i32,
+                                    list.get(1).and_then(JsonValue::as_i64).unwrap_or(0) as i32,
+                                ]
+                            })
+                            .unwrap_or(d.offset);
+                        ShadowsCfg {
+                            enabled: v.get("enabled").and_then(JsonValue::as_bool).unwrap_or(false),
+                            range: v.get("range").and_then(JsonValue::as_i64).unwrap_or(d.range as i64) as i32,
+                            render_power: v
+                                .get("render_power")
+                                .and_then(JsonValue::as_i64)
+                                .unwrap_or(d.render_power as i64) as i32,
+                            sharp: v.get("sharp").and_then(JsonValue::as_bool).unwrap_or(d.sharp),
+                            color: v
+                                .get("color")
+                                .and_then(JsonValue::as_str)
+                                .map(str::to_string)
+                                .unwrap_or(d.color),
+                            color_inactive: v
+                                .get("color_inactive")
+                                .and_then(JsonValue::as_str)
+                                .map(str::to_string)
+                                .unwrap_or(d.color_inactive),
+                            offset,
+                            scale: v.get("scale").and_then(JsonValue::as_f64).unwrap_or(d.scale as f64) as f32,
+                        }
+                    })
+                }),
+                borders: o.get("borders").and_then(|v| {
+                    v.as_object().map(|v| {
+                        let d = BordersCfg::default();
+                        BordersCfg {
+                            enabled: v.get("enabled").and_then(JsonValue::as_bool).unwrap_or(false),
+                            size: v.get("size").and_then(JsonValue::as_i64).unwrap_or(d.size as i64) as i32,
+                            active: v
+                                .get("active")
+                                .and_then(JsonValue::as_str)
+                                .map(str::to_string)
+                                .unwrap_or(d.active),
+                            inactive: v
+                                .get("inactive")
+                                .and_then(JsonValue::as_str)
+                                .map(str::to_string)
+                                .unwrap_or(d.inactive),
+                        }
                     })
                 }),
             })
@@ -1201,6 +1455,9 @@ impl PiumaSetup {
             if let Some(count) = source.get("count").and_then(|v| v.as_u64()) {
                 sensor.source_config.count = Some(count as u32);
             }
+            if let Some(lines) = source.get("max_lines").and_then(|v| v.as_u64()) {
+                sensor.source_config.count = Some(lines as u32);
+            }
             if let Some(format) = source.get("format").and_then(|v| v.as_str()) {
                 sensor.source_config.format = Some(format.to_string());
             }
@@ -1327,6 +1584,7 @@ pub(crate) fn canonical_type<'a>(source_type: &'a str) -> &'a str {
         "Window" => "window",
         "Workspace" => "workspace",
         "Command" => "command",
+        "List" => "list",
         "EnvVar" => "env_var",
         "StaticText" => "static_text",
         other => other,
@@ -1352,7 +1610,7 @@ pub(crate) const SOURCE_TYPES: &[&str] = &[
     // no numeric category
     "net_state", "net_info", "power_profile", "bluetooth", "keyboard",
     "uptime", "clock", "calendar", "window", "workspace",
-    "workspace_dots", "command", "env_var", "static_text", "volume_meter",
+    "workspace_dots", "command", "list", "env_var", "static_text", "volume_meter",
     "media", "tray", "notifications", "taskbar", "layout",
 ];
 
@@ -1411,6 +1669,7 @@ pub(crate) fn source_label(canonical: &str) -> &'static str {
         "taskbar" => "Window taskbar",
         "layout" => "Window layout",
         "command" => "Shell command",
+        "list" => "Data list",
         "env_var" => "Environment variable",
         "static_text" => "Text/Icon",
         "volume_meter" => "Volume bar",

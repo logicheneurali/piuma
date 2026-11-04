@@ -7,7 +7,7 @@ use iced::Task;
 
 use crate::autostart;
 use crate::config;
-use crate::controls::{content_scroll_id, scroll_target, sensor_card_id, sensor_name_id, sorted_rules};
+use crate::controls::{border_live, content_scroll_id, scroll_target, sensor_card_id, sensor_name_id, sorted_rules};
 use crate::modal::{Modal, RuleDraft};
 use crate::view_wallpaper::wallpaper_set;
 use crate::model::*;
@@ -138,8 +138,80 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
             // and the bar only starts querying Hyprland while it is on.
             dynamic_gaps_mut(&mut state.config).enabled = value;
         }
-        Message::GapMinChanged(value) => dynamic_gaps_mut(&mut state.config).min = value,
-        Message::GapMaxChanged(value) => dynamic_gaps_mut(&mut state.config).max = value,
+        Message::WindowMenuEnabled(value) => {
+            window_menu_mut(&mut state.config).enabled = value;
+        }
+        Message::WindowMenuPositionChanged(label) => {
+            // The picker offers the bar's eight values; an unknown label
+            // falls back to the default instead of writing garbage.
+            let key = WINDOW_MENU_POSITIONS
+                .iter()
+                .find(|(_, option)| *option == label)
+                .map(|(key, _)| *key)
+                .unwrap_or("top-center");
+            window_menu_mut(&mut state.config).position = key.to_string();
+        }
+        Message::ShadowsEnabled(value) => {
+            // The switch only arms the block: the values survive both ways,
+            // and the bar writes nothing while it is off.
+            shadows_mut(&mut state.config).enabled = value;
+        }
+        Message::ShadowRangeChanged(value) => {
+            shadows_mut(&mut state.config).range = value.clamp(0, 100);
+        }
+        Message::ShadowPowerChanged(value) => {
+            shadows_mut(&mut state.config).render_power = value.clamp(1, 4);
+        }
+        Message::ShadowSharpChanged(value) => shadows_mut(&mut state.config).sharp = value,
+        Message::ShadowColorChanged(value) => shadows_mut(&mut state.config).color = value,
+        Message::ShadowInactiveColorChanged(value) => {
+            shadows_mut(&mut state.config).color_inactive = value;
+        }
+        Message::ShadowOffsetChanged(axis, value) => {
+            let shadows = shadows_mut(&mut state.config);
+            shadows.offset[axis.min(1)] = value.clamp(-500, 500);
+        }
+        Message::ShadowScaleChanged(tenths) => {
+            shadows_mut(&mut state.config).scale = tenths.clamp(1, 100) as f32 / 10.0;
+        }
+        Message::BordersEnabled(value) => {
+            // First use seeds the block from the compositor's own values:
+            // enabling must not repaint the borders until a field is edited.
+            let known = state
+                .config
+                .tweaks
+                .as_ref()
+                .and_then(|t| t.borders.as_ref())
+                .is_some();
+            let borders = borders_mut(&mut state.config);
+            borders.enabled = value;
+            if value && !known {
+                if let Some((size, active, inactive)) = border_live() {
+                    borders.size = size;
+                    borders.active = active;
+                    borders.inactive = inactive;
+                }
+            }
+        }
+        Message::BorderSizeChanged(value) => {
+            borders_mut(&mut state.config).size = value.clamp(0, 20);
+        }
+        Message::BorderActiveChanged(value) => borders_mut(&mut state.config).active = value,
+        Message::BorderInactiveChanged(value) => {
+            borders_mut(&mut state.config).inactive = value;
+        }
+        Message::GapMinChanged(value) => {
+            // The sliders are mutually bounded; clamp here too so a
+            // programmatic edit can never store min > max.
+            let gaps = dynamic_gaps_mut(&mut state.config);
+            let max = gaps.max.clamp(1, 200);
+            gaps.min = value.clamp(1, max);
+        }
+        Message::GapMaxChanged(value) => {
+            let gaps = dynamic_gaps_mut(&mut state.config);
+            let min = gaps.min.clamp(1, 200);
+            gaps.max = value.clamp(min, 200);
+        }
         Message::TabSelected(tab) => {
             // The Layouts tab reads the bar's file on every selection,
             // so layouts saved meanwhile show up without a restart; an
@@ -754,6 +826,32 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                     state.modal = Some(Modal::ConfirmSave);
                 }
             }
+        },
+        Message::ReloadPiuma => {
+            // Restarting reads the file: unsaved edits would be ignored,
+            // so ask for a save first instead of silently dropping them.
+            let dirty = state
+                .serialize()
+                .map(|current| current != state.snapshot)
+                .unwrap_or(true);
+            if dirty {
+                state.set_status("Save the configuration before reloading Piuma".to_string(), true);
+                return Task::none();
+            }
+            let path = std::fs::canonicalize(file_path(&state.current_file))
+                .unwrap_or_else(|_| file_path(&state.current_file));
+            state.set_status("Reloading Piuma…".to_string(), false);
+            return Task::perform(
+                smol::unblock(move || crate::reload::reload(path)),
+                Message::PiumaReloaded,
+            );
+        }
+        Message::PiumaReloaded(result) => match result {
+            Ok(()) => state.set_status(
+                "Piuma restarted with the saved configuration".to_string(),
+                false,
+            ),
+            Err(e) => state.set_status(format!("Reload failed: {e}"), true),
         },
         Message::SaveAs => {
             state.modal = Some(Modal::SaveAs {

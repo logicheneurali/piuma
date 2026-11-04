@@ -49,13 +49,21 @@ static STATE: Mutex<State> = Mutex::new(State {
     restore: None,
 });
 
-/// One pass from the bar: apply the dynamic gaps when the window count
-/// changed, restore Hyprland's own values when the tweak is off. The
-/// configured value drives the screen edge (`gaps_out`); the gap between
-/// windows (`gaps_in`) is half of it. Only the total of mapped windows
-/// counts (gaps are global: a per-workspace count would re-tile every
-/// monitor on every workspace switch), special workspaces excluded.
+/// One pass from the bar: every enabled tweak is applied, every disabled
+/// one puts the user's own Hyprland values back.
 pub fn sync(panel: &config::PanelConfig, clients: Option<&[WinRow]>) {
+    sync_gaps(panel, clients);
+    sync_shadows(panel);
+    sync_borders(panel);
+}
+
+/// Dynamic gaps: apply when the window count changed, restore Hyprland's
+/// own values when the tweak is off. The configured value drives the
+/// screen edge (`gaps_out`); the gap between windows (`gaps_in`) is half
+/// of it. Only the total of mapped windows counts (gaps are global: a
+/// per-workspace count would re-tile every monitor on every workspace
+/// switch), special workspaces excluded.
+fn sync_gaps(panel: &config::PanelConfig, clients: Option<&[WinRow]>) {
     let gaps = panel
         .tweaks
         .as_ref()
@@ -93,6 +101,12 @@ pub fn sync(panel: &config::PanelConfig, clients: Option<&[WinRow]>) {
 /// tick while the tweak is disabled (a no-op after the first restore)
 /// and on exit.
 pub fn restore() {
+    restore_gaps();
+    restore_shadows();
+    restore_borders();
+}
+
+fn restore_gaps() {
     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
     if state.applied.take().is_none() {
         return;
@@ -154,9 +168,325 @@ fn set_gaps(inner: Gaps, outer: Gaps) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+
+// ── shadows ─────────────────────────────────────────────────────────
+
+/// `decoration:shadow:*` as the compositor reports it. Colours are kept
+/// in the `getoption` gradient form (`"99000000 0deg"`, AARRGGBB stops)
+/// so a captured value round-trips through `gradient_lua` unchanged.
+#[derive(Clone, PartialEq)]
+struct ShadowValues {
+    enabled: bool,
+    range: i32,
+    render_power: i32,
+    sharp: bool,
+    color: String,
+    color_inactive: String,
+    offset: [i32; 2],
+    scale: f32,
+}
+
+impl ShadowValues {
+    /// The configured values as Hyprland would report them; the tweak
+    /// being on means the shadows are on.
+    fn from_config(cfg: &config::ShadowsConfig) -> Self {
+        Self {
+            enabled: true,
+            range: cfg.range,
+            render_power: cfg.render_power,
+            sharp: cfg.sharp,
+            color: gradient_from_hex(&cfg.color),
+            color_inactive: gradient_from_hex(&cfg.color_inactive),
+            offset: cfg.offset,
+            scale: cfg.scale,
+        }
+    }
+}
+
+#[derive(Default)]
+struct ShadowState {
+    /// What piuma last wrote (`None` = it never overrode the shadows).
+    applied: Option<ShadowValues>,
+    /// The user's own values, captured before the first override.
+    restore: Option<ShadowValues>,
+}
+
+static SHADOW_STATE: Mutex<ShadowState> = Mutex::new(ShadowState {
+    applied: None,
+    restore: None,
+});
+
+/// Window shadows: apply the configured values once, restore the user's
+/// own when the tweak is off. One `hl.config` call per change (a single
+/// fork); the capture costs one tiny read per option, once.
+fn sync_shadows(panel: &config::PanelConfig) {
+    let Some(cfg) = panel
+        .tweaks
+        .as_ref()
+        .and_then(|t| t.shadows.as_ref())
+        .filter(|s| s.enabled)
+    else {
+        restore_shadows();
+        return;
+    };
+    let wanted = ShadowValues::from_config(cfg);
+    let mut state = SHADOW_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    if state.restore.is_none() {
+        // A failed capture (no hyprctl, mid-reload) is retried next tick
+        // instead of making the restore impossible.
+        state.restore = read_shadows();
+        if state.restore.is_none() {
+            return;
+        }
+    }
+    if state.applied.as_ref() == Some(&wanted) {
+        return;
+    }
+    if apply_shadows(&wanted) {
+        state.applied = Some(wanted);
+    }
+}
+
+fn restore_shadows() {
+    let mut state = SHADOW_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    if state.applied.take().is_none() {
+        return;
+    }
+    if let Some(own) = state.restore.take() {
+        apply_shadows(&own);
+    }
+}
+
+/// The user's current `decoration:shadow:*` values (`None` if any read
+/// fails: a partial capture must never be restored over the real ones).
+fn read_shadows() -> Option<ShadowValues> {
+    let option = |name: &str| -> Option<serde_json::Value> {
+        let path = format!("decoration:shadow:{name}");
+        let out = std::process::Command::new("hyprctl")
+            .args(["-j", "getoption", &path])
+            .output()
+            .ok()?;
+        serde_json::from_slice(&out.stdout).ok()
+    };
+    let vec2 = option("offset")?;
+    let offset = vec2.get("vec2")?.as_array()?;
+    Some(ShadowValues {
+        enabled: option("enabled")?.get("bool")?.as_bool()?,
+        range: option("range")?.get("int")?.as_i64()? as i32,
+        render_power: option("render_power")?.get("int")?.as_i64()? as i32,
+        sharp: option("sharp")?.get("bool")?.as_bool()?,
+        color: option("color")?.get("gradient")?.as_str()?.to_string(),
+        color_inactive: option("color_inactive")?
+            .get("gradient")?
+            .as_str()?
+            .to_string(),
+        offset: [
+            offset.first()?.as_i64()? as i32,
+            offset.get(1)?.as_i64()? as i32,
+        ],
+        scale: option("scale")?.get("float")?.as_f64()? as f32,
+    })
+}
+
+/// Write the whole shadow block in one Lua config call.
+fn apply_shadows(v: &ShadowValues) -> bool {
+    let call = format!(
+        "hl.config({{ decoration = {{ shadow = {{ enabled = {}, range = {}, \
+         render_power = {}, sharp = {}, color = {}, color_inactive = {}, \
+         offset = {{ {}, {} }}, scale = {} }} }} }})",
+        v.enabled,
+        v.range,
+        v.render_power,
+        v.sharp,
+        gradient_lua(&v.color),
+        gradient_lua(&v.color_inactive),
+        v.offset[0],
+        v.offset[1],
+        v.scale
+    );
+    // `output()` over `status()`: the reply ("ok") is not worth a line of
+    // the bar's log on every change.
+    std::process::Command::new("hyprctl")
+        .args(["eval", &call])
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
+/// `#rrggbbaa` (the config's order) → the gradient form Hyprland reports
+/// (AARRGGBB stops, the order `gradient_lua` reads back).
+fn gradient_from_hex(color: &str) -> String {
+    match config::parse_color(color) {
+        Ok(c) => {
+            let byte = |v: f32| (v * 255.0).round() as u8;
+            format!(
+                "{:02x}{:02x}{:02x}{:02x} 0deg",
+                byte(c.a),
+                byte(c.r),
+                byte(c.g),
+                byte(c.b)
+            )
+        }
+        // Validation already refused this: fall back to Hyprland's own
+        // default rather than writing a broken colour.
+        Err(_) => "99000000 0deg".to_string(),
+    }
+}
+
+/// `getoption`'s gradient data (`"99000000 0deg"`, AARRGGBB stops) → the
+/// value the Lua config takes: one `rgba()` for a plain colour, a gradient
+/// table for a multi-stop one.
+fn gradient_lua(data: &str) -> String {
+    let mut tokens: Vec<&str> = data.split_whitespace().collect();
+    let angle = tokens
+        .last()
+        .and_then(|last| last.strip_suffix("deg"))
+        .and_then(|a| a.parse::<i32>().ok());
+    if angle.is_some() {
+        tokens.pop();
+    }
+    let stops: Vec<String> = tokens
+        .iter()
+        .filter_map(|stop| u32::from_str_radix(stop, 16).ok())
+        .map(|argb| {
+            let (a, r, g, b) = (
+                (argb >> 24) & 0xff,
+                (argb >> 16) & 0xff,
+                (argb >> 8) & 0xff,
+                argb & 0xff,
+            );
+            format!("rgba({r:02x}{g:02x}{b:02x}{a:02x})")
+        })
+        .collect();
+    match (stops.len(), angle) {
+        // A Lua expression: the caller pastes it as the option's value.
+        (1, _) => format!("\"{}\"", stops[0]),
+        (0, _) => "\"rgba(00000099)\"".to_string(),
+        _ => format!(
+            "{{ colors = {{ {} }}, angle = {} }}",
+            stops
+                .iter()
+                .map(|stop| format!("\"{stop}\""))
+                .collect::<Vec<_>>()
+                .join(", "),
+            angle.unwrap_or(0)
+        ),
+    }
+}
+
+
+// ── borders ─────────────────────────────────────────────────────────
+
+/// `general:border_size` + `general:col.*_border` as the compositor
+/// reports them; colours stay in the `getoption` gradient form so a
+/// captured value round-trips unchanged.
+#[derive(Clone, PartialEq)]
+struct BorderValues {
+    size: i32,
+    active: String,
+    inactive: String,
+}
+
+impl BorderValues {
+    fn from_config(cfg: &config::BordersConfig) -> Self {
+        Self {
+            size: cfg.size,
+            active: gradient_from_hex(&cfg.active),
+            inactive: gradient_from_hex(&cfg.inactive),
+        }
+    }
+}
+
+#[derive(Default)]
+struct BorderState {
+    applied: Option<BorderValues>,
+    restore: Option<BorderValues>,
+}
+
+static BORDER_STATE: Mutex<BorderState> = Mutex::new(BorderState {
+    applied: None,
+    restore: None,
+});
+
+/// Window borders: apply once, restore the user's own when the tweak is
+/// off (same contract as the shadows).
+fn sync_borders(panel: &config::PanelConfig) {
+    let Some(cfg) = panel
+        .tweaks
+        .as_ref()
+        .and_then(|t| t.borders.as_ref())
+        .filter(|b| b.enabled)
+    else {
+        restore_borders();
+        return;
+    };
+    let wanted = BorderValues::from_config(cfg);
+    let mut state = BORDER_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    if state.restore.is_none() {
+        state.restore = read_borders();
+        if state.restore.is_none() {
+            return;
+        }
+    }
+    if state.applied.as_ref() == Some(&wanted) {
+        return;
+    }
+    if apply_borders(&wanted) {
+        state.applied = Some(wanted);
+    }
+}
+
+fn restore_borders() {
+    let mut state = BORDER_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    if state.applied.take().is_none() {
+        return;
+    }
+    if let Some(own) = state.restore.take() {
+        apply_borders(&own);
+    }
+}
+
+/// The user's current border values (`None` if any read fails: a partial
+/// capture must never be restored over the real ones).
+fn read_borders() -> Option<BorderValues> {
+    let gradient = |name: &str| -> Option<String> {
+        let path = format!("general:{name}");
+        let out = std::process::Command::new("hyprctl")
+            .args(["-j", "getoption", &path])
+            .output()
+            .ok()?;
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+        Some(value.get("gradient")?.as_str()?.to_string())
+    };
+    let size = std::process::Command::new("hyprctl")
+        .args(["-j", "getoption", "general:border_size"])
+        .output()
+        .ok()?;
+    let size: serde_json::Value = serde_json::from_slice(&size.stdout).ok()?;
+    Some(BorderValues {
+        size: size.get("int")?.as_i64()? as i32,
+        active: gradient("col.active_border")?,
+        inactive: gradient("col.inactive_border")?,
+    })
+}
+
+/// Write the border block in one Lua config call.
+fn apply_borders(v: &BorderValues) -> bool {
+    let call = format!(
+        "hl.config({{ general = {{ border_size = {}, col = {{ active_border = {}, \
+         inactive_border = {} }} }} }})",
+        v.size,
+        gradient_lua(&v.active),
+        gradient_lua(&v.inactive)
+    );
+    std::process::Command::new("hyprctl")
+        .args(["eval", &call])
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{css, gap_for, gaps_for};
+    use super::{css, gap_for, gaps_for, gradient_from_hex, gradient_lua};
 
     /// The example from the setup's description: 4..16 shrinks by 3 per
     /// extra window (25% of the 12-pixel range) and stops at 4.
@@ -183,6 +513,22 @@ mod tests {
         assert_eq!(gaps_for(3, 4, 16), (5, 10));
         assert_eq!(gaps_for(5, 4, 16), (2, 4));
         assert_eq!(gaps_for(2, 8, 50), (19, 39), "rounded down");
+    }
+
+    /// The config's `#rrggbbaa` becomes the compositor's gradient form,
+    /// and that form becomes the `rgba()` the Lua config takes: a round
+    /// trip that keeps the alpha.
+    #[test]
+    fn shadow_colours_round_trip_through_hyprland() {
+        assert_eq!(gradient_from_hex("#00000099"), "99000000 0deg");
+        assert_eq!(gradient_lua("99000000 0deg"), "\"rgba(00000099)\"");
+        assert_eq!(gradient_from_hex("#ff8000ff"), "ffff8000 0deg");
+        assert_eq!(gradient_lua("ffff8000 0deg"), "\"rgba(ff8000ff)\"");
+        // A multi-stop gradient keeps every stop and its angle.
+        assert_eq!(
+            gradient_lua("11223344 55667788 45deg"),
+            "{ colors = { \"rgba(22334411)\", \"rgba(66778855)\" }, angle = 45 }"
+        );
     }
 
     /// The Lua config takes a plain integer only for a uniform gap; the

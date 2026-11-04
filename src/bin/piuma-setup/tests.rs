@@ -739,12 +739,180 @@ fn dynamic_gaps_tweaks_roundtrip() {
     assert_eq!((gaps.min, gaps.max), (6, 12));
     assert!(config::validate_config(&parsed).is_empty());
 
-    // Inverted range: the field is flagged by the shared validation.
+    // The UI cannot create an inverted range: the maximum stops at the
+    // minimum (the shared validation still guards hand-edited files).
     let _ = update(&mut s, Message::GapMaxChanged(3));
-    let bad: config::Config = serde_json::from_str(&s.serialize().unwrap()).unwrap();
-    assert!(config::validate_config(&bad)
-        .iter()
-        .any(|e| e.path == "panel.tweaks.dynamic_gaps"));
+    let clamped: config::Config = serde_json::from_str(&s.serialize().unwrap()).unwrap();
+    let gaps = clamped
+        .panel
+        .tweaks
+        .as_ref()
+        .and_then(|t| t.dynamic_gaps.as_ref())
+        .expect("the block stays");
+    assert_eq!((gaps.min, gaps.max), (6, 6));
+    assert!(config::validate_config(&clamped).is_empty());
+}
+
+/// The footer's reload hint watches the root `panels` value: a changed
+/// panel set needs the bar restarted, everything else hot-reloads.
+#[test]
+fn panel_changes_are_detected_for_the_reload_hint() {
+    use crate::state::panels_of;
+    let one = r#"{"panel":{},"panels":[{"anchor":"top"}]}"#;
+    let two = r#"{"panel":{},"panels":[{"anchor":"top"},{"anchor":"bottom"}]}"#;
+    assert_eq!(panels_of(one), panels_of(one));
+    assert_ne!(panels_of(one), panels_of(two));
+    assert_eq!(panels_of("{}"), None);
+    assert_ne!(panels_of("{}"), panels_of(one));
+}
+
+/// The floating window menu round-trips into the bar's schema; an
+/// unknown picker label falls back to the default instead of writing a
+/// value the bar would refuse.
+#[test]
+fn window_menu_tweaks_roundtrip() {
+    let mut s = test_state();
+    let json: JsonValue = serde_json::from_str(&s.serialize().unwrap()).unwrap();
+    assert!(json["panel"].get("tweaks").is_none(), "absent until touched");
+
+    let _ = update(&mut s, Message::WindowMenuEnabled(true));
+    let _ = update(
+        &mut s,
+        Message::WindowMenuPositionChanged("Bottom right".to_string()),
+    );
+    let parsed: config::Config = serde_json::from_str(&s.serialize().unwrap()).unwrap();
+    let menu = parsed
+        .panel
+        .tweaks
+        .as_ref()
+        .and_then(|t| t.window_menu.as_ref())
+        .expect("the block must reach the bar");
+    assert!(menu.enabled);
+    assert_eq!(menu.position, config::WindowMenuPosition::BottomRight);
+    assert!(config::validate_config(&parsed).is_empty());
+
+    let _ = update(
+        &mut s,
+        Message::WindowMenuPositionChanged("middle".to_string()),
+    );
+    let parsed: config::Config = serde_json::from_str(&s.serialize().unwrap()).unwrap();
+    assert_eq!(
+        parsed.panel.tweaks.unwrap().window_menu.unwrap().position,
+        config::WindowMenuPosition::TopCenter,
+        "an unknown label keeps the default"
+    );
+}
+
+/// Every shadow field round-trips into the bar's schema, and the shared
+/// validation refuses the values Hyprland would.
+#[test]
+fn shadows_tweaks_roundtrip() {
+    let mut s = test_state();
+    let json: JsonValue = serde_json::from_str(&s.serialize().unwrap()).unwrap();
+    assert!(json["panel"].get("tweaks").is_none(), "absent until touched");
+
+    let _ = update(&mut s, Message::ShadowsEnabled(true));
+    let _ = update(&mut s, Message::ShadowRangeChanged(24));
+    let _ = update(&mut s, Message::ShadowPowerChanged(3));
+    let _ = update(&mut s, Message::ShadowSharpChanged(true));
+    let _ = update(&mut s, Message::ShadowScaleChanged(15));
+    let _ = update(&mut s, Message::ShadowOffsetChanged(0, 4));
+    let _ = update(&mut s, Message::ShadowColorChanged("#10203080".to_string()));
+
+    let parsed: config::Config = serde_json::from_str(&s.serialize().unwrap()).unwrap();
+    let sh = parsed
+        .panel
+        .tweaks
+        .as_ref()
+        .and_then(|t| t.shadows.as_ref())
+        .expect("the block must reach the bar");
+    assert!(sh.enabled && sh.sharp);
+    assert_eq!((sh.range, sh.render_power), (24, 3));
+    assert_eq!(sh.color, "#10203080");
+    assert_eq!(sh.offset, [4, 0]);
+    assert!((sh.scale - 1.5).abs() < 1e-6, "tenths become the float");
+    assert!(config::validate_config(&parsed).is_empty());
+
+    // The sliders clamp; a hand-edited file is what the validation guards.
+    let _ = update(&mut s, Message::ShadowRangeChanged(400));
+    let _ = update(&mut s, Message::ShadowPowerChanged(9));
+    let parsed: config::Config = serde_json::from_str(&s.serialize().unwrap()).unwrap();
+    let sh = parsed
+        .panel
+        .tweaks
+        .as_ref()
+        .and_then(|t| t.shadows.as_ref())
+        .unwrap();
+    assert_eq!((sh.range, sh.render_power), (100, 4));
+}
+
+/// The border fields round-trip into the bar's schema; the switch first
+/// seeds them from Hyprland, which is checked here through the stored
+/// values it must not touch when no hyprctl answers.
+#[test]
+fn border_tweaks_roundtrip() {
+    let mut s = test_state();
+    let json: JsonValue = serde_json::from_str(&s.serialize().unwrap()).unwrap();
+    assert!(json["panel"].get("tweaks").is_none(), "absent until touched");
+
+    let _ = update(&mut s, Message::BordersEnabled(true));
+    let _ = update(&mut s, Message::BorderSizeChanged(3));
+    let _ = update(&mut s, Message::BorderActiveChanged("#ff0000ff".to_string()));
+    let _ = update(&mut s, Message::BorderInactiveChanged("#00ff0080".to_string()));
+
+    let parsed: config::Config = serde_json::from_str(&s.serialize().unwrap()).unwrap();
+    let b = parsed
+        .panel
+        .tweaks
+        .as_ref()
+        .and_then(|t| t.borders.as_ref())
+        .expect("the block must reach the bar");
+    assert!(b.enabled);
+    assert_eq!(b.size, 3);
+    assert_eq!(b.active, "#ff0000ff");
+    assert_eq!(b.inactive, "#00ff0080");
+    assert!(config::validate_config(&parsed).is_empty());
+
+    // The slider clamps; hand-edited files are the validation's job.
+    let _ = update(&mut s, Message::BorderSizeChanged(99));
+    let parsed: config::Config = serde_json::from_str(&s.serialize().unwrap()).unwrap();
+    assert_eq!(parsed.panel.tweaks.unwrap().borders.unwrap().size, 20);
+}
+
+/// The font picker lists each family once, alphabetically without case.
+#[test]
+fn font_families_are_sorted_and_unique() {
+    let families = crate::controls::sorted_families(
+        ["Noto Sans", "dejaVu Sans", "Noto Sans", "Fira Sans"]
+            .into_iter()
+            .map(str::to_string),
+    );
+    assert_eq!(families, vec!["dejaVu Sans", "Fira Sans", "Noto Sans"]);
+}
+
+/// The two gap sliders never cross: a minimum above the maximum is
+/// clamped to it, and a maximum below the minimum is clamped up.
+#[test]
+fn dynamic_gap_sliders_never_cross() {
+    let mut s = test_state();
+    let _ = update(&mut s, Message::DynamicGapsEnabled(true));
+    let gaps = |s: &PiumaSetup| {
+        s.config
+            .tweaks
+            .as_ref()
+            .and_then(|t| t.dynamic_gaps.as_ref())
+            .map(|g| (g.min, g.max))
+            .unwrap()
+    };
+    assert_eq!(gaps(&s), (4, 16), "defaults");
+    let _ = update(&mut s, Message::GapMinChanged(40));
+    assert_eq!(gaps(&s), (16, 16), "the minimum stops at the maximum");
+    let _ = update(&mut s, Message::GapMaxChanged(2));
+    assert_eq!(gaps(&s), (16, 16), "the maximum stops at the minimum");
+    let _ = update(&mut s, Message::GapMaxChanged(30));
+    assert_eq!(gaps(&s), (16, 30));
+    let _ = update(&mut s, Message::GapMinChanged(20));
+    assert_eq!(gaps(&s), (20, 30));
 }
 
 /// The runtime-state sensors and a command's interval survive the
@@ -764,12 +932,19 @@ fn runtime_sensors_and_command_interval_roundtrip() {
         interval_text: "30".to_string(),
         ..SourceConfig::default()
     };
+    let mut list = sensor("", "list");
+    list.source_config = SourceConfig {
+        command: Some("ls ~/Downloads".to_string()),
+        count: Some(5),
+        ..SourceConfig::default()
+    };
     s.config.sections[0].sensors = vec![
         sensor("NET", "net_info"),
         sensor("PWR", "power_profile"),
         sensor("BT", "bluetooth"),
         sensor("KBD", "keyboard"),
         command,
+        list,
     ];
 
     let saved = s.serialize().unwrap();

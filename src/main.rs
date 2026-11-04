@@ -16,7 +16,6 @@ use iced::{
 use iced::event;
 use iced::time;
 use iced::widget::container::Style as ContainerStyle;
-use iced::advanced::widget::Operation;
 
 use iced_exwlshell::ExWlSettings;
 use iced_exwlshell::daemon;
@@ -25,7 +24,6 @@ use iced_exwlshell::reexport::{
 };
 use iced_exwlshell::settings::{LayerShellSettings, LayerSize, StartMode};
 use iced_exwlshell::to_layer_message;
-use iced_runtime::core::widget::operation::Outcome;
 
 mod app_theme;
 mod autostart;
@@ -59,6 +57,7 @@ mod tray;
 mod tweaks;
 mod volume_ui;
 mod wallpaper_ui;
+mod window_menu;
 mod windows;
 mod workspace;
 #[allow(dead_code)]
@@ -72,14 +71,12 @@ use geometry::{
 };
 use menus::{
     fit_menu_labels, menu_arrow_h, menu_placement, menu_row_h, menu_size_shown,
-    taskbar_menu_size, taskbar_menu_view, tray_menu_view, MENU_MAX_ROWS, MENU_PAD,
+    taskbar_menu_size, taskbar_menu_view, tray_menu_view, TaskbarRow, MENU_MAX_ROWS, MENU_PAD,
 };
 use popup_calendar::{
     calendar_hover_sync, calendar_page, calendar_popup_view, reap_abandoned_calendar,
 };
-use popup_graph::{
-    graph_hover_sync, graph_link_view, graph_popup_view, reap_abandoned_popup, sync_graph_link,
-};
+use popup_graph::{graph_hover_sync, graph_popup_view, reap_abandoned_popup};
 use popup_notifications::{
     notif_list_row_h, notif_list_view, popup_dismiss, popup_view, scroll_rows, sync_popup,
     toggle_notif_list, NOTIF_LIST_MAX, NOTIF_LIST_ROWS,
@@ -271,8 +268,9 @@ pub(crate) struct SectionStyle {
 /// no popup.
 #[derive(Default)]
 struct HoverGate {
-    /// The armed enter (section, sensor, sequence), `None` while idle.
-    pending: Option<(usize, usize, u64)>,
+    /// The armed enter (section, sensor, sequence) and when it armed,
+    /// `None` while idle.
+    pending: Option<(usize, usize, u64, Instant)>,
     /// Bumped on every enter: a confirmation carrying an older one is
     /// stale and must not fire.
     seq: u64,
@@ -284,28 +282,45 @@ impl HoverGate {
     fn enter(&mut self, section: usize, sensor: usize) -> (usize, usize, u64) {
         self.seq += 1;
         let token = (section, sensor, self.seq);
-        self.pending = Some(token);
+        self.pending = Some((section, sensor, self.seq, Instant::now()));
         token
     }
 
     /// Cancel the armed enter of this sensor — a leave must not drop
     /// another sensor's pending arm (enter/leave can arrive reordered).
     fn leave(&mut self, section: usize, sensor: usize) {
-        if matches!(self.pending, Some((s, i, _)) if (s, i) == (section, sensor)) {
+        if matches!(self.pending, Some((s, i, _, _)) if (s, i) == (section, sensor)) {
             self.pending = None;
         }
     }
 
-    /// Whether `token` still is the armed enter: true exactly once, for
-    /// a confirmation no leave or newer enter has superseded.
-    fn confirm(&mut self, section: usize, sensor: usize, seq: u64) -> bool {
-        if self.pending == Some((section, sensor, seq)) {
-            self.pending = None;
-            true
-        } else {
-            false
+    /// The arm's instant, exactly once, for a confirmation no leave or
+    /// newer enter has superseded.
+    fn confirm(&mut self, section: usize, sensor: usize, seq: u64) -> Option<Instant> {
+        match self.pending {
+            Some((s, i, n, at)) if (s, i, n) == (section, sensor, seq) => {
+                self.pending = None;
+                Some(at)
+            }
+            _ => None,
         }
     }
+}
+
+/// How close to the arm a pointer motion must be for the enter to count
+/// as real. iced's `MouseArea` fires `on_enter` also when the widget's
+/// *bounds* change under a still pointer (`bounds != state.bounds`), so a
+/// pill that grows or shifts with its next reading could open a popup
+/// nobody hovered. The motion that really enters a widget is the same
+/// event as the enter (or a few messages away), hence the small window.
+const HOVER_MOTION_GRACE: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Whether the arm at `armed` was accompanied by a pointer motion
+/// (`last_motion`, the last `CursorMoved` on the bar). A synthetic enter
+/// from a bounds change has no motion next to it: the pointer has been
+/// still, possibly for seconds.
+fn hover_is_fresh(armed: Instant, last_motion: Option<Instant>) -> bool {
+    last_motion.is_some_and(|motion| armed.saturating_duration_since(motion) <= HOVER_MOTION_GRACE)
 }
 
 pub(crate) struct Panel {
@@ -330,6 +345,10 @@ pub(crate) struct Panel {
     /// The dwell gate behind `hovered`: enters arm here and reach it
     /// only after `SENSOR_HOVER_DELAY` while still pending.
     pub(crate) hover_gate: HoverGate,
+    /// When the pointer last moved over the bar: a hover whose arm has no
+    /// motion next to it came from a widget whose bounds changed under a
+    /// still pointer (see `hover_is_fresh`).
+    pub(crate) last_motion: Option<Instant>,
     /// State (mtime, len) of the last config read attempt: unchanged files
     /// are skipped on the next tick instead of being re-read and parsed.
     pub(crate) last_reload: Option<(SystemTime, u64)>,
@@ -374,9 +393,13 @@ pub(crate) struct Panel {
     /// The taskbar's right-click menu: window id + the window it acts
     /// on.
     pub(crate) taskbar_menu: Option<(iced::window::Id, TaskbarMenu)>,
-    /// Workspace row under the cursor in the taskbar menu
-    /// (`TaskbarMenuHover`), `None` outside every row.
-    pub(crate) taskbar_menu_hover: Option<u32>,
+    /// The floating window-actions menu (`panel.tweaks.window_menu`):
+    /// its surface and the window it follows, absent while the tweak is
+    /// off.
+    pub(crate) window_menu: Option<window_menu::WindowMenu>,
+    /// Row under the cursor in the taskbar menu (`TaskbarMenuHover`),
+    /// `None` outside every row.
+    pub(crate) taskbar_menu_hover: Option<TaskbarRow>,
     /// Address of the taskbar icon under the cursor (`None` = none):
     /// the row's hover fill.
     pub(crate) taskbar_hover: Option<String>,
@@ -391,10 +414,7 @@ pub(crate) struct Panel {
     /// output-space rect the hover guards compare the cursor with,
     /// `None` while hidden.
     pub(crate) graph_popup: Option<GraphPopup>,
-    /// The connector surface joining the graph popup to its sensor (see
-    /// `sync_graph_link`): its id and the id of the popup it draws —
-    /// `None` while hidden.
-    pub(crate) graph_link: Option<(iced::window::Id, iced::window::Id)>,
+
     /// Open calendar popup of a hovered `calendar` sensor: surface id,
     /// the sensor it belongs to, the shown month and its pointer/grace
     /// state, `None` while hidden.
@@ -473,6 +493,10 @@ pub(crate) struct NotifList {
 #[derive(Clone, Debug)]
 pub(crate) struct TaskbarMenu {
     pub(crate) address: String,
+    /// Floating/pinned as the snapshot knew them when the menu opened:
+    /// Sticky floats a tiled window before pinning it.
+    pub(crate) floating: bool,
+    pub(crate) pinned: bool,
 }
 
 /// The open bar tooltip window: its source (so a stale leave knows
@@ -493,20 +517,6 @@ pub(crate) struct GraphPopup {
     pub(crate) section: usize,
     pub(crate) sensor: usize,
     pub(crate) rect: (i32, i32, i32, i32),
-    /// Which output edge the popup anchors to: an anchored surface sits
-    /// past the bar's reserved strip, so the real surface rect derives
-    /// from `rect` + the anchor (see `popup_surface_rect`).
-    pub(crate) anchor: Anchor,
-    /// The edge the bar this sensor belongs to anchors to, and that
-    /// bar's origin inside its output. Snapshot at open: the shared
-    /// state's `last_anchor` is the first panel's, so a popup opened
-    /// from a bottom bar must carry its own to shift the surface and
-    /// lift the sensor rect correctly.
-    pub(crate) bar_anchor: Anchor,
-    pub(crate) bar_origin: (i32, i32),
-    /// The sensor box's on-screen rect in output space, as answered by
-    /// `FindSensorRect`: the connector window is pinned to it.
-    pub(crate) sensor_rect: Option<(i32, i32, i32, i32)>,
     /// The cursor is on the popup's surface — set and cleared by the
     /// surface's own cursor events (position-checked both ways, plus
     /// the window's `CursorLeft`) and by the widget's exit. Never
@@ -616,14 +626,28 @@ pub(crate) enum Message {
     /// Workspace chosen in the taskbar menu: move the window there
     /// silently and close the menu.
     TaskbarMenuWs(u32),
-    /// Workspace row under the cursor in the taskbar menu (`None`
-    /// outside every row).
-    TaskbarMenuHover(Option<u32>),
+    /// Window action chosen in the taskbar menu: run it on the menu's
+    /// window and close the menu.
+    TaskbarMenuAction(window_menu::Action),
+    /// Row under the cursor in the taskbar menu (`None` outside every
+    /// row).
+    TaskbarMenuHover(Option<TaskbarRow>),
     /// Menu row the cursor left: clears only if it is still the hovered
     /// one — widget order can deliver this exit after the next row's
     /// enter (iced visits the tree in order), and a stale exit must not
     /// drop the new hover.
-    TaskbarMenuLeft(u32),
+    TaskbarMenuLeft(TaskbarRow),
+    /// The floating menu's window changed (focus, geometry, flags):
+    /// `None` = nothing focused. Comes from the event-socket thread.
+    WindowMenuSync(Option<window_menu::Target>),
+    /// One action pressed on the floating menu.
+    WindowMenuAction(window_menu::Action),
+    /// Floating-menu button under the cursor (`None` = outside).
+    WindowMenuHover(Option<window_menu::Action>),
+    /// Floating-menu button the cursor left (stale-exit guard).
+    WindowMenuLeft(window_menu::Action),
+    /// One glide frame of the floating menu.
+    WindowMenuFrame,
     /// Taskbar icon under the cursor: the hover fill plus its title
     /// tooltip (empty title → no tooltip window).
     TaskbarIconEnter {
@@ -690,10 +714,6 @@ pub(crate) enum Message {
     /// The cursor left the calendar popup's surface: the tick's grace
     /// decides the close (three seconds on neither sensor nor popup).
     CalendarExited,
-    /// Answer of the sensor-box rect query `FindSensorRect`:
-    /// (section, sensor, window-relative rect). The connector window
-    /// gets pinned to it (`sync_graph_link`).
-    SensorRectFound(usize, usize, (i32, i32, i32, i32)),
     /// Click on a popup card: run its spec `default` action, dismiss it.
     PopupCardClicked(u32),
     /// Click on a popup card's ✕: dismiss it only (spec reason 2).
@@ -712,60 +732,6 @@ pub(crate) enum Message {
 
 fn namespace() -> String {
     String::from("piuma")
-}
-
-// ── sensor rect query ──────────────────────────────────────────────
-
-/// Widget id of a sensor box in the bar view: the graph popup queries
-/// the sensor's on-screen rect through it (see `FindSensorRect`).
-fn sensor_box_id(section: usize, sensor: usize) -> iced::widget::Id {
-    format!("piuma-sensor-{section}-{sensor}").into()
-}
-
-/// Runtime query of a sensor box's rect: the operation walks the
-/// widget trees (on every window — one answer is enough, only the bar
-/// carries the tagged container) and reports the bounds of the
-/// container tagged with the sensor's widget id.
-pub(crate) struct FindSensorRect {
-    pub(crate) section: usize,
-    pub(crate) sensor: usize,
-    pub(crate) target: iced::widget::Id,
-    pub(crate) found: Option<(i32, i32, i32, i32)>,
-}
-
-impl FindSensorRect {
-    fn new(section: usize, sensor: usize) -> Self {
-        Self {
-            section,
-            sensor,
-            target: sensor_box_id(section, sensor),
-            found: None,
-        }
-    }
-}
-
-impl Operation<Message> for FindSensorRect {
-    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<Message>)) {
-        operate(self);
-    }
-
-    fn container(&mut self, id: Option<&iced::widget::Id>, bounds: iced::Rectangle) {
-        if self.found.is_none() && id == Some(&self.target) {
-            self.found = Some((
-                bounds.x as i32,
-                bounds.y as i32,
-                (bounds.x + bounds.width) as i32,
-                (bounds.y + bounds.height) as i32,
-            ));
-        }
-    }
-
-    fn finish(&self) -> Outcome<Message> {
-        match self.found {
-            Some(rect) => Outcome::Some(Message::SensorRectFound(self.section, self.sensor, rect)),
-            None => Outcome::None,
-        }
-    }
 }
 
 // ── helpers ─────────────────────────────────────────────────────────
@@ -1237,12 +1203,6 @@ fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<Command<Mess
     if let Some(cmd) = sync_popup(panel, resync) {
         cmds.push(cmd);
     }
-    // The connector surface rides with the popup: it opens once the
-    // sensor rect is known and dies with the popup — one place
-    // drives its window too.
-    if let Some(cmd) = sync_graph_link(panel) {
-        cmds.push(cmd);
-    }
     cmds
 }
 
@@ -1356,12 +1316,6 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             if let Some(cmd) = sync_popup(panel, geometry_changed || config_reloaded) {
                 cmds.push(cmd);
             }
-            // The connector surface rides with the popup: it opens once
-            // the sensor rect is known and dies with the popup — one
-            // place drives its window too.
-            if let Some(cmd) = sync_graph_link(panel) {
-                cmds.push(cmd);
-            }
             // The wallpaper surface follows the config on the same
             // cadence: the first tick materializes it after startup,
             // later ticks track enable/path changes (a cheap compare).
@@ -1369,6 +1323,9 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             // The corner masks ride the same tick (roadmap angoli):
             // enable/radius/output changes reopen the squares cheaply.
             cmds.push(sync_corners(panel));
+            // The floating window menu follows its tweak the same way:
+            // created on enable, closed on disable, re-placed on edits.
+            cmds.push(window_menu::sync(panel));
             // The derived palette follows the same cadence: extracted
             // off-thread only when the wallpaper file changes, dropped
             // when the option turns off.
@@ -1449,6 +1406,7 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
                     }
                     if BAR_ID.get().copied() == Some(id) {
                         panel.last_cursor = Some((position.x, position.y));
+                        panel.last_motion = Some(Instant::now());
                         // The hover can process before this event (a sensor
                         // hovered on the very first motion): retry the popup
                         // opens now that a position exists.
@@ -2018,7 +1976,21 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
                 namespace: Some("piuma-taskbar-menu".to_string()),
                 ..Default::default()
             });
-            panel.taskbar_menu = Some((id, TaskbarMenu { address }));
+            let (floating, pinned) = panel
+                .hypr
+                .as_ref()
+                .and_then(|snapshot| snapshot.clients.as_ref())
+                .and_then(|rows| rows.iter().find(|row| row.address == address))
+                .map(|row| (row.floating, row.pinned))
+                .unwrap_or((false, false));
+            panel.taskbar_menu = Some((
+                id,
+                TaskbarMenu {
+                    address,
+                    floating,
+                    pinned,
+                },
+            ));
             cmds.push(open);
             Command::batch(cmds)
         }
@@ -2032,6 +2004,39 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             }
             Command::none()
         }
+        Message::TaskbarMenuAction(action) => {
+            // Same contract as the workspace rows: the menu carries the
+            // target and goes with the action.
+            if let Some((id, menu)) = panel.taskbar_menu.take() {
+                panel.taskbar_menu_hover = None;
+                window_menu::run(action, &menu.address, menu.floating, menu.pinned);
+                return iced::window::close(id);
+            }
+            Command::none()
+        }
+        Message::WindowMenuSync(target) => window_menu::apply(panel, target),
+        Message::WindowMenuAction(action) => {
+            if let Some(target) = panel.window_menu.as_ref().and_then(|menu| menu.target.as_ref()) {
+                window_menu::run(action, &target.address, target.floating, target.pinned);
+            }
+            Command::none()
+        }
+        Message::WindowMenuHover(button) => {
+            if let Some(menu) = panel.window_menu.as_mut() {
+                menu.hover = button;
+            }
+            Command::none()
+        }
+        Message::WindowMenuLeft(button) => {
+            // Stale-exit guard, same rule as the taskbar rows.
+            if let Some(menu) = panel.window_menu.as_mut() {
+                if menu.hover == Some(button) {
+                    menu.hover = None;
+                }
+            }
+            Command::none()
+        }
+        Message::WindowMenuFrame => window_menu::frame(panel),
         Message::TaskbarMenuHover(row) => {
             panel.taskbar_menu_hover = row;
             Command::none()
@@ -2087,8 +2092,14 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             }
         }
         Message::SensorHoverConfirmed(section_index, sensor_index, seq) => {
-            if !panel.hover_gate.confirm(section_index, sensor_index, seq) {
+            let Some(armed) = panel.hover_gate.confirm(section_index, sensor_index, seq) else {
                 return Command::none(); // superseded: the pointer moved on
+            };
+            // A pill that grew or shifted under a still pointer fires an
+            // enter too (iced compares bounds as well as the cursor): no
+            // motion next to the arm means nobody hovered it.
+            if !hover_is_fresh(armed, panel.last_motion) {
+                return Command::none();
             }
             panel.hovered = Some((section_index, sensor_index));
             hover_sync(panel, section_index, sensor_index, true)
@@ -2127,21 +2138,6 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
                 cp.pointer_on_popup = false;
             }
             Command::none()
-        }
-        Message::SensorRectFound(section, sensor, rect) => {
-            // The queried bounds are in the bar window's coordinates:
-            // lift them to output space by the origin of the bar this
-            // popup opened from (a bottom bar's window starts at the
-            // output's bottom edge, not at y=0).
-            if let Some(gp) = panel.graph_popup.as_mut() {
-                if (gp.section, gp.sensor) == (section, sensor) {
-                    let (ox, oy) = gp.bar_origin;
-                    gp.sensor_rect = Some((rect.0 + ox, rect.1 + oy, rect.2 + ox, rect.3 + oy));
-                }
-            }
-            // The answer lands right after the popup opened: open the
-            // connector at once (the tick owns the closing side).
-            sync_graph_link(panel).unwrap_or_else(Command::none)
         }
         _ => Command::none(),
     }
@@ -2201,6 +2197,14 @@ fn subscription(app: &App) -> Subscription<Message> {
     // bar never pays for a 30 fps subscription.
     let effect_sub = (!panel.value_effects.is_empty())
         .then(|| time::every(effects::FRAME).map(|_| Message::EffectFrame));
+    // The floating window menu's event thread runs only while the tweak
+    // is on; its glide frames only while a move is in progress.
+    let menu_sub = window_menu::enabled(&panel.config).then(window_menu::subscription);
+    let menu_frames = panel
+        .window_menu
+        .as_ref()
+        .is_some_and(|menu| menu.from.is_some())
+        .then(|| time::every(window_menu::FRAME).map(|_| Message::WindowMenuFrame));
     Subscription::batch(
         [
             time::every(std::time::Duration::from_secs(1)).map(|_| Message::Tick),
@@ -2209,7 +2213,9 @@ fn subscription(app: &App) -> Subscription<Message> {
         .into_iter()
         .chain(tray_sub)
         .chain(notif_sub)
-        .chain(effect_sub),
+        .chain(effect_sub)
+        .chain(menu_sub)
+        .chain(menu_frames),
     )
 }
 
@@ -2273,6 +2279,11 @@ fn bar_view<'a>(
             return taskbar_menu_view(panel);
         }
     }
+    if let Some(menu) = panel.window_menu.as_ref() {
+        if menu.id == window {
+            return window_menu::view(panel, menu);
+        }
+    }
     if let Some((id, _)) = panel.bar_tooltip.as_ref() {
         if *id == window {
             return tooltip_window_view(panel);
@@ -2287,9 +2298,6 @@ fn bar_view<'a>(
         if cp.id == window {
             return calendar_popup_view(panel, cp);
         }
-    }
-    if panel.graph_link.is_some_and(|(id, _)| id == window) {
-        return graph_link_view(panel);
     }
     if panel.popup == Some(window) {
         return popup_view(panel);
@@ -2403,6 +2411,15 @@ fn bar_view<'a>(
                 .get(section_idx)
                 .and_then(|sec| sec.sensors.get(sensor_idx))
                 .is_some_and(|cfg_s| matches!(cfg_s.source, config::SensorSource::Media {}));
+            // A list sensor shows the name when it has one, the first
+            // output line otherwise — never both.
+            let is_list = panel
+                .config
+                .panel
+                .sections
+                .get(section_idx)
+                .and_then(|sec| sec.sensors.get(sensor_idx))
+                .is_some_and(|cfg_s| matches!(cfg_s.source, config::SensorSource::List { .. }));
             if is_media && s.value.is_empty() {
                 return None;
             }
@@ -2667,7 +2684,11 @@ fn bar_view<'a>(
                 // the row's 6px gap, making the box wider than the icon and
                 // shifting it left of centre. Omit empty values (unless a
                 // fixed width pins the slot for jitter-free readings).
-                let show_value = !s.value.is_empty() || s.fixed_width.is_some();
+                let show_value = if is_list {
+                    s.name.is_empty() && !s.value.is_empty()
+                } else {
+                    !s.value.is_empty() || s.fixed_width.is_some()
+                };
                 if s.name.is_empty() {
                     if show_value {
                         row = row.push(value_widget);
@@ -2739,11 +2760,6 @@ fn bar_view<'a>(
                 box_w,
                 box_h,
             );
-            // Tagged so the graph popup can query this box's on-screen
-            // rect and pin its connector window to it.
-            let styled_container =
-                container(styled_container).id(sensor_box_id(section_idx, sensor_idx));
-
             // Tray icons carry their own MouseAreas (press/wheel/tooltip);
             // wrapping them in the sensor MouseArea as well would handle the
             // same events twice, so a tray sensor stays bare — and so does a
@@ -3229,7 +3245,7 @@ pub(crate) fn active_output_name() -> Option<String> {
     focused_output().map(|(name, _, _)| name)
 }
 
-/// The output for the graph popup and its connector: the bar's own
+/// The output for the graph popup: the bar's own
 /// ([`active_output_name`]), falling back to the old `LastOutput`
 /// behaviour when hyprctl can't answer.
 pub(crate) fn popup_output_option() -> OutputOption {
@@ -3267,7 +3283,44 @@ fn hover_sync(panel: &mut Panel, section: usize, sensor: usize, hovered: bool) -
     Command::batch([
         graph_hover_sync(panel, section, sensor, hovered),
         calendar_hover_sync(panel, section, sensor, hovered),
+        list_hover_sync(panel, section, sensor, hovered),
     ])
+}
+
+/// A list sensor's hover popup: the command's lines (at most
+/// `max_lines`) in the tooltip surface — the same small overlay the
+/// taskbar uses, so no new window type and the same leave rule.
+fn list_hover_sync(
+    panel: &mut Panel,
+    section: usize,
+    sensor: usize,
+    hovered: bool,
+) -> Command<Message> {
+    let id = format!("list:{section}:{sensor}");
+    if !hovered {
+        return tooltip_close(panel, id);
+    }
+    let Some(source) = panel
+        .config
+        .panel
+        .sections
+        .get(section)
+        .and_then(|sec| sec.sensors.get(sensor))
+        .map(|cfg_s| &cfg_s.source)
+    else {
+        return Command::none();
+    };
+    let config::SensorSource::List { command, max_lines, .. } = source else {
+        return Command::none();
+    };
+    let lines: Vec<String> = sensor_runner::list_lines(command)
+        .into_iter()
+        .take(*max_lines as usize)
+        .collect();
+    if lines.is_empty() {
+        return Command::none();
+    }
+    tooltip_open(panel, id, lines.join("\n"))
 }
 
 
@@ -3454,6 +3507,7 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         popup_resync: false,
                         hovered: None,
                         hover_gate: HoverGate::default(),
+                        last_motion: None,
                         last_reload: config_file_state(),
                         last_size: size,
                         last_anchor: anchor,
@@ -3471,11 +3525,11 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         notif_list: None,
                         taskbar_menu: None,
                         taskbar_menu_hover: None,
+                        window_menu: None,
                         taskbar_hover: None,
                         bar_tooltip: None,
                         graphs,
                         graph_popup: None,
-                        graph_link: None,
                         calendar: None,
                         wallpaper: Vec::new(),
                         wallpaper_hidden: Vec::new(),
@@ -3672,10 +3726,11 @@ fn parse_config_arg() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        config, focused_output_in, icons_theme, monitor_names_json, palette, popup_card_h,
-        popup_style, screen_size_in, setup_binary_path, start_mode_for, HoverGate, PopupStyle,
-        StartMode,
+        config, focused_output_in, hover_is_fresh, icons_theme, monitor_names_json, palette,
+        popup_card_h, popup_style, screen_size_in, setup_binary_path, start_mode_for, HoverGate,
+        PopupStyle, StartMode, HOVER_MOTION_GRACE,
     };
+    use std::time::Instant;
 
     /// `panel.output` selects the monitor: the size must be that output's,
     /// with the focused monitor as the fallback.
@@ -3734,22 +3789,41 @@ mod tests {
     fn hover_gate_confirms_only_unsuperseded_enters() {
         let mut gate = HoverGate::default();
         let a = gate.enter(0, 1);
-        assert!(!gate.confirm(9, 9, a.2), "a foreign token never confirms");
-        assert!(gate.confirm(a.0, a.1, a.2), "the armed enter confirms");
-        assert!(!gate.confirm(a.0, a.1, a.2), "exactly once");
+        assert!(gate.confirm(9, 9, a.2).is_none(), "a foreign token never confirms");
+        assert!(gate.confirm(a.0, a.1, a.2).is_some(), "the armed enter confirms");
+        assert!(gate.confirm(a.0, a.1, a.2).is_none(), "exactly once");
 
         let b = gate.enter(0, 1);
         gate.leave(0, 1);
-        assert!(!gate.confirm(b.0, b.1, b.2), "a cancelled enter never activates");
+        assert!(gate.confirm(b.0, b.1, b.2).is_none(), "a cancelled enter never activates");
 
         let c = gate.enter(0, 1);
         gate.leave(1, 0);
-        assert!(gate.confirm(c.0, c.1, c.2), "another sensor's leave keeps the arm");
+        assert!(gate.confirm(c.0, c.1, c.2).is_some(), "another sensor's leave keeps the arm");
 
         let d1 = gate.enter(0, 1);
         let d2 = gate.enter(0, 1);
-        assert!(!gate.confirm(d1.0, d1.1, d1.2), "the stale arm is superseded");
-        assert!(gate.confirm(d2.0, d2.1, d2.2), "the newest arm wins");
+        assert!(gate.confirm(d1.0, d1.1, d1.2).is_none(), "the stale arm is superseded");
+        assert!(gate.confirm(d2.0, d2.1, d2.2).is_some(), "the newest arm wins");
+    }
+
+    /// A hover only counts when the pointer moved with it: iced fires an
+    /// enter when a widget's bounds change under a still pointer too, and
+    /// that must not open a popup (the CPU pill growing under the cursor
+    /// opened its graph).
+    #[test]
+    fn hover_needs_motion_next_to_the_arm() {
+        let now = Instant::now();
+        assert!(hover_is_fresh(now, Some(now)), "the entering motion itself");
+        assert!(
+            hover_is_fresh(now, Some(now + HOVER_MOTION_GRACE / 2)),
+            "the motion message may arrive right after the enter"
+        );
+        assert!(
+            !hover_is_fresh(now, Some(now - std::time::Duration::from_secs(2))),
+            "a bounds change under a still pointer: no popup"
+        );
+        assert!(!hover_is_fresh(now, None), "no motion at all: no popup");
     }
 
     /// The default popup style must keep the F3 geometry exactly (84px

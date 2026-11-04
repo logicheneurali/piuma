@@ -869,6 +869,32 @@ pub(crate) fn options_with_current(mut options: Vec<String>, current: &str) -> V
     options
 }
 
+/// Every font family iced can actually resolve, sorted and deduplicated.
+/// The list comes from cosmic-text's own font database (the one the
+/// renderer matches `Font::with_name` against), not from fontconfig:
+/// `fc-list` also names aliases that iced cannot resolve, and picking one
+/// of those would silently fall back to the default font.
+pub(crate) fn font_families() -> &'static [String] {
+    static CACHE: OnceLock<Vec<String>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let mut db = cosmic_text::fontdb::Database::new();
+        db.load_system_fonts();
+        sorted_families(
+            db.faces()
+                .flat_map(|face| face.families.iter().map(|(name, _)| name.clone())),
+        )
+    })
+}
+
+/// The picker's order: case-insensitive alphabetical, one entry per
+/// family. Pure, so the ordering is tested without scanning the disk.
+pub(crate) fn sorted_families(names: impl Iterator<Item = String>) -> Vec<String> {
+    let mut names: Vec<String> = names.collect();
+    names.sort_by_key(|name| name.to_lowercase());
+    names.dedup();
+    names
+}
+
 /// PulseAudio/PipeWire sink names from `pactl` (read once; an absent
 /// `pactl` simply leaves the list empty and the text field usable).
 pub(crate) fn audio_devices() -> Vec<String> {
@@ -917,6 +943,39 @@ pub(crate) fn monitor_outputs() -> Vec<String> {
                 .unwrap_or_default()
         })
         .clone()
+}
+
+/// Hyprland's current border settings as `(size, active, inactive)` in
+/// the config's `#rrggbbaa` form, so the border card starts from what
+/// the compositor actually shows. A gradient collapses to its first
+/// stop (the editor edits one colour); no hyprctl leaves `None` and the
+/// card keeps its stored values.
+pub(crate) fn border_live() -> Option<(i32, String, String)> {
+    let read = |path: &str| -> Option<serde_json::Value> {
+        let out = std::process::Command::new("hyprctl")
+            .args(["-j", "getoption", path])
+            .output()
+            .ok()?;
+        serde_json::from_slice(&out.stdout).ok()
+    };
+    let size = read("general:border_size")?.get("int")?.as_i64()? as i32;
+    let color = |path: &str| -> Option<String> {
+        let data = read(path)?;
+        let argb = u32::from_str_radix(data.get("gradient")?.as_str()?.split_whitespace().next()?, 16).ok()?;
+        // AARRGGBB → the config's #rrggbbaa.
+        Some(format!(
+            "#{:02x}{:02x}{:02x}{:02x}",
+            (argb >> 16) & 0xff,
+            (argb >> 8) & 0xff,
+            argb & 0xff,
+            (argb >> 24) & 0xff
+        ))
+    };
+    Some((
+        size,
+        color("general:col.active_border")?,
+        color("general:col.inactive_border")?,
+    ))
 }
 
 /// Network interfaces from `/sys/class/net`, sorted.

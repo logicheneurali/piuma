@@ -58,6 +58,26 @@ pub enum Message {
     DynamicGapsEnabled(bool),
     GapMinChanged(i32),
     GapMaxChanged(i32),
+    /// The floating per-window menu's toggle.
+    WindowMenuEnabled(bool),
+    /// Its position relative to the window (one of the eight labels).
+    WindowMenuPositionChanged(String),
+    /// The Hyprland shadow tweak's switch and fields.
+    ShadowsEnabled(bool),
+    ShadowRangeChanged(i32),
+    ShadowPowerChanged(i32),
+    ShadowSharpChanged(bool),
+    ShadowColorChanged(String),
+    ShadowInactiveColorChanged(String),
+    /// `(axis, value)`: 0 = x, 1 = y.
+    ShadowOffsetChanged(usize, i32),
+    /// One tenth: the slider counts 1..=100 for 0.1..=10.0.
+    ShadowScaleChanged(i32),
+    /// The Hyprland border tweak's switch and fields.
+    BordersEnabled(bool),
+    BorderSizeChanged(i32),
+    BorderActiveChanged(String),
+    BorderInactiveChanged(String),
     /// Sidebar category switch (roadmap N4).
     TabSelected(Tab),
     ThicknessChanged(u32),
@@ -191,6 +211,10 @@ pub enum Message {
     LayoutsClearPressed,
     /// Save: asks confirmation when the config was modified, then writes.
     SaveConfig,
+    /// Restart the bar with the saved configuration (footer button).
+    ReloadPiuma,
+    /// Result of the background restart.
+    PiumaReloaded(Result<(), String>),
     /// Opens the "save as" modal (write the config under a new name).
     SaveAs,
     /// Opens the modal to pick and load any *.json config of the directory.
@@ -645,9 +669,23 @@ impl PiumaSetup {
     /// Saves to `name` and reports the outcome in the status bar, returning
     /// it so callers can react (e.g. keep a confirmation modal open on error).
     pub(crate) fn save_reporting(&mut self, name: &str) -> Result<(), String> {
+        let panels_before = panels_of(&self.snapshot);
         let outcome = self.save_config(name);
         match &outcome {
-            Ok(()) => self.set_status(format!("Configuration saved to {:?}", file_path(name)), false),
+            Ok(()) => {
+                // The bar creates one layer surface per panel at boot: a
+                // changed `panels` array only applies at the next start,
+                // so point at the footer's Reload button.
+                if panels_before != panels_of(&self.snapshot) {
+                    self.set_status(
+                        "Configuration saved — click Reload Piuma to apply the new panel(s)"
+                            .to_string(),
+                        false,
+                    );
+                } else {
+                    self.set_status(format!("Configuration saved to {:?}", file_path(name)), false);
+                }
+            }
             Err(e) => {
                 self.set_status(e.clone(), true);
                 // Invalid values: the list modal names every field to fix,
@@ -725,4 +763,12 @@ impl PiumaSetup {
         self.remap_sensor_keys(|s, i| Some((if s == a { b } else if s == b { a } else { s }, i)));
     }
 
+}
+
+/// The root `panels` value of a serialized config: the only part a
+/// running bar cannot hot-reload (surfaces are created at boot).
+pub(crate) fn panels_of(json: &str) -> Option<serde_json::Value> {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|value| value.get("panels").cloned())
 }

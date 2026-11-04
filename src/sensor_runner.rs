@@ -155,6 +155,31 @@ fn command_store(command: &str, read: &Read) {
     map.insert(command.to_string(), (Instant::now(), read.clone()));
 }
 
+/// The stdout lines of every list sensor's last run, keyed by command:
+/// the hover popup reads them without forking again. Bounded like the
+/// command cache (cleared on overflow, never swept).
+static LIST_LINES: OnceLock<Mutex<HashMap<String, Vec<String>>>> = OnceLock::new();
+
+fn list_store(command: &str, lines: Vec<String>) {
+    let Ok(mut map) = LIST_LINES.get_or_init(Default::default).lock() else {
+        return;
+    };
+    if map.len() > 64 {
+        map.clear();
+    }
+    map.insert(command.to_string(), lines);
+}
+
+/// The lines a list sensor's command printed last (empty until it ran).
+pub fn list_lines(command: &str) -> Vec<String> {
+    LIST_LINES
+        .get_or_init(Default::default)
+        .lock()
+        .ok()
+        .and_then(|map| map.get(command).cloned())
+        .unwrap_or_default()
+}
+
 /// Run a sensor source and return its value (text + optional sample).
 /// `hypr` is the tick's shared compositor snapshot (`None` = the read
 /// was not taken; the Hyprland-backed sources show their fallback).
@@ -177,6 +202,26 @@ pub fn run(source: &SensorSource, hypr: Option<&crate::hypr::Snapshot>) -> Read 
             let read = maybe_measured(run_command(command), source);
             if ttl > 0 {
                 command_store(command, &read);
+            }
+            read
+        }
+        // A list: the bar shows the first line (or the sensor's name),
+        // the hover popup shows the rest (see `list_lines`).
+        SensorSource::List { command, interval, .. } => {
+            let ttl = interval.unwrap_or(0);
+            // Own cache key: a `command` sensor on the same line keeps the
+            // whole output, this one only its first line.
+            let key = format!("list:{command}");
+            if ttl > 0 {
+                if let Some(read) = command_cached(&key, ttl) {
+                    return read;
+                }
+            }
+            let lines: Vec<String> = run_command(command).lines().map(str::to_string).collect();
+            let read = plain(lines.first().cloned().unwrap_or_default());
+            list_store(command, lines);
+            if ttl > 0 {
+                command_store(&key, &read);
             }
             read
         }
@@ -372,6 +417,24 @@ mod tests {
         let read = maybe_measured("hello".into(), &source);
         assert!(read.graph.is_none());
         assert_eq!(read.text, "hello");
+    }
+
+    /// A list sensor's bar text is the first line, and every line is kept
+    /// for the hover popup.
+    #[test]
+    fn list_sensor_shows_the_first_line_and_keeps_the_rest() {
+        let command = "printf 'one\\ntwo\\nthree\\n'";
+        let source = SensorSource::List {
+            command: command.to_string(),
+            interval: None,
+            max_lines: 2,
+        };
+        assert_eq!(run(&source, None).text, "one");
+        assert_eq!(
+            list_lines(command),
+            vec!["one".to_string(), "two".to_string(), "three".to_string()]
+        );
+        assert!(list_lines("piuma-never-ran").is_empty());
     }
 
     /// A command with an interval reuses its last reading until the

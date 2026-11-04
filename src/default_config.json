@@ -1,0 +1,220 @@
+{
+  "panel": {
+    "align": "fill",
+    "anchor": "top",
+    "app_theme": true,
+    "autostart_disabled": [
+    ],
+    "bold": true,
+    "default_bg_color": "#15306000",
+    "default_section_weight": 1,
+    "default_text_color": "#eeeeee",
+    "font": "Noto Sans",
+    "font_size": 12,
+    "notifications": {
+      "bg_color": "#153045ee",
+      "bg_color_hover": "#000000",
+      "border_color": "#aaaaaa",
+      "border_color_hover": "#dddddd",
+      "border_radius": 10,
+      "border_type": "full",
+      "border_width": 3,
+      "default_timeout_ms": 15235,
+      "font_size": 12,
+      "history_size": 20,
+      "padding": 4,
+      "popup_margin_h": 20,
+      "popup_margin_v": 20,
+      "popup_position": "top-right",
+      "replace_existing": true,
+      "text_color": "#ffffff",
+      "text_color_hover": "#ffffff"
+    },
+    "screen_corners": {
+      "color": "#000000",
+      "enable": true,
+      "radius": 10
+    },
+    "section_defaults": {
+      "bg_color": "#00000050",
+      "border_color": "#ffffff00",
+      "border_radius": 8,
+      "border_type": "full",
+      "border_width": 1,
+      "respect_screen_edges": true,
+      "text_color": "#eeeeee"
+    },
+    "section_layout": "horizontal",
+    "section_title": false,
+    "sections": [
+      {
+        "layout": "horizontal",
+        "name": "left",
+        "sensors": [
+          {
+            "action": "rofi -show combi -combi-modes 'drun,run,sys:/home/effedi/Scripts/rofi-poweroff' -display-combi \">\"",
+            "name": "Workspace",
+            "source": {
+              "type": "workspace"
+            }
+          },
+          {
+            "source": {
+              "type": "taskbar"
+            }
+          },
+          {
+            "name": "Media",
+            "source": {
+              "type": "media"
+            }
+          },
+          {
+            "name": "Layout",
+            "source": {
+              "type": "layout"
+            }
+          }
+        ],
+        "text_color": "#ffffff"
+      },
+      {
+        "layout": "horizontal",
+        "name": "center",
+        "sensors": [
+          {
+            "action": "kitty -e \"btop\"",
+            "border_radius": -1,
+            "border_type": "corners",
+            "border_width": -1,
+            "draw_graph": true,
+            "effect": true,
+            "name": "CPU",
+            "padding": -1,
+            "source": {
+              "type": "perc_cpu"
+            }
+          },
+          {
+            "border_radius": -1,
+            "border_type": "corners",
+            "border_width": -1,
+            "draw_graph": true,
+            "effect": true,
+            "name": "MEM",
+            "padding": -1,
+            "source": {
+              "type": "perc_mem"
+            }
+          },
+          {
+            "draw_graph": true,
+            "name": "BAT",
+            "source": {
+              "type": "perc_battery"
+            }
+          },
+          {
+            "draw_graph": true,
+            "name": "DISK",
+            "source": {
+              "type": "perc_disk"
+            }
+          },
+          {
+            "source": {
+              "command": "echo -e \"ECONNS $(netstat -p --numeric-ports|grep ESTABLISHED|wc -l)\\n$(netstat -p --numeric-ports|grep ESTABLISHED)\"",
+              "interval": 30,
+              "max_lines": 50,
+              "type": "list"
+            }
+          },
+          {
+            "source": {
+              "command": "echo -e \"$(echo PROC)\\n$(ps aux --sort -%cpu |grep -v '\\['|awk '{printf  \"%5s %5s %-30s\\n\",$3,$4,$11}')\"",
+              "interval": 10,
+              "max_lines": 10,
+              "type": "list"
+            }
+          }
+        ]
+      },
+      {
+        "layout": "horizontal",
+        "name": "right",
+        "sensors": [
+          {
+            "icon": "battery-090-profile-powersave",
+            "source": {
+              "type": "power_profile"
+            }
+          },
+          {
+            "source": {
+              "type": "tray"
+            }
+          },
+          {
+            "bg_color": "#ffffff",
+            "bg_color_hover": "#303030",
+            "source": {
+              "format": "%H:%M:%S",
+              "type": "calendar"
+            },
+            "text_color": "#000000"
+          }
+        ]
+      }
+    ],
+    "sensor_defaults": {
+      "bg_color": "#153050",
+      "bg_color_hover": "#153070",
+      "border_color": "#dddddd00",
+      "border_color_hover": "#00ffff",
+      "border_radius": 8,
+      "border_type": "full",
+      "border_width": 1,
+      "padding": 3,
+      "text_color": "#eeeeee",
+      "text_color_hover": "#ffffff"
+    },
+    "thickness": 28,
+    "tweaks": {
+      "borders": {
+        "active": "#ffffff00",
+        "enabled": false,
+        "inactive": "#ffffff33",
+        "size": 0
+      },
+      "dynamic_gaps": {
+        "enabled": false,
+        "max": 100,
+        "min": 30
+      },
+      "shadows": {
+        "color": "#00000099",
+        "color_inactive": "#00000060",
+        "enabled": false,
+        "offset": [
+          2,
+          2
+        ],
+        "range": 20,
+        "render_power": 4,
+        "scale": 1.0,
+        "sharp": false
+      },
+      "window_menu": {
+        "enabled": false,
+        "position": "bottom-center"
+      }
+    },
+    "wallpaper": {
+      "color": "#999999",
+      "enabled": false,
+      "mode": "image",
+      "path": ""
+    },
+    "wallpaper_palette": true
+  }
+}

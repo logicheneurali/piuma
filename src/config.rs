@@ -243,6 +243,122 @@ pub struct TweaksConfig {
     /// Shrink the gap between windows as more of them open.
     #[serde(default)]
     pub dynamic_gaps: Option<DynamicGapsConfig>,
+    /// The floating menu that closes/floats/pins the focused window.
+    #[serde(default)]
+    pub window_menu: Option<WindowMenuConfig>,
+    /// Hyprland's window shadows (`decoration:shadow:*`).
+    #[serde(default)]
+    pub shadows: Option<ShadowsConfig>,
+    /// Hyprland's window borders (`general:border_size`, `general:col`).
+    #[serde(default)]
+    pub borders: Option<BordersConfig>,
+}
+
+/// `panel.tweaks.borders`: the border every window gets. While the block
+/// is enabled the bar writes these values and puts the user's own back
+/// when it is disabled or piuma exits.
+#[derive(Deserialize, serde::Serialize, Clone)]
+pub struct BordersConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Border thickness in px.
+    #[serde(default = "default_border_size")]
+    pub size: i32,
+    /// Focused window's border, `#rrggbbaa`.
+    #[serde(default = "default_border_active")]
+    pub active: String,
+    /// Every other window's border.
+    #[serde(default = "default_border_inactive")]
+    pub inactive: String,
+}
+
+fn default_border_size() -> i32 {
+    1
+}
+
+fn default_border_active() -> String {
+    "#33ccffee".to_string()
+}
+
+fn default_border_inactive() -> String {
+    "#595959aa".to_string()
+}
+
+/// `panel.tweaks.shadows`: every option Hyprland's `decoration:shadow`
+/// takes. While the block is enabled the bar writes these values and
+/// puts the user's own back when it is disabled or piuma exits. Defaults
+/// mirror Hyprland's, in the config's `#rrggbbaa` colour form.
+#[derive(Deserialize, serde::Serialize, Clone)]
+pub struct ShadowsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Blur radius of the shadow, 0..=100.
+    #[serde(default = "default_shadow_range")]
+    pub range: i32,
+    /// Blur passes: higher is smoother and heavier, 1..=4.
+    #[serde(default = "default_shadow_render_power")]
+    pub render_power: i32,
+    /// Hard edge instead of a soft gradient.
+    #[serde(default)]
+    pub sharp: bool,
+    #[serde(default = "default_shadow_color")]
+    pub color: String,
+    #[serde(default = "default_shadow_color_inactive")]
+    pub color_inactive: String,
+    /// `[x, y]` pixels.
+    #[serde(default)]
+    pub offset: [i32; 2],
+    /// Size multiplier, 0.1..=10.
+    #[serde(default = "default_shadow_scale")]
+    pub scale: f32,
+}
+
+fn default_shadow_range() -> i32 {
+    10
+}
+
+fn default_shadow_render_power() -> i32 {
+    1
+}
+
+fn default_shadow_color() -> String {
+    // Hyprland's `0x99000000` (AARRGGBB) in the config's RGBA order.
+    "#00000099".to_string()
+}
+
+fn default_shadow_color_inactive() -> String {
+    "#ffffffff".to_string()
+}
+
+fn default_shadow_scale() -> f32 {
+    1.0
+}
+
+/// `panel.tweaks.window_menu`: a small menu following the focused
+/// window, one button per action. Off by default — when off, the bar
+/// never opens the socket nor the surface.
+#[derive(Deserialize, serde::Serialize, Clone)]
+pub struct WindowMenuConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Where the menu sits relative to the window: 4 px above or below
+    /// it, its left/right edge aligned with the window's.
+    #[serde(default)]
+    pub position: WindowMenuPosition,
+}
+
+/// The six places a window edge can host the menu: above or below the
+/// window, aligned left / centred / right on it.
+#[derive(Deserialize, serde::Serialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum WindowMenuPosition {
+    TopLeft,
+    #[default]
+    TopCenter,
+    TopRight,
+    BottomLeft,
+    BottomCenter,
+    BottomRight,
 }
 
 /// `panel.tweaks.dynamic_gaps`: the bar patches Hyprland's
@@ -260,6 +376,10 @@ pub struct DynamicGapsConfig {
     /// Gap floor reached after enough windows.
     #[serde(default = "default_gap_max")]
     pub max: i32,
+}
+
+fn default_list_lines() -> u32 {
+    10
 }
 
 fn default_gap_min() -> i32 {
@@ -491,6 +611,17 @@ pub enum SensorSource {
         #[serde(default)]
         interval: Option<u64>,
     },
+    /// A command's stdout as a list: the bar shows the sensor's name (or
+    /// the first line when the name is empty) and hovering lists up to
+    /// `max_lines` lines.
+    #[serde(rename = "list", alias = "List")]
+    List {
+        command: String,
+        #[serde(default)]
+        interval: Option<u64>,
+        #[serde(default = "default_list_lines")]
+        max_lines: u32,
+    },
     #[serde(rename = "env_var", alias = "EnvVar")]
     EnvVar { env_var: String },
     #[serde(rename = "static_text", alias = "StaticText")]
@@ -679,6 +810,14 @@ pub fn default_config() -> Config {
     }
 }
 
+/// The config a first start writes out and runs with: the shipped
+/// `default_config.json`, compiled in (the built-in above is only the
+/// last resort should it ever fail to parse).
+fn shipped_config() -> Config {
+    serde_json::from_str(include_str!("default_config.json"))
+        .unwrap_or_else(|_| default_config())
+}
+
 // ── loading ─────────────────────────────────────────────────────────
 
 fn default_config_path() -> PathBuf {
@@ -862,14 +1001,37 @@ pub fn validate_config(cfg: &Config) -> Vec<ConfigError> {
 
     if let Some(g) = p.tweaks.as_ref().and_then(|t| t.dynamic_gaps.as_ref()) {
         let path = "panel.tweaks.dynamic_gaps";
-        err_range(&mut errors, &format!("{path}.min"), Some(g.min), 0, 200);
-        err_range(&mut errors, &format!("{path}.max"), Some(g.max), 0, 200);
+        err_range(&mut errors, &format!("{path}.min"), Some(g.min), 1, 200);
+        err_range(&mut errors, &format!("{path}.max"), Some(g.max), 1, 200);
         if g.min > g.max {
             errors.push(ConfigError {
                 path: path.to_string(),
                 message: "the minimum gap cannot exceed the maximum".to_string(),
             });
         }
+    }
+
+    if let Some(b) = p.tweaks.as_ref().and_then(|t| t.borders.as_ref()) {
+        let path = "panel.tweaks.borders";
+        err_range(&mut errors, &format!("{path}.size"), Some(b.size), 0, 20);
+        err_color(&mut errors, &format!("{path}.active"), Some(&b.active));
+        err_color(&mut errors, &format!("{path}.inactive"), Some(&b.inactive));
+    }
+
+    if let Some(s) = p.tweaks.as_ref().and_then(|t| t.shadows.as_ref()) {
+        let path = "panel.tweaks.shadows";
+        err_range(&mut errors, &format!("{path}.range"), Some(s.range), 0, 100);
+        err_range(&mut errors, &format!("{path}.render_power"), Some(s.render_power), 1, 4);
+        err_range(&mut errors, &format!("{path}.offset"), Some(s.offset[0]), -500, 500);
+        err_range(&mut errors, &format!("{path}.offset"), Some(s.offset[1]), -500, 500);
+        if !(0.1..=10.0).contains(&s.scale) {
+            errors.push(ConfigError {
+                path: format!("{path}.scale"),
+                message: format!("{}: expected 0.1..=10", s.scale),
+            });
+        }
+        err_color(&mut errors, &format!("{path}.color"), Some(&s.color));
+        err_color(&mut errors, &format!("{path}.color_inactive"), Some(&s.color_inactive));
     }
 
     if let Some(d) = &p.sensor_defaults {
@@ -994,11 +1156,21 @@ pub fn validate_config(cfg: &Config) -> Vec<ConfigError> {
                     });
                 }
             }
-            if let SensorSource::Command { interval: Some(interval), .. } = &sensor.source {
+            if let SensorSource::Command { interval: Some(interval), .. }
+            | SensorSource::List { interval: Some(interval), .. } = &sensor.source
+            {
                 if *interval > 86_400 {
                     errors.push(ConfigError {
                         path: format!("{spath}.source.interval"),
                         message: format!("{interval}: expected 0..=86400"),
+                    });
+                }
+            }
+            if let SensorSource::List { max_lines, .. } = &sensor.source {
+                if !(1..=200).contains(max_lines) {
+                    errors.push(ConfigError {
+                        path: format!("{spath}.source.max_lines"),
+                        message: format!("{max_lines}: expected 1..=200"),
                     });
                 }
             }
@@ -1116,7 +1288,7 @@ pub fn load_config(path: Option<String>) -> (Config, PathBuf) {
             if let Err(e) = std::fs::create_dir_all(dir) {
                 eprintln!("[piuma] Cannot create config dir {}: {}", dir.display(), e);
             }
-            match serde_json::to_string_pretty(&default_config()) {
+            match serde_json::to_string_pretty(&shipped_config()) {
                 Ok(default_cfg) => {
                     if let Err(e) = std::fs::write(&default_path, default_cfg) {
                         eprintln!("[piuma] Cannot write default config {}: {}", default_path.display(), e);
@@ -1129,7 +1301,10 @@ pub fn load_config(path: Option<String>) -> (Config, PathBuf) {
         eprintln!("[piuma] Keeping the existing config untouched; running with defaults until it parses");
     }
 
-    (default_config(), default_path)
+    // No file could be read: run with the same values the shipped
+    // default carries (a broken/absent config must not start the bare
+    // built-in bar while the file on disk holds a real layout).
+    (shipped_config(), default_path)
 }
 
 /// Write the config back to `path` atomically (temp file + rename): the
@@ -1148,6 +1323,17 @@ pub fn save_config(path: &std::path::Path, config: &Config) -> std::io::Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shipped default is the embedded file, not the built-in
+    /// fallback: a broken embed must fail here instead of silently
+    /// shipping the bare bar.
+    #[test]
+    fn shipped_default_is_the_embedded_file() {
+        let shipped = shipped_config();
+        assert_eq!(shipped.panel.sections.len(), 3, "embedded file parsed");
+        assert_eq!(shipped.panel.sections[0].name, "left");
+        assert_eq!(shipped.panel.font.as_deref(), Some("Noto Sans"));
+    }
 
     /// A `tray` sensor must be part of a config piuma accepts whole: this
     /// parse is exactly what piuma-setup's pre-save validation runs.
@@ -1616,7 +1802,147 @@ mod tests {
     }
 
     /// The Tweaks block is optional (absent = every tweak off) and the
-    /// dynamic-gaps range must not be inverted.
+    /// The list sensor: name/first line on the bar, the lines for the
+    /// popup, and the values Hyprland-side validation refuses.
+    #[test]
+    fn list_sensor_parse_and_validate() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[{"sensors":[
+                {"name":"Downloads","source":{"type":"list","command":"ls ~/Downloads"}}
+            ]}]}}"#,
+        )
+        .expect("list source must parse");
+        let source = &cfg.panel.sections[0].sensors[0].source;
+        assert!(matches!(
+            source,
+            SensorSource::List {
+                max_lines: 10,
+                interval: None,
+                ..
+            }
+        ));
+        assert!(validate_config(&cfg).is_empty());
+
+        let bad: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[{"sensors":[
+                {"source":{"type":"list","command":"ls","max_lines":0,"interval":90000}}
+            ]}]}}"#,
+        )
+        .unwrap();
+        let errors = validate_config(&bad);
+        for path in [
+            "panel.sections[0].sensors[0].source.max_lines",
+            "panel.sections[0].sensors[0].source.interval",
+        ] {
+            assert!(errors.iter().any(|e| e.path == path), "missing {path}");
+        }
+    }
+
+    /// The border block: absent fields take Hyprland's own defaults, and
+    /// the values Hyprland would reject are flagged.
+    #[test]
+    fn border_tweaks_parse_and_validate() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[],"tweaks":{"borders":{"enabled":true}}}}"#,
+        )
+        .expect("borders must parse");
+        let b = cfg
+            .panel
+            .tweaks
+            .as_ref()
+            .and_then(|t| t.borders.as_ref())
+            .expect("borders");
+        assert!(b.enabled);
+        assert_eq!(b.size, 1);
+        assert_eq!(b.active, "#33ccffee");
+        assert_eq!(b.inactive, "#595959aa");
+        assert!(validate_config(&cfg).is_empty());
+
+        let bad: Config = serde_json::from_str(
+            r##"{"panel":{"sections":[],"tweaks":{"borders":{"size":40,"active":"nope"}}}}"##,
+        )
+        .unwrap();
+        let errors = validate_config(&bad);
+        for path in ["panel.tweaks.borders.size", "panel.tweaks.borders.active"] {
+            assert!(errors.iter().any(|e| e.path == path), "missing {path}");
+        }
+    }
+
+    /// The shadow block: absent fields take Hyprland's own defaults, and
+    /// the values Hyprland would reject are flagged.
+    #[test]
+    fn shadows_tweaks_parse_and_validate() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[],"tweaks":{"shadows":{"enabled":true}}}}"#,
+        )
+        .expect("shadows must parse");
+        let sh = cfg
+            .panel
+            .tweaks
+            .as_ref()
+            .and_then(|t| t.shadows.as_ref())
+            .expect("shadows");
+        assert!(sh.enabled);
+        assert_eq!((sh.range, sh.render_power), (10, 1));
+        assert!(!sh.sharp);
+        assert_eq!(sh.color, "#00000099");
+        assert_eq!(sh.offset, [0, 0]);
+        assert!((sh.scale - 1.0).abs() < 1e-6);
+        assert!(validate_config(&cfg).is_empty());
+
+        let bad: Config = serde_json::from_str(
+            r##"{"panel":{"sections":[],"tweaks":{"shadows":{"range":200,"render_power":0,"scale":0.0,"color":"nope"}}}}"##,
+        )
+        .unwrap();
+        let errors = validate_config(&bad);
+        for path in [
+            "panel.tweaks.shadows.range",
+            "panel.tweaks.shadows.render_power",
+            "panel.tweaks.shadows.scale",
+            "panel.tweaks.shadows.color",
+        ] {
+            assert!(errors.iter().any(|e| e.path == path), "missing {path}");
+        }
+    }
+
+    /// The floating menu's block: absent values default to off and
+    /// top-center; an unknown position is a parse error (never a silent
+    /// wrong placement).
+    #[test]
+    fn window_menu_tweaks_parse_and_validate() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[],"tweaks":{"window_menu":{"enabled":true}}}}"#,
+        )
+        .expect("window menu must parse");
+        let menu = cfg
+            .panel
+            .tweaks
+            .as_ref()
+            .and_then(|t| t.window_menu.as_ref())
+            .expect("window menu");
+        assert!(menu.enabled);
+        assert_eq!(menu.position, WindowMenuPosition::TopCenter, "default");
+        assert!(validate_config(&cfg).is_empty());
+
+        let corners: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[],"tweaks":{"window_menu":{"enabled":true,"position":"bottom-right"}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            corners.panel.tweaks.unwrap().window_menu.unwrap().position,
+            WindowMenuPosition::BottomRight
+        );
+
+        assert!(
+            serde_json::from_str::<Config>(
+                r#"{"panel":{"sections":[],"tweaks":{"window_menu":{"position":"middle"}}}}"#
+            )
+            .is_err(),
+            "an unknown position must not load"
+        );
+    }
+
+    /// A wrapped dynamic-gaps range must not be inverted.
     #[test]
     fn dynamic_gaps_tweaks_parse_and_validate() {
         let cfg: Config = serde_json::from_str(
@@ -1640,6 +1966,15 @@ mod tests {
         assert!(validate_config(&bad)
             .iter()
             .any(|e| e.path == "panel.tweaks.dynamic_gaps"));
+
+        // The editor's sliders start at 1: a hand-edited 0 is refused.
+        let zero: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[],"tweaks":{"dynamic_gaps":{"enabled":true,"min":0,"max":16}}}}"#,
+        )
+        .unwrap();
+        assert!(validate_config(&zero)
+            .iter()
+            .any(|e| e.path == "panel.tweaks.dynamic_gaps.min"));
     }
 
     /// The runtime-state sources parse with no parameters, and a

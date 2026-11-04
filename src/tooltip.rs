@@ -3,7 +3,7 @@
 //! its text line by line (a tray tooltip carries a title and a body
 //! on two lines).
 
-use crate::menus::{menu_row_h, MENU_PAD};
+use crate::menus::MENU_PAD;
 use crate::text_width;
 use crate::tray;
 use crate::{
@@ -21,6 +21,16 @@ use iced_exwlshell::settings::LayerSize;
 /// Distance between a tooltip and the widget it describes (icons and
 /// tray items): enough to read it as attached, never on the widget.
 pub(crate) const TOOLTIP_GAP: f32 = 8.0;
+
+/// Line height of a tooltip line, relative to the font size: the text
+/// widget renders with this exact factor, so the surface is as tall as
+/// the lines it draws (the menu rows' rhythm would add air to every
+/// line of a multi-line list).
+const TOOLTIP_LINE: f32 = 1.2;
+
+/// Vertical padding above and below the text (the horizontal one is
+/// `MENU_PAD`, like every popup).
+const TOOLTIP_PAD_Y: u32 = 4;
 
 /// Anchor + edge margins for a tooltip window at the cursor point:
 /// just off the bar's anchored edge on the screen's inner side (a top
@@ -159,11 +169,18 @@ pub(crate) fn hyprctl_cursor_global() -> Option<(i32, i32)> {
     Some((v["x"].as_i64()? as i32, v["y"].as_i64()? as i32))
 }
 
+/// The text height for `lines` lines at `font_size`: the factor the text
+/// widget renders with (see [`TOOLTIP_LINE`]), rounded up so the last
+/// line never loses its fractional pixel.
+fn tooltip_text_h(font_size: u32, lines: usize) -> u32 {
+    (lines as f32 * font_size as f32 * TOOLTIP_LINE).ceil() as u32
+}
+
 /// The tooltip surface metrics for a text: every `\n`-separated line
 /// is fitted to `budget` (like the menu labels), the surface is as
-/// wide as the widest fitted line and one `menu_row_h` per line tall —
-/// so a multi-line SNI tooltip (`title\nbody`) is measured, not cut to
-/// one line's height. Returns (width, height, fitted text).
+/// wide as the widest fitted line and exactly one line height per line
+/// tall — so a multi-line list is measured, with no air around it.
+/// Returns (width, height, fitted text).
 pub(crate) fn tooltip_fit(
     font: &Font,
     font_size: u32,
@@ -177,7 +194,7 @@ pub(crate) fn tooltip_fit(
     let jobs: Vec<(String, u32)> = lines.into_iter().map(|line| (line, budget)).collect();
     let fitted = text_width::fit(font, font_size, &jobs);
     let width = u32::from(text_width::widest(font, font_size, &fitted));
-    let height = menu_row_h(font_size) * fitted.len() as u32;
+    let height = tooltip_text_h(font_size, fitted.len());
     (width, height, fitted.join("\n"))
 }
 
@@ -206,7 +223,7 @@ pub(crate) fn tooltip_open(panel: &mut Panel, id: String, text: String) -> Comma
     let budget = (sw as u32 / 2).saturating_sub(2 * MENU_PAD);
     let (text_w, text_h, fitted) = tooltip_fit(&font, font_size, &text, budget);
     let w = text_w.saturating_add(2 * MENU_PAD).max(48);
-    let h = text_h.saturating_add(2 * MENU_PAD);
+    let h = text_h.saturating_add(2 * TOOLTIP_PAD_Y);
     let at = tooltip_cursor_point(panel);
     let thickness = panel_thickness(&panel.config) as i32;
     let vertical = panel.config.panel.section_layout.as_deref() == Some("vertical");
@@ -264,13 +281,19 @@ pub(crate) fn tooltip_window_view(panel: &Panel) -> Element<'_, Message> {
             .size(font_size)
             .color(st.text)
             .font(font)
+            .line_height(TOOLTIP_LINE)
             .width(Length::Fill),
     )
     .width(Length::Fill)
     .height(Length::Fill)
     .center_x(Length::Fill)
     .align_y(Alignment::Center)
-    .padding(iced::Padding::from(MENU_PAD as f32));
+    .padding(iced::Padding {
+        top: TOOLTIP_PAD_Y as f32,
+        right: MENU_PAD as f32,
+        bottom: TOOLTIP_PAD_Y as f32,
+        left: MENU_PAD as f32,
+    });
     styled_box(
         body.into(),
         Some(st.bg),
@@ -290,20 +313,20 @@ mod tests {
     use super::*;
 
     /// Every `\n`-separated line is fitted and measured: the surface
-    /// is as wide as the widest line, one row per line tall, and an
-    /// over-budget line is cut on its own.
+    /// is as wide as the widest line, one line height per line tall (no
+    /// menu-row air), and an over-budget line is cut on its own.
     #[test]
     fn tooltip_fit_measures_every_line() {
         let font = Font::with_name("Noto Sans");
         let (w, h, fitted) = tooltip_fit(&font, 14, "Title\nSome longer body line", 500);
         assert_eq!(fitted, "Title\nSome longer body line");
-        assert_eq!(h, 2 * menu_row_h(14));
+        assert_eq!(h, tooltip_text_h(14, 2));
         let widest = text_width::widest(&font, 14, &["Some longer body line".to_string()]);
         assert_eq!(w, u32::from(widest));
         // The long line is cut, the short one keeps; two rows still.
         let long = "x".repeat(400);
         let (w2, h2, fitted2) = tooltip_fit(&font, 14, &format!("ok\n{long}"), 60);
-        assert_eq!(h2, 2 * menu_row_h(14));
+        assert_eq!(h2, tooltip_text_h(14, 2));
         assert!(w2 <= 60);
         let (first, second) = fitted2.split_once('\n').unwrap();
         assert_eq!(first, "ok");

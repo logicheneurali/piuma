@@ -77,7 +77,7 @@ pub struct LayoutState {
     /// Address + workspace of every window at the last check: a window
     /// created or closed, or moved to another workspace, re-runs the
     /// check (manual resizes, raises and workspace switches do not).
-    arrangement: HashSet<(String, String)>,
+    arrangement: HashSet<(String, String, bool)>,
     /// Addresses at the last check, to tell a create/close from a mere
     /// workspace move: only the former starts a new window set.
     addresses: HashSet<String>,
@@ -250,14 +250,17 @@ enum Trigger {
     WorkspaceOnly,
 }
 
-/// Whether the arrangement (address + workspace) differs from the last
-/// check — the only event that re-runs it. Manual resizes, raises and
-/// workspace switches change neither address nor workspace.
+/// Whether the arrangement (address + workspace + float state) differs
+/// from the last check — the only event that re-runs it. The float flag
+/// belongs to the signature: the layout matches on it (see `matches`),
+/// so floating or re-tiling a window must re-evaluate the match instead
+/// of waiting for the next create/close. Manual resizes, raises and
+/// workspace switches change none of the three.
 fn arrangement_trigger(state: &mut LayoutState, rows: &[WinRow]) -> Option<Trigger> {
     let addresses: HashSet<String> = rows.iter().map(|r| r.address.clone()).collect();
-    let arrangement: HashSet<(String, String)> = rows
+    let arrangement: HashSet<(String, String, bool)> = rows
         .iter()
-        .map(|r| (r.address.clone(), r.workspace.clone()))
+        .map(|r| (r.address.clone(), r.workspace.clone(), r.floating))
         .collect();
     if arrangement == state.arrangement {
         return None;
@@ -334,12 +337,16 @@ fn assign(rows: &[WinRow], entries: &[LayoutEntry]) -> Option<Vec<(usize, usize)
     let mut used = vec![false; rows.len()];
     let mut pairs = Vec::with_capacity(entries.len());
     for (ei, entry) in entries.iter().enumerate() {
-        let mut best: Option<((i32, i32, i32, i32), usize)> = None;
+        let mut best: Option<((i32, i32, i32, i32, i32), usize)> = None;
         for (ri, row) in rows.iter().enumerate() {
             if used[ri] || row.class != entry.class {
                 continue;
             }
             let key = (
+                // The state comes first: a tiled entry takes the tiled
+                // twin, so a manual float is never paired with it when a
+                // better match exists (see `matches`).
+                i32::from(row.floating == entry.floating),
                 i32::from(row.title == entry.title),
                 i32::from(layout_ws.contains(row.workspace.as_str())),
                 (title_resemble(&entry.title, &row.title) * 1000.0) as i32,
@@ -418,10 +425,14 @@ fn entries_for(rows: &[WinRow], active_workspace: &str) -> Vec<LayoutEntry> {
 }
 
 /// A layout fits when every saved window has an open twin of its class
-/// (each entry is paired by `assign`) and its own workspaces hold no
-/// extra window: unrelated classes and extra same-class twins there
-/// veto. Same-class windows on other workspaces are allowed — they are
-/// simply not part of the pairing. An empty layout never matches.
+/// (each entry is paired by `assign`), its own workspaces hold no
+/// extra window, and the pairing keeps the saved states: a **tiled**
+/// entry never lands on a window the user floated — that layout would
+/// have to un-float it, so it simply does not match (an empty layout
+/// never matches). The other way is allowed on purpose: a **floating**
+/// entry may land on a tiled window, and the layout floats it — that is
+/// how a layout with a floating window is restored after its app
+/// reopened tiled.
 pub fn matches(rows: &[WinRow], entries: &[LayoutEntry]) -> bool {
     if entries.is_empty() {
         return false;
@@ -445,8 +456,19 @@ pub fn matches(rows: &[WinRow], entries: &[LayoutEntry]) -> bool {
     for r in rows.iter().filter(|r| layout_ws.contains(r.workspace.as_str())) {
         *here.entry(r.class.as_str()).or_insert(0) += 1;
     }
-    here.iter()
+    if !here
+        .iter()
         .all(|(class, n)| saved.get(class).is_some_and(|m| n <= m))
+    {
+        return false;
+    }
+    // The pairing decides the states: a tiled entry on a floating window
+    // means the layout would take the float away, so it does not fit.
+    assign(rows, entries).is_some_and(|pairs| {
+        pairs
+            .iter()
+            .all(|(ri, ei)| !(rows[*ri].floating && !entries[*ei].floating))
+    })
 }
 
 /// What to dispatch to re-apply `entries` to `rows`, in order. Pure —
@@ -490,11 +512,9 @@ pub fn plan(rows: &[WinRow], entries: &[LayoutEntry]) -> Vec<Action> {
                 h: e.h,
             });
         } else if r.floating {
-            // Saved as tiled, floating now: back into the tiler; the
-            // split after the toggle is the tiler's own.
-            actions.push(Action::ToggleFloat {
-                address: r.address.clone(),
-            });
+            // Saved as tiled, floating now: the user floated it. The
+            // layout never takes a float away (and `matches` would not
+            // have paired them), so the window is left exactly as it is.
         } else if r.w != e.w || r.h != e.h {
             // Saved as tiled and tiled now, size off: the absolute
             // target — `apply` fires it measured (probe + guardrail).
@@ -700,6 +720,7 @@ mod tests {
             floating,
             fullscreen: false,
             visible: true,
+            pinned: false,
         }
     }
 
@@ -1079,16 +1100,16 @@ mod tests {
         assert!(matches!(actions[4], Action::Geometry { ref address, .. } if address == "0xC"));
     }
 
-    /// A window saved as tiled is never floated back: a floating one
-    /// goes back into the tiler (its split is then the tiler's own),
-    /// while a floating entry still gets its exact pixels.
+    /// A window the user floated is never taken back into the tiling,
+    /// while a floating entry still floats its window and gives it the
+    /// exact saved pixels.
     #[test]
-    fn plan_keeps_tiled_windows_tiled() {
+    fn plan_never_takes_a_float_away() {
         let tiled_entry = vec![entry("kitty", "shell", "1", false)];
         let floating_now = vec![row("0xA", "kitty", "shell", "1", true)];
         assert!(
-            matches!(plan(&floating_now, &tiled_entry)[..], [Action::ToggleFloat { .. }]),
-            "back into the tiler: no pixel geometry on a tiled entry"
+            plan(&floating_now, &tiled_entry).is_empty(),
+            "a manual float is left exactly as it is: no toggle, no pixels"
         );
 
         let floating = vec![entry("mpv", "video", "1", true)];
@@ -1097,6 +1118,68 @@ mod tests {
             plan(&tiled_now, &floating)[..],
             [Action::ToggleFloat { .. }, Action::Geometry { .. }]
         ));
+    }
+
+    /// The float state is part of the match: a layout saved with three
+    /// tiled windows does not fit a set where one of them was floated
+    /// by hand (it would have to take the float away), while a layout
+    /// that saves a floating window still fits over a tiled one and
+    /// floats it.
+    #[test]
+    fn a_manual_float_vetoes_the_layout() {
+        let tiled = vec![
+            entry("kitty", "a", "1", false),
+            entry("kitty", "b", "1", false),
+            entry("kitty", "c", "1", false),
+        ];
+        let rows = vec![
+            row("0xA", "kitty", "a", "1", false),
+            row("0xB", "kitty", "b", "1", false),
+            row("0xC", "kitty", "c", "1", false),
+        ];
+        assert!(matches(&rows, &tiled), "all tiled: the layout fits");
+        let mut floated = rows.clone();
+        floated[2].floating = true;
+        assert!(
+            !matches(&floated, &tiled),
+            "a manually floated window vetoes the layout"
+        );
+
+        let mixed = vec![
+            entry("kitty", "a", "1", false),
+            entry("kitty", "b", "1", false),
+            entry("mpv", "video", "1", true),
+        ];
+        let rows = vec![
+            row("0xA", "kitty", "a", "1", false),
+            row("0xB", "kitty", "b", "1", false),
+            row("0xC", "mpv", "video", "1", false),
+        ];
+        assert!(matches(&rows, &mixed), "a floating entry may float a tiled twin");
+        assert!(
+            plan(&rows, &mixed).iter().any(|a| matches!(
+                a,
+                Action::ToggleFloat { address } if address == "0xC"
+            )),
+            "the layout floats it"
+        );
+    }
+
+    /// The pairing prefers the window that already has the saved state:
+    /// a tiled entry takes the tiled twin, so same-class apps do not
+    /// swap states.
+    #[test]
+    fn assign_prefers_the_window_that_already_has_the_state() {
+        let entries = vec![entry("kitty", "shell", "1", false)];
+        let rows = vec![
+            row("0xF", "kitty", "shell", "1", true),
+            row("0xA", "kitty", "shell", "1", false),
+        ];
+        assert_eq!(
+            assign(&rows, &entries),
+            Some(vec![(1, 0)]),
+            "the tiled window takes the tiled entry"
+        );
     }
 
     /// A tiled window that lost its size gets its absolute target as

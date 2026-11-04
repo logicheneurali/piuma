@@ -40,6 +40,7 @@ mod hyprland_wallpaper;
 mod model;
 mod modal;
 mod preview;
+mod reload;
 mod state;
 mod style;
 mod update;

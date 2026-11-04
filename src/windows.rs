@@ -81,6 +81,8 @@ pub struct WinRow {
     /// `visible` in `clients -j`: false = on an inactive workspace or
     /// hidden (the layout save keeps only visible windows).
     pub visible: bool,
+    /// `pinned` in `clients -j`: the window shows on every workspace.
+    pub pinned: bool,
 }
 
 /// One taskbar slot: the address the clicks dispatch against, the
@@ -175,6 +177,7 @@ pub(crate) fn parse_clients(json: &str) -> Vec<WinRow> {
                 floating: c.get("floating").and_then(|v| v.as_bool()).unwrap_or(false),
                 fullscreen: c.get("fullscreen").and_then(|v| v.as_i64()).unwrap_or(0) > 0,
                 visible: c.get("visible").and_then(|v| v.as_bool()).unwrap_or(true),
+                pinned: c.get("pinned").and_then(|v| v.as_bool()).unwrap_or(false),
             })
         })
         .collect()
@@ -272,6 +275,15 @@ pub fn toggle_float_call(address: &str) -> String {
     )
 }
 
+/// The argument that toggles a window's pin (Hyprland's "sticky": it
+/// stays visible on every workspace). Only a floating window qualifies.
+pub fn pin_call(address: &str) -> String {
+    format!(
+        "hl.dsp.window.pin({{ window = \"address:{}\" }})",
+        sanitize_address(address)
+    )
+}
+
 /// The argument that moves a window to an absolute pixel position
 /// (`window.move` picks `movewindowpixel` from its `x`/`y` args).
 pub fn move_px_call(address: &str, x: i32, y: i32) -> String {
@@ -312,6 +324,35 @@ pub fn close_window(address: &str) {
 /// the focus along (the bar stays where it is).
 pub fn move_to_workspace(address: &str, workspace: u32) {
     run(move_call(address, &workspace.to_string()));
+}
+
+/// Toggle a window between tiled and floating.
+pub fn toggle_float(address: &str) {
+    run(toggle_float_call(address));
+}
+
+/// Toggle the sticky flag. Hyprland pins floating windows only, so a
+/// tiled one is floated first; one `--batch` process keeps the two
+/// dispatches in order. Unpinning leaves the window floating.
+pub fn toggle_sticky(address: &str, floating: bool, pinned: bool) {
+    if pinned || floating {
+        run(pin_call(address));
+    } else {
+        run_batch(&[toggle_float_call(address), pin_call(address)]);
+    }
+}
+
+/// Ordered dispatches in one process (`hyprctl --batch`): the steps of
+/// an action must never race each other.
+fn run_batch(calls: &[String]) {
+    let batch = calls
+        .iter()
+        .map(|call| format!("dispatch {call}"))
+        .collect::<Vec<_>>()
+        .join(";");
+    let _ = std::process::Command::new("hyprctl")
+        .args(["--batch", &batch])
+        .spawn();
 }
 
 fn run(call: String) {
@@ -573,6 +614,7 @@ mod tests {
             floating: false,
             fullscreen: false,
             visible: true,
+            pinned: false,
         });
         sort_rows(&mut rows);
         let order: Vec<&str> = rows.iter().map(|r| r.title.as_str()).collect();
@@ -589,6 +631,10 @@ mod tests {
         assert_eq!(
             close_call("0xAB12"),
             "hl.dsp.window.close({ window = \"address:0xAB12\" })"
+        );
+        assert_eq!(
+            pin_call("0xAB12"),
+            "hl.dsp.window.pin({ window = \"address:0xAB12\" })"
         );
         assert_eq!(
             move_call("0xAB12", "3"),

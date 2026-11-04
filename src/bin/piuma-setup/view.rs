@@ -277,6 +277,12 @@ fn config_header(state: &PiumaSetup) -> Element<'_, Message> {
 
 /// Load / Save / Save As / Reset actions for the fixed bottom bar.
 fn action_buttons(pal: Palette) -> Element<'static, Message> {
+    // The bar creates its panel surfaces at boot: this is the one-click
+    // way to apply a saved panel set without leaving the editor.
+    let reload_btn = button(text("Reload Piuma").size(BODY))
+        .on_press(Message::ReloadPiuma)
+        .padding(10)
+        .style(move |t, s| btn_secondary(pal, t, s));
     let load_btn = button(text("Load…").size(BODY))
         .on_press(Message::LoadConfig)
         .padding(10)
@@ -309,6 +315,7 @@ fn action_buttons(pal: Palette) -> Element<'static, Message> {
         .padding(10);
 
     Row::new()
+        .push(reload_btn)
         .push(load_btn)
         .push(save_btn)
         .push(save_as_btn)

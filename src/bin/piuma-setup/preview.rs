@@ -50,6 +50,7 @@ pub(crate) fn sample_value(source_type: &str) -> &'static str {
         "taskbar" => "",
         "layout" => "Work",
         "command" => "42",
+        "list" => "line one",
         // Placeholder, never real data: no SSIDs, hosts or user names.
         "net_info" => "Home Wi-Fi",
         "power_profile" => "Balanced",
@@ -88,6 +89,7 @@ pub(crate) fn sample_name(source_type: &str) -> &'static str {
         "notifications" => "NOTIF",
         "layout" => "LAYOUT",
         "command" => "CMD",
+        "list" => "LIST",
         "net_info" => "NET",
         "power_profile" => "PWR",
         "bluetooth" => "BT",
@@ -225,9 +227,41 @@ fn icon_name(sensor: &Sensor) -> Option<&str> {
     })
 }
 
+/// The panel font as the bar draws it: the configured family and the
+/// bold flag. `Font::with_name` wants a `'static` family, so each distinct
+/// name the editor is given is leaked once per session (a handful of
+/// short strings) — that is what keeps the preview live while typing.
+pub(crate) fn panel_font(cfg: &PiumaConfig) -> iced::Font {
+    use iced::font::Weight;
+    use std::sync::{Mutex, OnceLock};
+    static NAMES: OnceLock<Mutex<Vec<(&'static str, String)>>> = OnceLock::new();
+    let name = cfg.font.as_deref().unwrap_or("Noto Sans");
+    let mut names = NAMES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let family = match names.iter().find(|(_, known)| known.as_str() == name) {
+        Some((leaked, _)) => *leaked,
+        None => {
+            let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
+            names.push((leaked, name.to_string()));
+            leaked
+        }
+    };
+    iced::Font {
+        weight: if cfg.bold.unwrap_or(false) {
+            Weight::Bold
+        } else {
+            Weight::Normal
+        },
+        ..iced::Font::with_name(family)
+    }
+}
+
 /// One sensor pill with the sensor's real colours, padding and border:
 /// the unit shared by the form preview, the type picker and the
-/// mini-bar. Text sizes follow `panel.font_size`.
+/// mini-bar. Text sizes follow `panel.font_size`, the family and weight
+/// follow `panel.font`/`panel.bold` like the bar's own sensors.
 pub(crate) fn pill(
     cfg: &PiumaConfig,
     section: Option<&Section>,
@@ -236,16 +270,27 @@ pub(crate) fn pill(
     value: &str,
 ) -> Element<'static, Message> {
     let style = paint(cfg, section, sensor);
-    let font = cfg.font_size.clamp(9, 22);
+    let size = cfg.font_size.clamp(9, 22);
+    let font = panel_font(cfg);
     let mut row = Row::new().spacing(6).align_y(Alignment::Center);
     if let Some(icon) = resolved_icon(cfg, icon_size(cfg, section, sensor), icon_name(sensor)) {
         row = row.push(icon);
     }
     if !name.is_empty() {
-        row = row.push(text(name.to_string()).size(font).color(style.text));
+        row = row.push(
+            text(name.to_string())
+                .size(size)
+                .color(style.text)
+                .font(font),
+        );
     }
     if !value.is_empty() {
-        row = row.push(text(value.to_string()).size(font).color(style.text));
+        row = row.push(
+            text(value.to_string())
+                .size(size)
+                .color(style.text)
+                .font(font),
+        );
     }
     container(row)
         .padding(style.padding)

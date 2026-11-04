@@ -255,7 +255,8 @@ mirrors the same bar on every monitor (one surface per output, the main
 axis filled to each monitor's size). `all` is the multi-monitor mode:
 the same sections are shown everywhere; independent per-monitor content
 is not part of this setting. A layer surface cannot move between outputs
-at runtime: a change applies at the next piuma start. The setup's *Panel
+at runtime: a change applies at the next piuma start, or with the
+**Reload Piuma** button in piuma-setup's footer. The setup's *Panel
 Settings* card offers `auto`, `all` and the detected outputs, and notes
 the restart requirement.
 
@@ -428,6 +429,7 @@ Each sensor's `source` object has a `type` plus the parameters listed
 | `workspace`      | current workspace                                            | —                                                                       |
 | `workspace_dots` | graphical workspace dots: active filled, others outlined     | `count` (default 10, 1–50)                                               |
 | `command`        | shell command stdout                                         | `command`, `interval` (s, 0/absent = every tick)                        |
+| `list`           | the sensor shows its `name`, or the command's first output line when the name is empty; **hovering** opens the output as a list | `command`, `interval`, `max_lines` (default 10, 1–200) |
 | `env_var`        | environment variable value                                   | `env_var`                                                               |
 | `static_text`    | text/icon: fixed text, or just the sensor `icon` when the text is empty | `static_text` (optional with an `icon`)                        |
 | `media`          | MPRIS player: `⏵  title — artist` (25 chars each); click play/pause, wheel prev/next | —                                                        |
@@ -445,7 +447,10 @@ configured `action` is ignored there, like on the media sensor). A
 command source with `interval` reuses its last answer until the
 interval elapses, so expensive commands (`checkupdates`, network probes,
 API calls) stay off the 1 Hz loop; failures are cached for the same
-interval.
+interval. The `list` source runs its command the same way and keeps
+every stdout line for the hover popup (at most `max_lines`, shown in the
+same overlay as the icon tooltips); its bar text is the sensor `name`,
+or the first line when the name is empty.
 
 Network rates and the CPU percentage are computed from consecutive
 counter samples (`/proc/net/dev`, `/proc/stat`): the very first refresh
@@ -581,12 +586,15 @@ duplicating it; a re-save also folds the title-keyed layouts written by
 older versions into the new entry.
 
 The bar **re-applies a saved layout automatically** when a window is
-**created, closed or moved to another workspace**: the activation check
-runs on those events (never on a timer). Matching is by **class**, so a
+**created, closed, moved to another workspace or floated/re-tiled**: the
+activation check runs on those events (never on a timer) — the float
+state is part of what a layout describes, so changing it re-evaluates
+the match. Matching is by **class**, so a
 changed title never blocks a layout. The most specific saved layout
 whose classes are all open fires once for that window set; windows of
-the same class are paired by exact title, then by the window already on
-the layout's workspace, then by title resemblance, then by position —
+the same class are paired by float state first (a tiled entry takes the
+tiled twin), then by exact title, then by the window already on the
+layout's workspace, then by title resemblance, then by position —
 so an app with several identical windows still restores. A workspace
 move only re-evaluates the match: a layout already applied for the
 current window set is **not** applied again, so dragging a window
@@ -606,9 +614,9 @@ their window set.)
 - **State on the bar**: `⋯` armed and waiting, `✓` applied,
   `✓ saved` right after the click, no value while the file is absent.
 - **What is restored**: the workspace of each window and, for a
-  floating one, the exact pixel position and size; a tiled one goes
-  back into the tiler (and there only — never floated) with its saved
-  **size**, applied *measured*: an 8 px probe teaches each edge which
+  floating one, the exact pixel position and size; a tiled one stays in
+  the tiler (never floated) and gets its saved **size**, applied
+  *measured*: an 8 px probe teaches each edge which
   way it really answers (a bottom window grows by asking up), the
   exact ask follows from that sign, and anything that would push a
   tile under 80 px — or fails to shrink the gap — reverts at once. An
@@ -618,6 +626,13 @@ their window set.)
   tiler: no window is ever floated or strangled to force it. A window
   already at the saved size is left untouched. Fullscreen windows get
   no geometry either.
+- **The float state is part of the match**: a layout saved with three
+  tiled windows does not fit a set where one of them was floated by
+  hand — it is not applied at all (nothing half-restored), and the float
+  stays. A layout that saved a window *floating* still fits over its
+  tiled window and floats it: that is how a floating player is restored
+  after its app reopened tiled. Pairing prefers the window that already
+  has the saved state, so two windows of the same app never swap it.
 - **Matching**: by class *and* window title, with the exact saved
   count — no saved window missing, no extra twin open — and no
   unrelated window on the layout's own workspace either: the layout
@@ -648,7 +663,17 @@ dispatch).
 
 ```json
 "tweaks": {
-  "dynamic_gaps": { "enabled": true, "min": 4, "max": 16 }
+  "dynamic_gaps": { "enabled": true, "min": 4, "max": 16 },
+  "window_menu": { "enabled": true, "position": "top-center" },
+  "shadows": {
+    "enabled": true, "range": 10, "render_power": 1, "sharp": false,
+    "color": "#00000099", "color_inactive": "#ffffffff",
+    "offset": [0, 0], "scale": 1.0
+  },
+  "borders": {
+    "enabled": true, "size": 1,
+    "active": "#ffffff99", "inactive": "#ffffff33"
+  }
 }
 ```
 
@@ -672,6 +697,57 @@ the tweak is turned **off** and when piuma exits cleanly (both gaps,
 per-side values included); a Hyprland
 config reload while piuma runs resets the gap and the next window
 open/close re-applies it. Without the bar running nothing is applied.
+
+**Window menu** (`window_menu`) is a small floating pill that follows
+the focused window with three buttons: close, float (tile ↔ floating)
+and sticky (pin across workspaces). `position` is one of `top-left`,
+`top-center`, `top-right`, `bottom-left`, `bottom-center`,
+`bottom-right`: the menu sits 4 px above or below the window, its left
+or right edge flush with the window's own, and drops inside the window
+when that spot would leave the output (a maximized or screen-edge window
+still gets it). `Sticky` floats a tiled
+window before pinning it, since Hyprland only pins floating windows;
+unpinning leaves it floating. The icon shows `window-unpin` while the
+window is pinned. The menu is drawn with the default sensor's style and
+the wallpaper palette, needs no cursor tracking (it is always visible)
+and never takes focus, so clicking it leaves the window active. Its
+surface reaches the window edge with a transparent 4 px strip (the pill
+keeps that gap): the pointer leaves the window straight onto the menu,
+so `input:follow_mouse` cannot focus an overlapping window on the way
+and the menu no longer moves away before the click. A
+hidden fullscreen window has no menu. The toggle and the position apply
+on the bar's next 1 Hz tick; while the tweak is off the bar opens no
+socket and no surface.
+
+The bar reads the focused window from Hyprland's event socket
+(`activewindow`, `movewindow`, `resizewindow`, …) and the geometry from
+`j/activewindow` + `j/monitors` on the persistent request socket —
+a couple of hundred microseconds per event, no process spawn. The
+surface is created once and moved with layer margins; a focus change
+glides it for 120 ms (the only frames the menu asks for), a window
+dragged under it makes it snap.
+
+**Window shadows** (`shadows`) writes Hyprland's `decoration:shadow`
+block: `range` (blur radius, 0-100), `render_power` (blur passes, 1-4),
+`sharp` (hard edge instead of a gradient), `color` / `color_inactive`
+(`#rrggbbaa`, alpha included, mapped to Hyprland's `rgba()`), `offset`
+(`[x, y]` pixels) and `scale` (size multiplier, 0.1-10). The bar writes
+the whole block with one `hl.config` call when the values change, only
+while the tweak is enabled. The user's own values are read once before
+the first override (one `hyprctl getoption` per option) and put back
+when the tweak is disabled or piuma exits; a Hyprland config reload
+resets them to the file's values until the next piuma start or config
+change. The card lives in piuma-setup's *Tweaks* tab.
+
+**Window borders** (`borders`) writes `general:border_size` (0-20 px, 0
+removes the border) and `general:col.active_border` /
+`general:col.inactive_border` (`#rrggbbaa`). Same contract as the
+shadows: one `hl.config` call while the tweak is on, the user's own
+values captured before the first override and restored when it is
+turned off or piuma exits. On its first use piuma-setup fills the
+fields from the values Hyprland is using right now (a gradient
+collapses to its first stop), so switching the tweak on changes nothing
+until a field is edited.
 
 ### Portability
 

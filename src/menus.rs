@@ -339,23 +339,43 @@ pub(crate) fn tray_menu_view(panel: &Panel) -> Element<'_, Message> {
         .into()
 }
 
-/// Surface size for the taskbar menu: one `menu_row_h` row per
-/// workspace (1..9), width from the widest label — exact, so every
-/// row stays hit-exact.
+/// One row of the taskbar's right-click menu: the three window actions
+/// on top, then the workspace targets.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum TaskbarRow {
+    Action(crate::window_menu::Action),
+    Workspace(u32),
+}
+
+/// Every row, top to bottom, with its label.
+fn taskbar_rows() -> Vec<(TaskbarRow, String)> {
+    crate::window_menu::Action::ALL
+        .iter()
+        .map(|action| (TaskbarRow::Action(*action), action.label().to_string()))
+        .chain((1..=9).map(|n| (TaskbarRow::Workspace(n), n.to_string())))
+        .collect()
+}
+
+/// Surface size for the taskbar menu: one `menu_row_h` row per action
+/// and workspace row, width from the widest label — exact, so every row
+/// stays hit-exact.
 pub(crate) fn taskbar_menu_size(font: &Font, font_size: u32) -> (u32, u32) {
-    let labels: Vec<String> = (1..=9).map(|n| n.to_string()).collect();
+    let rows = taskbar_rows();
+    let labels: Vec<String> = rows.iter().map(|(_, label)| label.clone()).collect();
     let text_w = u32::from(text_width::widest(font, font_size, &labels));
-    let w = text_w.saturating_add(2 * MENU_PAD).max(48);
-    let h = 9u32
+    // A couple of px of slack: the shaper and the renderer disagree by a
+    // hinting pixel, and a clipped "Sticky" looks broken.
+    let w = text_w.saturating_add(2 * MENU_PAD + 4).max(48);
+    let h = (rows.len() as u32)
         .saturating_mul(menu_row_h(font_size))
         .saturating_add(2 * MENU_PAD);
     (w, h)
 }
 
-/// The taskbar's move menu: workspace rows 1..9, the hovered one
-/// highlighted; a press moves the menu's window there silently and
-/// closes the menu, and leaving the surface closes without acting
-/// (same exit rule as the tray menu).
+/// The taskbar's window menu: close/float/sticky on top, then workspace
+/// rows 1..9, the hovered one highlighted. A press runs its action on
+/// the menu's window and closes the menu, and leaving the surface closes
+/// without acting (same exit rule as the tray menu).
 pub(crate) fn taskbar_menu_view(panel: &Panel) -> Element<'_, Message> {
     if panel.taskbar_menu.is_none() {
         // The window id exists only together with its state.
@@ -370,47 +390,39 @@ pub(crate) fn taskbar_menu_view(panel: &Panel) -> Element<'_, Message> {
     let row_h = menu_row_h(font_size);
     // A hover row rounds at most to half its own height.
     let radius = (st.border_radius as f32).min(row_h as f32 / 2.0);
+    let rows = taskbar_rows();
+    let last = rows.len() - 1;
     let mut list: Column<'_, Message> = Column::new();
-    for workspace in 1..=9u32 {
-        let hovered = panel.taskbar_menu_hover == Some(workspace);
+    for (index, (row, label)) in rows.into_iter().enumerate() {
         // The hover fill follows the menu's own corners: the top row
         // rounds up, the last rounds down, the middle rows meet their
         // neighbours square (`corner_radius`: touching sides are flat).
-        let touch = if workspace == 1 {
-            [false, false, true, false]
-        } else if workspace == 9 {
-            [true, false, false, false]
-        } else {
-            [true, true, true, true]
+        let touch = [index > 0, false, index < last, false];
+        let cell = container(text(label).size(font_size).color(st.text).font(font))
+            .width(Length::Fill)
+            .height(Length::Fixed(row_h as f32))
+            .center_x(Length::Fill)
+            .align_y(Alignment::Center)
+            .style(move |_theme| ContainerStyle {
+                background: (panel.taskbar_menu_hover == Some(row))
+                    .then(|| Background::Color(st.bg_hover)),
+                border: iced::Border {
+                    radius: corner_radius(touch, radius),
+                    ..Default::default()
+                },
+                ..ContainerStyle::default()
+            });
+        let press = match row {
+            TaskbarRow::Action(action) => Message::TaskbarMenuAction(action),
+            TaskbarRow::Workspace(workspace) => Message::TaskbarMenuWs(workspace),
         };
-        let cell = container(
-            // Centred in the cell (width Fill only on the cell): the
-            // label keeps its own width and sits mid-menu instead of
-            // glued to the left edge.
-            text(workspace.to_string())
-                .size(font_size)
-                .color(st.text)
-                .font(font),
-        )
-        .width(Length::Fill)
-        .height(Length::Fixed(row_h as f32))
-        .center_x(Length::Fill)
-        .align_y(Alignment::Center)
-        .style(move |_theme| ContainerStyle {
-            background: hovered.then(|| Background::Color(st.bg_hover)),
-            border: iced::Border {
-                radius: corner_radius(touch, radius),
-                ..Default::default()
-            },
-            ..ContainerStyle::default()
-        });
         list = list.push(
             MouseArea::new(cell)
-                .on_press(Message::TaskbarMenuWs(workspace))
-                .on_enter(Message::TaskbarMenuHover(Some(workspace)))
+                .on_press(press)
+                .on_enter(Message::TaskbarMenuHover(Some(row)))
                 // The exit names its row: a stale one (arriving after
                 // the next row's enter) must not clear the new hover.
-                .on_exit(Message::TaskbarMenuLeft(workspace))
+                .on_exit(Message::TaskbarMenuLeft(row))
                 .interaction(iced::mouse::Interaction::Pointer),
         );
     }
@@ -545,7 +557,7 @@ mod tests {
     fn taskbar_menu_size_prices_nine_workspace_rows() {
         let font = Font::with_name("Noto Sans");
         let (w, h) = taskbar_menu_size(&font, 14);
-        assert_eq!(h, 9 * menu_row_h(14) + 2 * MENU_PAD);
+        assert_eq!(h, 12 * menu_row_h(14) + 2 * MENU_PAD, "three actions + nine workspaces");
         assert!(w >= 48, "the menu keeps a hit-friendly minimum, got {w}");
         let (w_big, h_big) = taskbar_menu_size(&font, 24);
         assert!(w_big >= w, "a bigger font never measures narrower");
