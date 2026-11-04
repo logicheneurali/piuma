@@ -52,8 +52,6 @@
         "name": "left",
         "sensors": [
           {
-            "action": "rofi -show combi -combi-modes 'drun,run,sys:/home/effedi/Scripts/rofi-poweroff' -display-combi \">\"",
-            "name": "Workspace",
             "source": {
               "type": "workspace"
             }
@@ -83,7 +81,6 @@
         "name": "center",
         "sensors": [
           {
-            "action": "kitty -e \"btop\"",
             "border_radius": -1,
             "border_type": "corners",
             "border_width": -1,
@@ -119,22 +116,6 @@
             "name": "DISK",
             "source": {
               "type": "perc_disk"
-            }
-          },
-          {
-            "source": {
-              "command": "echo -e \"ECONNS $(netstat -p --numeric-ports|grep ESTABLISHED|wc -l)\\n$(netstat -p --numeric-ports|grep ESTABLISHED)\"",
-              "interval": 30,
-              "max_lines": 50,
-              "type": "list"
-            }
-          },
-          {
-            "source": {
-              "command": "echo -e \"$(echo PROC)\\n$(ps aux --sort -%cpu |grep -v '\\['|awk '{printf  \"%5s %5s %-30s\\n\",$3,$4,$11}')\"",
-              "interval": 10,
-              "max_lines": 10,
-              "type": "list"
             }
           }
         ]

@@ -13,6 +13,11 @@ use crate::modal::Modal;
 use crate::model::*;
 use crate::view_wallpaper::{scan_wallpaper_dirs, wallpaper_dirs};
 
+/// The shipped default config (the same file the bar writes on a first
+/// start), compiled into the editor too: its "no file" state and its
+/// Reset must show the bar's real default, not the bare built-in model.
+pub(crate) const SHIPPED_DEFAULT: &str = include_str!("../../default_config.json");
+
 // Message enum for handling GUI events
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -442,8 +447,19 @@ impl PiumaSetup {
                 Err(e) => state.set_status(format!("Error parsing {}: {}", state.current_file, e), true),
             },
             Err(_) => {
+                // No piuma.json yet: the editor opens on the shipped
+                // default (what the bar would write) instead of the
+                // bare built-in model.
+                let shipped = state.load_from_json(SHIPPED_DEFAULT).is_ok();
                 state.snapshot = state.serialize().unwrap_or_default();
-                state.set_status("No config file found; starting from defaults".to_string(), false);
+                state.set_status(
+                    if shipped {
+                        "No config file found; showing the shipped default".to_string()
+                    } else {
+                        "No config file found; starting from defaults".to_string()
+                    },
+                    false,
+                );
             }
         }
         // One scan for the tab, with the loaded selection applied (the

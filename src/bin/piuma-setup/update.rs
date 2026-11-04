@@ -1117,7 +1117,10 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
             }
         }
         Message::ResetConfig => {
+            // Reset goes back to the shipped default (the bar's own
+            // first-start config), not the bare built-in model.
             state.config = PiumaConfig::default();
+            let _ = state.load_from_json(crate::state::SHIPPED_DEFAULT);
             state.set_status("Configuration reset to defaults".to_string(), false);
         }
         Message::Status(_) => {}
