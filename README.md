@@ -452,10 +452,14 @@ every five seconds (no fork per tick) and their click controls the
 state: `power_profile` cycles balanced → performance → power-saver,
 `bluetooth` toggles the adapter, `keyboard` advances the layout (a
 configured `action` is ignored there, like on the media sensor). A
-command source with `interval` reuses its last answer until the
-interval elapses, so expensive commands (`checkupdates`, network probes,
-API calls) stay off the 1 Hz loop; failures are cached for the same
-interval. The `list` source runs its command the same way and keeps
+command source never runs on the 1 Hz loop: its command runs on its own
+thread and the bar shows the last answer meanwhile, so a slow or hung
+command (`checkupdates`, network probes, API calls) cannot delay the
+other sensors or the clock. With `interval` the answer is reused until
+the interval elapses (failures included, no retry storm); the run itself
+gets the interval as its time budget, bounded to 5–60 seconds, so a 9 s
+whois under `interval: 20` is not killed. The first value appears after
+the first run. The `list` source runs its command the same way and keeps
 every stdout line for the hover popup (at most `max_lines`, shown in the
 same overlay as the icon tooltips); its bar text is the sensor `name`,
 or the first line when the name is empty.

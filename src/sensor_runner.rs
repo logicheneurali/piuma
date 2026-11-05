@@ -28,9 +28,10 @@ fn plain(text: String) -> Read {
 }
 
 impl Read {
-    /// A read that never ran (its reply raced a config reload): empty
-    /// text and no sample, so a graph column repeats its last value
-    /// instead of taking a neighbour's reading.
+    /// A read that never ran (its reply raced a config reload, or a
+    /// command's first result has not landed yet): empty text and no
+    /// sample, so a graph column repeats its last value instead of
+    /// taking a neighbour's reading.
     pub fn missing() -> Read {
         plain(String::new())
     }
@@ -114,15 +115,26 @@ fn maybe_measured(text: String, source: &SensorSource) -> Read {
     }
 }
 
-/// The command source's shell run: five seconds at most, output trimmed.
-/// shortcut: the 5s cap (coreutils `timeout`) keeps a command that never
-/// exits — `--follow` streams, listeners, hung pipelines — from freezing
-/// every reading for good: `read_pending` never clears without a reply,
-/// so no further pass would ever run. Raise the cap when a legitimate
-/// command needs longer.
-fn run_command(command: &str) -> String {
+/// The floor of a command's run budget: the bar polls at 1 Hz, so a
+/// command has at least this long even with no interval.
+const COMMAND_TIMEOUT_MIN: u64 = 5;
+/// The ceiling: a hung command holds no other reading up (see
+/// `spawn_refresh`), but it should not linger for hours either.
+const COMMAND_TIMEOUT_MAX: u64 = 60;
+
+/// The wall-clock budget of one command run: the sensor's interval when
+/// that is longer than the floor, so a legitimate slow command under a
+/// long interval (a 9 s whois with `interval: 20`) is not killed.
+/// `interval: 0` and the short ones keep the historical 5 s.
+fn command_timeout(interval: u64) -> u64 {
+    interval.clamp(COMMAND_TIMEOUT_MIN, COMMAND_TIMEOUT_MAX)
+}
+
+/// The command source's shell run within `timeout` seconds, output
+/// trimmed. A non-zero exit — the timeout included — reads as `ERROR`.
+fn run_command(command: &str, timeout: u64) -> String {
     match std::process::Command::new("timeout")
-        .args(["-k", "1", "5", "sh", "-c", command])
+        .args(["-k", "1", &timeout.to_string(), "sh", "-c", command])
         .output()
     {
         Ok(out) if out.status.success() => String::from(String::from_utf8_lossy(&out.stdout).trim()),
@@ -130,20 +142,29 @@ fn run_command(command: &str) -> String {
     }
 }
 
-/// Cached runs of `command` sources that ask for an `interval`: the bar
-/// polls at 1 Hz, so an expensive command returns its last answer until
-/// the interval elapses. Keyed by the command line alone — two sensors
-/// sharing a command share the result, and the shortest interval wins by
-/// running it more often. Failures are cached too (no retry storm).
+/// Cached runs of `command` sources, keyed by the command line alone —
+/// two sensors sharing a command share the result. The stored instant is
+/// the run's START, so a slow run does not stretch the period: the next
+/// one is due `interval` after the previous began. Failures are cached
+/// too (no retry storm).
 static COMMAND_RUNS: OnceLock<Mutex<HashMap<String, (Instant, Read)>>> = OnceLock::new();
 
-fn command_cached(command: &str, interval: u64) -> Option<Read> {
-    let map = COMMAND_RUNS.get_or_init(Default::default).lock().ok()?;
-    let (at, read) = map.get(command)?;
-    (at.elapsed() < Duration::from_secs(interval)).then(|| read.clone())
+/// The cached read for `key` and whether a new run is due (`ttl` 0 =
+/// always; `ttl` elapsed since the last run's start = due).
+fn command_snapshot(key: &str, ttl: u64) -> (Option<Read>, bool) {
+    let Some(map) = COMMAND_RUNS.get_or_init(Default::default).lock().ok() else {
+        return (None, true);
+    };
+    match map.get(key) {
+        Some((at, read)) => {
+            let due = ttl == 0 || at.elapsed() >= Duration::from_secs(ttl);
+            (Some(read.clone()), due)
+        }
+        None => (None, true),
+    }
 }
 
-fn command_store(command: &str, read: &Read) {
+fn command_store(key: &str, at: Instant, read: &Read) {
     let Ok(mut map) = COMMAND_RUNS.get_or_init(Default::default).lock() else {
         return;
     };
@@ -152,7 +173,44 @@ fn command_store(command: &str, read: &Read) {
     if map.len() > 64 {
         map.clear();
     }
-    map.insert(command.to_string(), (Instant::now(), read.clone()));
+    map.insert(key.to_string(), (at, read.clone()));
+}
+
+/// Keys with a command still running: a due key keeps its previous value
+/// instead of forking a second copy of the same run.
+static RUNNING: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+
+/// A claim on a key, released when the run ends (a panic included).
+struct Running(String);
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        if let Ok(mut set) = RUNNING.get_or_init(Default::default).lock() {
+            set.remove(&self.0);
+        }
+    }
+}
+
+/// Start `job` for `key` unless a run is still in flight; the job stores
+/// its own result. Detached on purpose: the pass returns the last cached
+/// value at once, so a slow — or hung — command cannot hold up the tick,
+/// the UI or any other sensor, not even another command's run.
+fn spawn_refresh(key: &str, job: impl FnOnce() + Send + 'static) -> bool {
+    let Ok(mut set) = RUNNING.get_or_init(Default::default).lock() else {
+        return false;
+    };
+    if set.len() > 64 {
+        set.clear();
+    }
+    if !set.insert(key.to_string()) {
+        return false;
+    }
+    let claim = Running(key.to_string());
+    std::thread::spawn(move || {
+        let _claim = claim;
+        job();
+    });
+    true
 }
 
 /// The stdout lines of every list sensor's last run, keyed by command:
@@ -194,16 +252,19 @@ pub fn run(source: &SensorSource, hypr: Option<&crate::hypr::Snapshot>) -> Read 
         // Raise the cap when a legitimate command needs longer.
         SensorSource::Command { command, interval } => {
             let ttl = interval.unwrap_or(0);
-            if ttl > 0 {
-                if let Some(read) = command_cached(command, ttl) {
-                    return read;
-                }
+            let (last, due) = command_snapshot(command, ttl);
+            if due {
+                let (cmd, source, budget) =
+                    (command.clone(), source.clone(), command_timeout(ttl));
+                spawn_refresh(command, move || {
+                    let at = Instant::now();
+                    let read = maybe_measured(run_command(&cmd, budget), &source);
+                    command_store(&cmd, at, &read);
+                });
             }
-            let read = maybe_measured(run_command(command), source);
-            if ttl > 0 {
-                command_store(command, &read);
-            }
-            read
+            // The pass never waits: the run lands in the cache and the
+            // next tick shows it (empty until the first one finishes).
+            last.unwrap_or_else(Read::missing)
         }
         // A list: the bar shows the first line (or the sensor's name),
         // the hover popup shows the rest (see `list_lines`).
@@ -212,18 +273,20 @@ pub fn run(source: &SensorSource, hypr: Option<&crate::hypr::Snapshot>) -> Read 
             // Own cache key: a `command` sensor on the same line keeps the
             // whole output, this one only its first line.
             let key = format!("list:{command}");
-            if ttl > 0 {
-                if let Some(read) = command_cached(&key, ttl) {
-                    return read;
-                }
+            let (last, due) = command_snapshot(&key, ttl);
+            if due {
+                let (cmd, budget, cache_key) =
+                    (command.clone(), command_timeout(ttl), key.clone());
+                spawn_refresh(&key, move || {
+                    let at = Instant::now();
+                    let lines: Vec<String> =
+                        run_command(&cmd, budget).lines().map(str::to_string).collect();
+                    let read = plain(lines.first().cloned().unwrap_or_default());
+                    list_store(&cmd, lines);
+                    command_store(&cache_key, at, &read);
+                });
             }
-            let lines: Vec<String> = run_command(command).lines().map(str::to_string).collect();
-            let read = plain(lines.first().cloned().unwrap_or_default());
-            list_store(command, lines);
-            if ttl > 0 {
-                command_store(&key, &read);
-            }
-            read
+            last.unwrap_or_else(Read::missing)
         }
         SensorSource::EnvVar { env_var } => {
             maybe_measured(std::env::var(env_var).unwrap_or("N/A".to_string()), source)
@@ -419,8 +482,20 @@ mod tests {
         assert_eq!(read.text, "hello");
     }
 
+    /// Poll the command cache until `key` has a reading (the runs are
+    /// detached, so the test waits on the result, never on `run`).
+    fn wait_read(key: &str) -> Read {
+        for _ in 0..300 {
+            if let (Some(read), _) = command_snapshot(key, 0) {
+                return read;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("no reading for {key:?}");
+    }
+
     /// A list sensor's bar text is the first line, and every line is kept
-    /// for the hover popup.
+    /// for the hover popup. The pass returns before the command runs.
     #[test]
     fn list_sensor_shows_the_first_line_and_keeps_the_rest() {
         let command = "printf 'one\\ntwo\\nthree\\n'";
@@ -429,7 +504,8 @@ mod tests {
             interval: None,
             max_lines: 2,
         };
-        assert_eq!(run(&source, None).text, "one");
+        assert_eq!(run(&source, None).text, "", "the pass never waits");
+        assert_eq!(wait_read(&format!("list:{command}")).text, "one");
         assert_eq!(
             list_lines(command),
             vec!["one".to_string(), "two".to_string(), "three".to_string()]
@@ -437,23 +513,54 @@ mod tests {
         assert!(list_lines("piuma-never-ran").is_empty());
     }
 
+    /// A slow command (here half a second) does not delay the pass: the
+    /// first read is empty, the value lands in the cache afterwards. A
+    /// hung one is cut by `command_timeout`, which follows the interval.
+    #[test]
+    fn a_slow_command_never_blocks_the_pass() {
+        let command = "sleep 0.5; echo done # piuma-test-slow";
+        let source = SensorSource::Command {
+            command: command.to_string(),
+            interval: Some(60),
+        };
+        let started = Instant::now();
+        let first = run(&source, None);
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "the pass must not wait for the command"
+        );
+        assert_eq!(first.text, "", "no reading yet on the first pass");
+        assert_eq!(wait_read(command).text, "done");
+    }
+
+    /// The run budget is the interval when longer than the floor, never
+    /// below 5 s nor above the ceiling (a hung command would otherwise
+    /// linger for the whole interval).
+    #[test]
+    fn command_budget_follows_the_interval_within_bounds() {
+        assert_eq!(command_timeout(0), 5);
+        assert_eq!(command_timeout(1), 5);
+        assert_eq!(command_timeout(20), 20);
+        assert_eq!(command_timeout(3600), 60);
+    }
+
     /// A command with an interval reuses its last reading until the
-    /// interval elapses; interval 0 never caches (every tick).
+    /// interval elapses; interval 0 is always due. The stored instant is
+    /// the run's start, so the period does not stretch with the run.
     #[test]
     fn interval_commands_reuse_their_last_reading() {
         let command = "piuma-test-interval-command"; // unique to this test
-        assert!(command_cached(command, 60).is_none(), "nothing cached yet");
-        command_store(command, &plain("value".to_string()));
-        assert_eq!(
-            command_cached(command, 60).map(|read| read.text),
-            Some("value".to_string())
-        );
         assert!(
-            command_cached(command, 0).is_none(),
-            "interval 0 never serves a cached value"
+            command_snapshot(command, 60).0.is_none(),
+            "nothing cached yet"
         );
+        command_store(command, Instant::now(), &plain("value".to_string()));
+        let (read, due) = command_snapshot(command, 60);
+        assert_eq!(read.map(|read| read.text), Some("value".to_string()));
+        assert!(!due);
+        assert!(command_snapshot(command, 0).1, "interval 0 is always due");
         assert!(
-            command_cached("piuma-test-other-command", 60).is_none(),
+            command_snapshot("piuma-test-other-command", 60).0.is_none(),
             "the cache is per command"
         );
     }

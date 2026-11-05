@@ -1031,9 +1031,12 @@ fn maybe_reload(panel: &mut Panel) -> Option<(config::Config, String)> {
 /// every sensor's reading runs on a worker thread, and its reply
 /// pairs them with the resolved styles (`SensorsReady` →
 /// `apply_read`). One pass at a time (`read_pending`): replies stay
-/// ordered and a slow sensor delays only the next rebuild, never the
-/// UI thread. The config generation rides along so a reply built
-/// against a reloaded config is dropped instead of misaligned.
+/// ordered and a slow native sensor delays only the next rebuild, never
+/// the UI thread. User commands do not run here: `sensor_runner`
+/// refreshes them on their own threads and the pass only reads the
+/// cache, so a hung command cannot stretch the tick. The config
+/// generation rides along so a reply built against a reloaded config is
+/// dropped instead of misaligned.
 fn spawn_read(panel: &mut Panel) -> Command<Message> {
     panel.read_pending = true;
     let cfg_gen = panel.cfg_gen;
