@@ -278,7 +278,7 @@ fn additional_panels(state: &PiumaSetup) -> Element<'_, Message> {
     );
     column![
         text("Additional panels").size(12).style(fg_text(pal)),
-        text("Sections are assigned exclusively: the main panel shows the ones not listed here; a secondary panel needs at least one. Comma-separated names; placement applies at the next piuma start (or via Reload Piuma in the footer).")
+        text("Sections are assigned exclusively: the main panel shows the ones not listed here; a secondary panel needs at least one. Comma-separated names; placement applies at the next piuma start (or via Reload Piuma in the footer). A panel anchored left or right is a vertical side bar.")
             .size(10)
             .style(muted_text(pal)),
         list,

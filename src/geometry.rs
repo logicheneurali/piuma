@@ -28,15 +28,9 @@ pub(crate) fn panel_thickness(config: &config::Config) -> u32 {
 pub(crate) fn panel_size(
     config: &config::Config,
     screen_width: u32,
-    screen_height: u32,
+    anchor: Option<&str>,
 ) -> iced_exwlshell::settings::LayerSize {
-    let layout = config
-        .panel
-        .section_layout
-        .as_ref()
-        .map(|s| s.as_str())
-        .unwrap_or("horizontal");
-    let vertical = layout == "vertical";
+    let vertical = panel_vertical(config, anchor);
     let thickness = panel_thickness(config);
 
     // Mirror mode: one surface per output, so the main axis fills
@@ -47,7 +41,10 @@ pub(crate) fn panel_size(
     let (width, height) = if vertical {
         (
             iced_exwlshell::settings::Extent::px(thickness),
-            if all { fill } else { iced_exwlshell::settings::Extent::px(screen_height) },
+            // Anchored top+bottom (see `panel_anchor_for`): the
+            // compositor stretches the bar between the edges, so the
+            // other bars' reserved strips are respected.
+            fill,
         )
     } else {
         (
@@ -71,19 +68,27 @@ pub(crate) fn panel_size(
 /// * horizontal, bottom -> `Bottom`
 /// * vertical,   left   -> `Left`
 /// * vertical,   right  -> `Right`
+/// Whether the panel runs vertically: `left`/`right` edges make it a
+/// side bar (thickness = width, full height), `top`/`bottom` a
+/// horizontal one. Only an absent (or legacy corner) anchor falls back
+/// to the global `panel.section_layout`, the single-bar setting.
+pub(crate) fn panel_vertical(config: &config::Config, anchor: Option<&str>) -> bool {
+    match anchor {
+        Some("left" | "right") => true,
+        Some("top" | "bottom") => false,
+        _ => config.panel.section_layout.as_deref() == Some("vertical"),
+    }
+}
+
 pub(crate) fn panel_anchor(config: &config::Config) -> Anchor {
     panel_anchor_for(config, config.panel.anchor.as_deref())
 }
 
 /// Anchor from an explicit per-layout value (`panel.anchor` when `None`).
+/// The anchor also decides the orientation (see [`panel_vertical`]): a
+/// `left`/`right` edge is a side bar whatever the global layout says.
 pub(crate) fn panel_anchor_for(config: &config::Config, anchor: Option<&str>) -> Anchor {
-    let vertical = config
-        .panel
-        .section_layout
-        .as_ref()
-        .map(|s| s.as_str())
-        .unwrap_or("horizontal")
-        == "vertical";
+    let vertical = panel_vertical(config, anchor);
 
     // Edge from `anchor` (default: top for horizontal, left for vertical);
     // `align` positions the panel INSIDE the surface, it does not pick the
@@ -91,10 +96,12 @@ pub(crate) fn panel_anchor_for(config: &config::Config, anchor: Option<&str>) ->
     let anchor = anchor.unwrap_or(if vertical { "left" } else { "top" });
 
     if vertical {
+        // Both length-axis edges are anchored so `Extent::Fill` can
+        // stretch the height between them (below/above any horizontal
+        // bar's reserved strip).
         match anchor {
-            "bottom" => Anchor::Bottom,
-            "right" => Anchor::Right,
-            _ => Anchor::Left,
+            "right" => Anchor::Right | Anchor::Top | Anchor::Bottom,
+            _ => Anchor::Left | Anchor::Top | Anchor::Bottom,
         }
     } else {
         match anchor {
@@ -114,7 +121,6 @@ pub(crate) fn panel_anchor_for(config: &config::Config, anchor: Option<&str>) ->
 #[cfg(test)]
 pub(crate) fn section_touch(config: &config::Config, idx: usize, count: usize) -> [bool; 4] {
     section_touch_for(
-        config,
         panel_anchor(config),
         config.panel.align.as_deref().unwrap_or("center"),
         idx,
@@ -127,13 +133,12 @@ pub(crate) fn section_touch(config: &config::Config, idx: usize, count: usize) -
 /// align. The shared styles resolve the root panel's values; the view
 /// recomputes with the layout it is drawing.
 pub(crate) fn section_touch_for(
-    config: &config::Config,
     anchor: Anchor,
     align: &str,
     idx: usize,
     count: usize,
 ) -> [bool; 4] {
-    let vertical = config.panel.section_layout.as_deref() == Some("vertical");
+    let vertical = anchor.contains(Anchor::Left) || anchor.contains(Anchor::Right);
     let mut touch = [
         anchor.contains(Anchor::Top),
         anchor.contains(Anchor::Right),
@@ -227,22 +232,79 @@ mod tests {
         assert_eq!(section_touch(&cfg, 0, 1), [true, true, false, true]);
 
         cfg.panel.section_layout = Some("vertical".to_string());
+        cfg.panel.anchor = None;
         cfg.panel.align = Some("top".to_string());
-        assert_eq!(section_touch(&cfg, 0, 2), [true, false, false, true]);
-        assert_eq!(section_touch(&cfg, 1, 2), [false, false, false, true]);
+        // A vertical bar anchors both length edges (Fill), so top and
+        // bottom are flush along with the side edge.
+        assert_eq!(section_touch(&cfg, 0, 2), [true, false, true, true]);
+        assert_eq!(section_touch(&cfg, 1, 2), [true, false, true, true]);
     }
     /// A section on a secondary panel squares the sides of THAT panel:
     /// bottom-anchored, right-aligned, the last section touches bottom+right.
     #[test]
     fn section_touch_for_follows_the_panel_anchor() {
-        let cfg = crate::config::default_config();
         assert_eq!(
-            section_touch_for(&cfg, Anchor::Bottom, "right", 1, 2),
+            section_touch_for(Anchor::Bottom, "right", 1, 2),
             [false, true, true, false]
         );
         assert_eq!(
-            section_touch_for(&cfg, Anchor::Top, "left", 0, 2),
+            section_touch_for(Anchor::Top, "left", 0, 2),
             [true, false, false, true]
+        );
+        // A side bar: the left edge touches; `top` flushes the first
+        // section's top side (the length axis is vertical).
+        assert_eq!(
+            section_touch_for(Anchor::Left, "top", 0, 2),
+            [true, false, false, true]
+        );
+        assert_eq!(
+            section_touch_for(Anchor::Right, "fill", 1, 2),
+            [false, true, true, false]
+        );
+    }
+
+    /// The anchor decides the orientation: `left`/`right` make a side
+    /// bar even when the global layout is horizontal (and vice versa);
+    /// only an absent anchor falls back to `panel.section_layout`.
+    #[test]
+    fn anchor_decides_the_panel_orientation() {
+        let mut cfg = crate::config::default_config(); // horizontal, top
+        assert!(!panel_vertical(&cfg, None), "legacy default: horizontal");
+        assert!(panel_vertical(&cfg, Some("left")));
+        assert!(panel_vertical(&cfg, Some("right")));
+        assert!(!panel_vertical(&cfg, Some("top")));
+        assert!(!panel_vertical(&cfg, Some("bottom")));
+
+        let left = panel_anchor_for(&cfg, Some("left"));
+        assert!(left.contains(Anchor::Left), "side edge: {left:?}");
+        assert!(
+            left.contains(Anchor::Top) && left.contains(Anchor::Bottom),
+            "both length edges, so Fill stretches the height: {left:?}"
+        );
+        let right = panel_anchor_for(&cfg, Some("right"));
+        assert!(right.contains(Anchor::Right), "side edge: {right:?}");
+        assert!(right.contains(Anchor::Top) && right.contains(Anchor::Bottom));
+
+        // A left/right anchor sizes the surface as a side bar.
+        let thickness = panel_thickness(&cfg);
+        let size = panel_size(&cfg, 1920, Some("left"));
+        assert_eq!(size.width, iced_exwlshell::settings::Extent::px(thickness));
+        assert_eq!(
+            size.height,
+            iced_exwlshell::settings::Extent::Fill,
+            "the anchored edges stretch the height, thickness wide"
+        );
+        let size = panel_size(&cfg, 1920, Some("top"));
+        assert_eq!(size.width, iced_exwlshell::settings::Extent::px(1920));
+        assert_eq!(size.height, iced_exwlshell::settings::Extent::px(thickness));
+
+        // The legacy vertical config keeps working with no anchor.
+        cfg.panel.section_layout = Some("vertical".to_string());
+        assert!(panel_vertical(&cfg, None));
+        assert!(panel_anchor_for(&cfg, None).contains(Anchor::Left));
+        assert!(
+            !panel_vertical(&cfg, Some("top")),
+            "an explicit top anchor still wins"
         );
     }
 

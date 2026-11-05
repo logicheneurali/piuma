@@ -1194,8 +1194,12 @@ pub fn bar_origin(panel: &crate::Panel) -> (i32, i32) {
 /// anchor/size let a secondary panel (whose edge is not the shared
 /// state's `last_anchor`) compute its own origin.
 pub fn bar_origin_for(anchor: Anchor, thickness: i32, sw: i32, sh: i32) -> (i32, i32) {
+    // A vertical bar also anchors Top|Bottom (to stretch its height):
+    // the side edges decide first, or it would read as a bottom bar.
     if anchor.contains(Anchor::Right) {
         (sw - thickness, 0)
+    } else if anchor.contains(Anchor::Left) {
+        (0, 0)
     } else if anchor.contains(Anchor::Bottom) {
         (0, sh - thickness)
     } else {

@@ -76,10 +76,7 @@ fn sync_gaps(panel: &config::PanelConfig, clients: Option<&[WinRow]>) {
     let Some(clients) = clients else {
         return; // no snapshot this pass: retry on the next one
     };
-    let count = clients
-        .iter()
-        .filter(|row| !row.workspace.starts_with("special:"))
-        .count();
+    let count = window_count(clients);
     let (inner, outer) = gaps_for(count, gaps.min, gaps.max);
 
     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -95,6 +92,21 @@ fn sync_gaps(panel: &config::PanelConfig, clients: Option<&[WinRow]>) {
         state.count = Some(count);
         state.applied = Some(outer);
     }
+}
+
+/// The windows the gap counts: every mapped client except the special
+/// workspaces (scratchpads) and the X11 popup menus. A menu (Steam's
+/// hover menus, several toolkits') is reported as a floating client
+/// with an empty title and its parent's class/pid — counting it shrank
+/// the gaps as if a window had opened, and it has no place in the
+/// tiling. A real floating window with no title (rare) is the one
+/// false negative: it costs a larger gap, nothing breaks.
+fn window_count(clients: &[WinRow]) -> usize {
+    clients
+        .iter()
+        .filter(|row| !row.workspace.starts_with("special:"))
+        .filter(|row| !(row.floating && row.title.trim().is_empty()))
+        .count()
 }
 
 /// Put the captured value back and forget the override. Called every
@@ -486,7 +498,39 @@ fn apply_borders(v: &BorderValues) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{css, gap_for, gaps_for, gradient_from_hex, gradient_lua};
+    use super::{css, gap_for, gaps_for, gradient_from_hex, gradient_lua, window_count};
+    use crate::windows::WinRow;
+
+    /// The gap counts windows, not the floating popup menus X11 apps
+    /// report as clients with no title (Steam's "Community" menu opened
+    /// as a 102×100 floating `steam` client and shrank the gaps).
+    #[test]
+    fn window_count_skips_special_workspaces_and_popup_menus() {
+        let row = |title: &str, ws: &str, floating: bool| WinRow {
+            address: "0x1".to_string(),
+            class: "steam".to_string(),
+            title: title.to_string(),
+            workspace: ws.to_string(),
+            focused: false,
+            x: 0,
+            y: 0,
+            w: 100,
+            h: 100,
+            floating,
+            fullscreen: false,
+            visible: true,
+            pinned: false,
+        };
+        let clients = vec![
+            row("Steam", "1", false),
+            row("", "1", true),             // Steam's popup menu
+            row("notes", "1", true),        // a real floating window
+            row("scratch", "special:magic", false),
+            row("", "2", false),            // tiled and untitled: still a window
+        ];
+        assert_eq!(window_count(&clients), 3, "two windows + the untitled tile");
+        assert_eq!(window_count(&[]), 0);
+    }
 
     /// The example from the setup's description: 4..16 shrinks by 3 per
     /// extra window (25% of the 12-pixel range) and stops at 4.

@@ -16,6 +16,8 @@ use iced::{
 use iced::event;
 use iced::time;
 use iced::widget::container::Style as ContainerStyle;
+use iced::advanced::widget::Operation;
+use iced_runtime::core::widget::operation::Outcome;
 
 use iced_exwlshell::ExWlSettings;
 use iced_exwlshell::daemon;
@@ -66,8 +68,8 @@ mod xdg;
 use corners::{corners_view, sync_corners};
 use fill_sections::FillSections;
 use geometry::{
-    corner_radius, panel_anchor, panel_anchor_for, panel_size, panel_thickness, placement_rect,
-    section_touch_for,
+    corner_radius, panel_anchor, panel_anchor_for, panel_size, panel_thickness, panel_vertical,
+    placement_rect, section_touch_for,
 };
 use menus::{
     fit_menu_labels, menu_arrow_h, menu_placement, menu_row_h, menu_size_shown,
@@ -349,9 +351,16 @@ pub(crate) struct Panel {
     /// motion next to it came from a widget whose bounds changed under a
     /// still pointer (see `hover_is_fresh`).
     pub(crate) last_motion: Option<Instant>,
+    /// The hover waiting for its sensor box (see `FindSensorRect`): set at
+    /// confirmation, cleared by the answer or by any newer enter/leave.
+    pub(crate) pending_hover: Option<(usize, usize)>,
     /// State (mtime, len) of the last config read attempt: unchanged files
     /// are skipped on the next tick instead of being re-read and parsed.
     pub(crate) last_reload: Option<(SystemTime, u64)>,
+    /// The first panel's own anchor (`panels[0].anchor`, or the legacy
+    /// `panel.anchor`): the tick recomputes that panel's geometry and
+    /// orientation from it.
+    pub(crate) first_anchor: Option<String>,
     /// Geometry currently applied to the layer surface; compared after a
     /// reload to decide whether a runtime `LayoutChange` is needed.
     pub(crate) last_size: LayerSize,
@@ -590,6 +599,11 @@ pub(crate) enum Message {
     /// token): the hover activates only if no leave or newer enter has
     /// superseded it (see `HoverGate`).
     SensorHoverConfirmed(usize, usize, u64),
+    /// Answer of the sensor-box query `FindSensorRect`: (section,
+    /// sensor, bar-relative rect). The hover activates only when the
+    /// cursor is inside it (iced can fire an enter whose bounds changed
+    /// under a still pointer).
+    SensorRectFound(usize, usize, (i32, i32, i32, i32)),
     /// A sensor was clicked: (section_index, sensor_index, action).
     SensorPressed(usize, usize, Option<String>),
     /// Right-click on the bar outside any widget that owns that button
@@ -732,6 +746,68 @@ pub(crate) enum Message {
 
 fn namespace() -> String {
     String::from("piuma")
+}
+
+// ── sensor box query ───────────────────────────────────────────────
+
+/// Widget id of a sensor box in the bar view: a hover asks the widget
+/// tree for the box the pointer must be inside (`FindSensorRect`).
+fn sensor_box_id(section: usize, sensor: usize) -> iced::widget::Id {
+    format!("piuma-sensor-{section}-{sensor}").into()
+}
+
+/// Runtime query of a sensor box's rect: the operation walks the widget
+/// trees (on every window — only the bar carries the tagged container)
+/// and reports the bounds of the container tagged with the sensor's id.
+struct FindSensorRect {
+    section: usize,
+    sensor: usize,
+    target: iced::widget::Id,
+    found: Option<(i32, i32, i32, i32)>,
+}
+
+impl FindSensorRect {
+    fn new(section: usize, sensor: usize) -> Self {
+        Self {
+            section,
+            sensor,
+            target: sensor_box_id(section, sensor),
+            found: None,
+        }
+    }
+}
+
+impl Operation<Message> for FindSensorRect {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<Message>)) {
+        operate(self);
+    }
+
+    fn container(&mut self, id: Option<&iced::widget::Id>, bounds: iced::Rectangle) {
+        if self.found.is_none() && id == Some(&self.target) {
+            self.found = Some((
+                bounds.x as i32,
+                bounds.y as i32,
+                (bounds.x + bounds.width) as i32,
+                (bounds.y + bounds.height) as i32,
+            ));
+        }
+    }
+
+    fn finish(&self) -> Outcome<Message> {
+        match self.found {
+            Some(rect) => Outcome::Some(Message::SensorRectFound(self.section, self.sensor, rect)),
+            None => Outcome::None,
+        }
+    }
+}
+
+/// Whether the bar-relative `cursor` sits inside `rect` (the layout is in
+/// bar coordinates too). `None` (no motion seen yet) never matches.
+fn cursor_in_rect(cursor: Option<(f32, f32)>, rect: (i32, i32, i32, i32)) -> bool {
+    let Some((x, y)) = cursor else {
+        return false;
+    };
+    x >= rect.0 as f32 && x < rect.2 as f32 && y >= rect.1 as f32 && y < rect.3 as f32
 }
 
 // ── helpers ─────────────────────────────────────────────────────────
@@ -1255,8 +1331,12 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
                     &panel.config.panel,
                     panel.palette.as_ref(),
                 );
-                let size = panel_size(&panel.config, unsafe { SCREEN_WIDTH }, unsafe { SCREEN_HEIGHT });
-                let anchor = panel_anchor(&panel.config);
+                let size = panel_size(
+                    &panel.config,
+                    unsafe { SCREEN_WIDTH },
+                    panel.first_anchor.as_deref(),
+                );
+                let anchor = panel_anchor_for(&panel.config, panel.first_anchor.as_deref());
                 let zone = panel_thickness(&panel.config) as i32;
                 if size != panel.last_size || anchor != panel.last_anchor {
                     panel.last_size = size;
@@ -2072,6 +2152,9 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             Command::none()
         }
         Message::SensorHovered(section_index, sensor_index, hovered) => {
+            // Any new enter/leave supersedes a hover still waiting for
+            // its sensor box.
+            panel.pending_hover = None;
             if hovered {
                 // Only armed: the hover (style and popups) activates
                 // when the dwell confirms it, so a pointer sweeping
@@ -2099,6 +2182,26 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             // enter too (iced compares bounds as well as the cursor): no
             // motion next to the arm means nobody hovered it.
             if !hover_is_fresh(armed, panel.last_motion) {
+                return Command::none();
+            }
+            // The pointer must really be on that sensor: iced also fires
+            // an enter when a widget's bounds change under a still cursor,
+            // and a shift can hand the enter to a sensor far from it (seen
+            // live: the hovered list sensor handed it to `Layout`). The
+            // box comes from the widget tree, so the check rides a query
+            // (`SensorRectFound` sets the hover).
+            panel.pending_hover = Some((section_index, sensor_index));
+            iced_runtime::task::widget(FindSensorRect::new(section_index, sensor_index))
+        }
+        Message::SensorRectFound(section_index, sensor_index, rect) => {
+            // A newer enter/leave already replaced this query's hover.
+            if panel.pending_hover != Some((section_index, sensor_index)) {
+                return Command::none();
+            }
+            panel.pending_hover = None;
+            // The box is the real one from the widget tree: a cursor
+            // outside it means iced handed the enter to the wrong sensor.
+            if !cursor_in_rect(panel.last_cursor, rect) {
                 return Command::none();
             }
             panel.hovered = Some((section_index, sensor_index));
@@ -2310,13 +2413,7 @@ fn bar_view<'a>(
 
     // Panel orientation: the `thickness` axis (the "cross" axis of the panel)
     // is the height for a horizontal panel and the width for a vertical one.
-    let vertical = panel
-        .config
-        .panel
-        .section_layout
-        .as_ref()
-        .map(|s| s.as_str())
-        .unwrap_or("horizontal") == "vertical";
+    let vertical = panel_vertical(&panel.config, layout.anchor.as_deref());
 
     // Build sections.
     let mut section_elements: Vec<Element<'a, Message>> = Vec::new();
@@ -2354,7 +2451,6 @@ fn bar_view<'a>(
         let section = &panel.sections[section_idx];
         let touch = if respect_edges {
             section_touch_for(
-                &panel.config,
                 touch_anchor,
                 touch_align,
                 position,
@@ -2747,7 +2843,9 @@ fn bar_view<'a>(
                 bottom: pad_v as f32,
             };
 
-            let styled_container = styled_box(
+            // The wrapper only tags the box for `FindSensorRect`: same
+            // size as the pill it holds, so the layout does not change.
+            let styled_container = container(styled_box(
                 content,
                 bg_color,
                 border_color,
@@ -2759,7 +2857,10 @@ fn bar_view<'a>(
                 pad,
                 box_w,
                 box_h,
-            );
+            ))
+            .width(box_w)
+            .height(box_h)
+            .id(sensor_box_id(section_idx, sensor_idx));
             // Tray icons carry their own MouseAreas (press/wheel/tooltip);
             // wrapping them in the sensor MouseArea as well would handle the
             // same events twice, so a tray sensor stays bare — and so does a
@@ -3490,7 +3591,8 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                     // Initial geometry (size, anchor, exclusive zone) must
                     // match what wl_settings applies at startup, so reloads
                     // only emit LayoutChange/ExclusiveZoneChange on change.
-                    let size = panel_size(&cfg, screens[0].0, screens[0].1);
+                    let size =
+                        panel_size(&cfg, screens[0].0, layouts[0].anchor.as_deref());
                     let anchor = panel_anchor_for(&cfg, layouts[0].anchor.as_deref());
                     let zone = panel_thickness(&cfg) as i32;
                     let graphs = graphs::History::new(&cfg.panel.sections);
@@ -3508,6 +3610,8 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         hovered: None,
                         hover_gate: HoverGate::default(),
                         last_motion: None,
+                        pending_hover: None,
+                        first_anchor: layouts[0].anchor.clone(),
                         last_reload: config_file_state(),
                         last_size: size,
                         last_anchor: anchor,
@@ -3551,9 +3655,9 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                     let mut task: Command<Message> = Command::none();
                     for index in 1..app.layouts.len() {
                         let layout = app.layouts[index].clone();
-                        let (width, height) = app.screens[index];
+                        let (width, _) = app.screens[index];
                         let (id, open) = Message::layershell_open(NewLayerShellSettings {
-                            size: panel_size(&cfg, width, height),
+                            size: panel_size(&cfg, width, layout.anchor.as_deref()),
                             layer: Layer::Top,
                             anchor: panel_anchor_for(&cfg, layout.anchor.as_deref()),
                             exclusive_zone: Some(panel_thickness(&cfg) as i32),
@@ -3577,7 +3681,7 @@ fn main() -> Result<(), iced_exwlshell::Error> {
             .style(style)
             .wl_settings(ExWlSettings {
                 layer_settings: LayerShellSettings {
-                    size: panel_size(&panel_config, screens[0].0, screens[0].1),
+                    size: panel_size(&panel_config, screens[0].0, layouts[0].anchor.as_deref()),
                     // Reserve exactly the configured thickness: a constant
                     // here would leave dead space whenever thickness != 32.
                     exclusive_zone: panel_thickness(&panel_config) as i32,
@@ -3726,9 +3830,9 @@ fn parse_config_arg() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        config, focused_output_in, hover_is_fresh, icons_theme, monitor_names_json, palette,
-        popup_card_h, popup_style, screen_size_in, setup_binary_path, start_mode_for, HoverGate,
-        PopupStyle, StartMode, HOVER_MOTION_GRACE,
+        config, cursor_in_rect, focused_output_in, hover_is_fresh, icons_theme,
+        monitor_names_json, palette, popup_card_h, popup_style, screen_size_in,
+        setup_binary_path, start_mode_for, HoverGate, PopupStyle, StartMode, HOVER_MOTION_GRACE,
     };
     use std::time::Instant;
 
@@ -3824,6 +3928,23 @@ mod tests {
             "a bounds change under a still pointer: no popup"
         );
         assert!(!hover_is_fresh(now, None), "no motion at all: no popup");
+    }
+
+    /// The box check that drops an enter handed to a sensor the cursor is
+    /// nowhere near: inside counts, the borders compare half-open, and a
+    /// cursor never seen yet counts as outside.
+    #[test]
+    fn hover_requires_the_cursor_inside_the_sensor_box() {
+        let rect = (60, 4, 110, 24);
+        assert!(cursor_in_rect(Some((70.0, 14.0)), rect), "inside");
+        assert!(cursor_in_rect(Some((60.0, 4.0)), rect), "top-left corner");
+        assert!(!cursor_in_rect(Some((110.0, 14.0)), rect), "right edge excluded");
+        assert!(!cursor_in_rect(Some((70.0, 24.0)), rect), "bottom edge excluded");
+        assert!(
+            !cursor_in_rect(Some((1268.0, 24.0)), rect),
+            "the live misfire: far to the right of Layout"
+        );
+        assert!(!cursor_in_rect(None, rect), "no cursor seen: no hover");
     }
 
     /// The default popup style must keep the F3 geometry exactly (84px

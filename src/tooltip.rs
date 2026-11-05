@@ -48,6 +48,32 @@ pub(crate) fn tooltip_placement(
 ) -> (Anchor, Margin) {
     let (w, h) = (w as i32, h as i32);
     let gap = TOOLTIP_GAP as i32;
+    // Side edges first: a vertical bar also anchors Top|Bottom (to
+    // stretch its height), and a top/bottom bar never carries them.
+    if anchor.contains(Anchor::Left) {
+        let top = (at.1 - h / 2).clamp(0, (sh - h).max(0));
+        return (
+            Anchor::Left | Anchor::Top,
+            Margin {
+                left: thickness + gap,
+                top,
+                right: 0,
+                bottom: 0,
+            },
+        );
+    }
+    if anchor.contains(Anchor::Right) {
+        let top = (at.1 - h / 2).clamp(0, (sh - h).max(0));
+        return (
+            Anchor::Right | Anchor::Top,
+            Margin {
+                left: 0,
+                top,
+                right: thickness + gap,
+                bottom: 0,
+            },
+        );
+    }
     if anchor.contains(Anchor::Top) {
         let left = (at.0 - w / 2).clamp(0, (sw - w).max(0));
         (
@@ -117,32 +143,27 @@ pub(crate) fn tooltip_screen_size() -> (i32, i32) {
 }
 
 /// The bar edge under the cursor, from a point inside the bar: the
-/// layout's orientation decides which axis to inspect, so a bottom bar
-/// gets a tooltip above it even when the global config anchor says
-/// "top".
+/// nearest screen edge within the bar's strip (thickness + gap), so a
+/// bottom bar gets its tooltip above it and a left one to its right —
+/// whatever the config says, and with horizontal and vertical panels
+/// living side by side. `None` in the middle of the output.
 pub(crate) fn bar_edge(
     at: (i32, i32),
     thickness: i32,
     sw: i32,
     sh: i32,
-    vertical: bool,
 ) -> Option<Anchor> {
-    let gap = TOOLTIP_GAP as i32;
-    if vertical {
-        if at.0 <= thickness + gap {
-            Some(Anchor::Left)
-        } else if at.0 >= sw - thickness - gap {
-            Some(Anchor::Right)
-        } else {
-            None
-        }
-    } else if at.1 <= thickness + gap {
-        Some(Anchor::Top)
-    } else if at.1 >= sh - thickness - gap {
-        Some(Anchor::Bottom)
-    } else {
-        None
-    }
+    let reach = thickness + TOOLTIP_GAP as i32;
+    [
+        (at.1, Anchor::Top),
+        (sh - at.1, Anchor::Bottom),
+        (at.0, Anchor::Left),
+        (sw - at.0, Anchor::Right),
+    ]
+    .into_iter()
+    .filter(|(distance, _)| (0..=reach).contains(distance))
+    .min_by_key(|(distance, _)| *distance)
+    .map(|(_, anchor)| anchor)
 }
 
 /// The bar's anchored edge and its surface origin inside the output,
@@ -153,9 +174,7 @@ pub(crate) fn cursor_bar(panel: &Panel) -> (Anchor, (i32, i32)) {
     let at = tooltip_cursor_point(panel);
     let thickness = panel_thickness(&panel.config) as i32;
     let (sw, sh) = tooltip_screen_size();
-    let vertical = panel.config.panel.section_layout.as_deref() == Some("vertical");
-    let anchor =
-        bar_edge(at, thickness, sw, sh, vertical).unwrap_or_else(|| panel_anchor(&panel.config));
+    let anchor = bar_edge(at, thickness, sw, sh).unwrap_or_else(|| panel_anchor(&panel.config));
     (anchor, tray::bar_origin_for(anchor, thickness, sw, sh))
 }
 
@@ -226,9 +245,8 @@ pub(crate) fn tooltip_open(panel: &mut Panel, id: String, text: String) -> Comma
     let h = text_h.saturating_add(2 * TOOLTIP_PAD_Y);
     let at = tooltip_cursor_point(panel);
     let thickness = panel_thickness(&panel.config) as i32;
-    let vertical = panel.config.panel.section_layout.as_deref() == Some("vertical");
-    let anchor = bar_edge(at, thickness, sw, sh, vertical)
-        .unwrap_or_else(|| panel_anchor(&panel.config));
+    let anchor =
+        bar_edge(at, thickness, sw, sh).unwrap_or_else(|| panel_anchor(&panel.config));
     let (anchor, margin) = tooltip_placement(anchor, at, w, h, thickness, sw, sh);
     let (win, open) = Message::layershell_open(NewLayerShellSettings {
         size: LayerSize::px(w, h),
@@ -337,15 +355,24 @@ mod tests {
     /// centred on the cursor and clamped inside the output.
     #[test]
     fn bar_edge_follows_the_cursor_side() {
-        assert_eq!(bar_edge((100, 10), 28, 1920, 1080, false), Some(Anchor::Top));
+        assert_eq!(bar_edge((100, 10), 28, 1920, 1080), Some(Anchor::Top));
         assert_eq!(
-            bar_edge((100, 1070), 28, 1920, 1080, false),
+            bar_edge((100, 1070), 28, 1920, 1080),
             Some(Anchor::Bottom),
             "a bottom bar gets its tooltip above"
         );
-        assert_eq!(bar_edge((100, 500), 28, 1920, 1080, false), None);
-        assert_eq!(bar_edge((10, 500), 28, 1920, 1080, true), Some(Anchor::Left));
-        assert_eq!(bar_edge((1910, 500), 28, 1920, 1080, true), Some(Anchor::Right));
+        assert_eq!(bar_edge((100, 500), 28, 1920, 1080), None);
+        assert_eq!(
+            bar_edge((10, 500), 28, 1920, 1080),
+            Some(Anchor::Left),
+            "a left bar: the nearest edge wins without any config hint"
+        );
+        assert_eq!(bar_edge((1910, 500), 28, 1920, 1080), Some(Anchor::Right));
+        assert_eq!(
+            bar_edge((15, 12), 28, 1920, 1080),
+            Some(Anchor::Top),
+            "corner: the closest of the two bars"
+        );
     }
 
     fn tooltip_placement_sits_off_the_bar_and_inside_the_output() {

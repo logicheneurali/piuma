@@ -273,6 +273,14 @@ monitors without duplication:
 ]
 ```
 
+The anchor also picks the **orientation**: a panel anchored `left` or
+`right` is a vertical side bar (thickness wide, stretched between the
+top and bottom edges, sensors stacked along the height); `top`/`bottom`
+give a horizontal one. The global `panel.section_layout` only decides
+the orientation of a panel with **no** anchor (the legacy single-bar
+setting) and the `thickness` stays global: a 28 px side bar fits icon
+sensors, not long text.
+
 Sections are assigned **exclusively**: the first panel (the legacy
 `panel` placement) shows the sections **not** claimed by the later
 entries, so adding a secondary panel does not duplicate the main bar. An
@@ -687,7 +695,10 @@ windows (`general:gaps_in`) is **half** of it (rounded down): 8 → 6 → 5
 The count is every **open window**, not just the active workspace's: the
 Hyprland value is global, so a per-workspace count would re-tile every
 monitor on every workspace switch. Special workspaces (scratchpads) are
-excluded; floating windows count. Zero windows keep the maximum.
+excluded; floating windows count. X11 **popup menus** (Steam's hover
+menus, some toolkits') are reported by Hyprland as floating clients with
+an empty title: they are not windows and are not counted. Zero windows
+keep the maximum.
 
 The bar applies the gap on its 1 Hz tick, only when the count or the
 range changed, and always before the layout engine so its measured
