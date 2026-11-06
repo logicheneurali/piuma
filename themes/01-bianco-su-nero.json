@@ -1,0 +1,22 @@
+{
+  "name": "Bianco su nero",
+  "panel": {
+    "theme_mode": "dark",
+    "wallpaper_palette": false,
+    "default_bg_color": "#333333ff",
+    "default_text_color": "#ffffffff",
+    "sensor_defaults": {
+      "text_color": "#ffffffff",
+      "text_color_hover": "#ffffffff",
+      "bg_color": "#3d3d3dff",
+      "bg_color_hover": "#4d4d4dff",
+      "border_color": "#5f5f5fff",
+      "border_color_hover": "#8a8a8aff"
+    },
+    "section_defaults": {
+      "bg_color": "#2b2b2bff",
+      "text_color": "#ffffffff",
+      "border_color": "#5f5f5fff"
+    }
+  }
+}

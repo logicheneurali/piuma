@@ -84,7 +84,8 @@ pub(crate) fn percent<'a>(
         text(percent_text(value))
             .size(font_size.saturating_sub(1))
             .color(color)
-            .font(font),
+            .font(font)
+            .line_height(iced::widget::text::LineHeight::Relative(1.2)),
     )
     .width(Length::Fixed(LABEL_W))
     .align_x(Alignment::End)

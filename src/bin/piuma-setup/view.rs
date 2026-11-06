@@ -151,7 +151,13 @@ fn sidebar(state: &PiumaSetup) -> Element<'_, Message> {
                 }),
         );
     }
-    container(rail)
+    // A short window must not eat the last tabs: the rail scrolls
+    // inside its fixed-width strip, like the content pane does.
+    container(
+        scrollable(rail)
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
         .width(Length::Fixed(170.0))
         .height(Length::Fill)
         .style(move |_t| container::Style {

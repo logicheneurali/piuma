@@ -1,0 +1,22 @@
+{
+  "name": "Dracula",
+  "panel": {
+    "theme_mode": "dark",
+    "wallpaper_palette": false,
+    "default_bg_color": "#282a36ff",
+    "default_text_color": "#f8f8f2ff",
+    "sensor_defaults": {
+      "text_color": "#f8f8f2ff",
+      "text_color_hover": "#ffffffff",
+      "bg_color": "#44475aff",
+      "bg_color_hover": "#6272a4ff",
+      "border_color": "#bd93f9ff",
+      "border_color_hover": "#ff79c6ff"
+    },
+    "section_defaults": {
+      "bg_color": "#21222cff",
+      "text_color": "#f8f8f2ff",
+      "border_color": "#6272a4ff"
+    }
+  }
+}

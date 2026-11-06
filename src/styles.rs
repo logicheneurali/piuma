@@ -32,7 +32,8 @@ pub(crate) fn panel_bg(cfg: &config::PanelConfig, pal: Option<&palette::Palette>
         .default_bg_color
         .as_ref()
         .and_then(|s| config::parse_color(s).ok());
-    pal.and_then(|p| config::parse_color(&p.bg).ok())
+    let mut color = pal
+        .and_then(|p| config::parse_color(&p.bg).ok())
         .map(|mut c| {
             if let Some(b) = configured {
                 c.a = b.a;
@@ -40,7 +41,19 @@ pub(crate) fn panel_bg(cfg: &config::PanelConfig, pal: Option<&palette::Palette>
             c
         })
         .or(configured)
-        .unwrap_or(DEFAULT_BG_COLOR)
+        .unwrap_or(DEFAULT_BG_COLOR);
+    // The glass tweak lowers the bar's alpha so the compositor blur
+    // behind it shows; the configured colour keeps its hue.
+    if let Some(alpha) = cfg
+        .tweaks
+        .as_ref()
+        .and_then(|t| t.glass.as_ref())
+        .filter(|g| g.enabled)
+        .map(|g| g.opacity.clamp(0.05, 1.0))
+    {
+        color.a = alpha;
+    }
+    color
 }
 
 /// The default text tone with the same precedence the style matrix uses
@@ -135,6 +148,9 @@ pub(crate) fn resolve_styles(
                     // lookup is memoized, so a rebuild only clones the
                     // cached path. With `icon_theme == None` (gate) this
                     // arm never runs.
+                    // No vertical inset is spent on the box any more
+                    // (padding is horizontal only), so the icon gets the
+                    // full row height instead of shrinking with it.
                     let icon_size = icons::row_icon_target(
                         thickness,
                         icons::stacked_title_extra(
@@ -142,7 +158,7 @@ pub(crate) fn resolve_styles(
                             &section_cfg.name,
                             font_size,
                         ),
-                        u32::from(padding),
+                        0,
                     );
                     let icon_name = s.icon.as_deref().or_else(|| {
                         matches!(s.source, config::SensorSource::VolumeMeter { .. })
@@ -155,8 +171,6 @@ pub(crate) fn resolve_styles(
                         _ => None,
                     };
                     let own_border = s.border_color.is_some();
-                    let own_bg = s.bg_color.is_some();
-                    let own_text = s.text_color.is_some();
                     // Key fields: per-sensor, then the wallpaper
                     // palette (when active), then defaults, then
                     // section/built-in. The palette overrides the
@@ -191,33 +205,31 @@ pub(crate) fn resolve_styles(
                         .border_color
                         .as_deref()
                         .or(defaults.and_then(|sd| sd.border_color.as_deref()));
-                    // Secondary fields only count when the sensor owns the group.
+                    // Hover colours are independent overrides: setting only
+                    // "Hover BG" (or "Hover Text") must show, with or
+                    // without a base colour of the same group.
                     let bg_h_pal = pal.map(|p| {
                         palette::keep_config_alpha(
                             &p.card_hover,
                             defaults.and_then(|sd| sd.bg_color_hover.as_deref()),
                         )
                     });
-                    let bg_h_str = (if own_bg {
-                        s.bg_color_hover.as_deref()
-                    } else {
-                        None
-                    })
-                    .or(bg_h_pal.as_deref())
-                    .or(defaults.and_then(|sd| sd.bg_color_hover.as_deref()));
+                    let bg_h_str = s
+                        .bg_color_hover
+                        .as_deref()
+                        .or(bg_h_pal.as_deref())
+                        .or(defaults.and_then(|sd| sd.bg_color_hover.as_deref()));
                     let tc_h_pal = pal.map(|p| {
                         palette::keep_config_alpha(
                             &p.text_hover,
                             defaults.and_then(|sd| sd.text_color_hover.as_deref()),
                         )
                     });
-                    let tc_h_str = (if own_text {
-                        s.text_color_hover.as_deref()
-                    } else {
-                        None
-                    })
-                    .or(tc_h_pal.as_deref())
-                    .or(defaults.and_then(|sd| sd.text_color_hover.as_deref()));
+                    let tc_h_str = s
+                        .text_color_hover
+                        .as_deref()
+                        .or(tc_h_pal.as_deref())
+                        .or(defaults.and_then(|sd| sd.text_color_hover.as_deref()));
                     // Numeric style fields follow the -1 = disabled rule:
                     // only an enabled value (>= 0) overrides the defaults.
                     let bw_val = (if own_border {
@@ -386,6 +398,25 @@ pub(crate) fn restyle(panel: &mut Panel) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Hover overrides stand on their own: a sensor with only `Hover BG`
+    /// (no base `BG`) shows the configured colour, not the palette's.
+    #[test]
+    fn hover_only_overrides_apply_without_a_base_colour() {
+        let cfg: config::Config = serde_json::from_str(
+            r##"{"panel":{"sections":[{"name":"s","sensors":[{"name":"x","source":{"type":"static_text","static_text":"a"},"bg_color_hover":"#ff0000","text_color_hover":"#00ff00"}]}]}}"##,
+        )
+        .unwrap();
+        let styles = resolve_styles(&cfg, None);
+        assert_eq!(
+            styles[0].sensors[0].bg_color_hover,
+            Some(config::parse_color("#ff0000").unwrap())
+        );
+        assert_eq!(
+            styles[0].sensors[0].text_color_hover,
+            Some(config::parse_color("#00ff00").unwrap())
+        );
+    }
 
     /// The panel background follows the active palette's base tone,
     /// keeping the configured colour's transparency — and the configured

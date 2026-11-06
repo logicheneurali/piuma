@@ -1,6 +1,6 @@
 [package]
 name = "piuma"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2021"
 description = "Pannello di sistema leggero per Wayland (Hyprland)"
 license = "Apache-2.0"
@@ -28,6 +28,13 @@ signal-hook = "0.3"
 zbus = "5"
 # Freedesktop icon-name → file lookup for tray items.
 freedesktop-icons = "0.4"
+# Lock screen password: PAM (libpam is the system's, no daemon and no
+# hyprlock needed). The crate only wraps pam_start/pam_authenticate.
+pam = "0.8"
+# Screensaver idle detection (`ext-idle-notify-v1`): both crates are
+# already in the tree through iced_exwlshell, no extra download.
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 # Text width measurement for pinned sensor values (M5): the same shaper
 # iced renders with, already in the tree through iced_graphics.
 cosmic-text = "0.15"

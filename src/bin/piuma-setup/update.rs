@@ -200,6 +200,33 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
         Message::BorderInactiveChanged(value) => {
             borders_mut(&mut state.config).inactive = value;
         }
+        Message::ScreensaverEnabled(value) => {
+            screensaver_mut(&mut state.config).enabled = value;
+        }
+        Message::ScreensaverMinutesChanged(value) => {
+            screensaver_mut(&mut state.config).minutes = value.clamp(1, 120);
+        }
+        Message::GlassEnabled(value) => {
+            glass_mut(&mut state.config).enabled = value;
+        }
+        Message::GlassOpacityChanged(value) => {
+            glass_mut(&mut state.config).opacity =
+                value.clamp(5, 100) as f32 / 100.0;
+        }
+        Message::AutoHideEnabled(value) => {
+            auto_hide_mut(&mut state.config).enabled = value;
+        }
+        Message::ScreensaverShow => {
+            // The lock works even with the idle trigger off (the sensor
+            // does too): the signal is handled unconditionally.
+            match crate::reload::trigger_screensaver() {
+                Ok(()) => state.set_status(
+                    "Locked — the session password unlocks it".to_string(),
+                    false,
+                ),
+                Err(e) => state.set_status(format!("Lock: {e}"), true),
+            }
+        }
         Message::GapMinChanged(value) => {
             // The sliders are mutually bounded; clamp here too so a
             // programmatic edit can never store min > max.

@@ -49,6 +49,9 @@ pub(crate) fn sample_value(source_type: &str) -> &'static str {
         "notifications" => "3 new",
         "taskbar" => "",
         "layout" => "Work",
+        "lock" => "",
+        "caffeine" => "off",
+        "power" => "",
         "command" => "42",
         "list" => "line one",
         // Placeholder, never real data: no SSIDs, hosts or user names.
@@ -88,6 +91,9 @@ pub(crate) fn sample_name(source_type: &str) -> &'static str {
         "media" => "MEDIA",
         "notifications" => "NOTIF",
         "layout" => "LAYOUT",
+        "lock" => "LOCK",
+        "caffeine" => "CAF",
+        "power" => "POWER",
         "command" => "CMD",
         "list" => "LIST",
         "net_info" => "NET",
@@ -210,11 +216,7 @@ fn icon_size(cfg: &PiumaConfig, section: Option<&Section>, sensor: &Sensor) -> u
             } else {
                 cfg.thickness
             };
-            icons::row_icon_target(
-                thickness,
-                0,
-                sensor_padding(cfg, sensor),
-            )
+            icons::row_icon_target(thickness, 0, 0)
         }
     }
 }
@@ -281,7 +283,8 @@ pub(crate) fn pill(
             text(name.to_string())
                 .size(size)
                 .color(style.text)
-                .font(font),
+                .font(font)
+                .line_height(iced::widget::text::LineHeight::Relative(1.2)),
         );
     }
     if !value.is_empty() {
@@ -289,11 +292,19 @@ pub(crate) fn pill(
             text(value.to_string())
                 .size(size)
                 .color(style.text)
-                .font(font),
+                .font(font)
+                .line_height(iced::widget::text::LineHeight::Relative(1.2)),
         );
     }
+    // The bar's rule: the sensor padding is horizontal only, the content
+    // centres vertically in the pill.
     container(row)
-        .padding(style.padding)
+        .padding(iced::Padding {
+            left: style.padding,
+            right: style.padding,
+            top: 0.0,
+            bottom: 0.0,
+        })
         .style(move |_t: &Theme| container::Style {
             background: style.bg.map(Background::Color),
             border: Border {

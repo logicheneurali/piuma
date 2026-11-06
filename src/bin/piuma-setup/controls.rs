@@ -92,7 +92,7 @@ pub(crate) fn sensor_padding(cfg: &PiumaConfig, sensor: &Sensor) -> u32 {
 /// (`icons::row_icon_target`: the sensor row's real height, clamped):
 /// the preview and the browser cells must draw at that size or they
 /// would not show what the bar draws.
-pub(crate) fn sensor_icon_size(cfg: &PiumaConfig, section: &Section, sensor: &Sensor) -> u16 {
+pub(crate) fn sensor_icon_size(cfg: &PiumaConfig, section: &Section, _sensor: &Sensor) -> u16 {
     let layout = section.layout.as_deref().unwrap_or("horizontal");
     let title_extra =
         icons::stacked_title_extra(layout, section.name.as_deref().unwrap_or(""), cfg.font_size);
@@ -101,7 +101,9 @@ pub(crate) fn sensor_icon_size(cfg: &PiumaConfig, section: &Section, sensor: &Se
     } else {
         cfg.thickness
     };
-    icons::row_icon_target(thickness, title_extra, sensor_padding(cfg, sensor))
+    // The bar spends no vertical padding on the row (padding is horizontal
+    // only), so the icon gets the full height there; the preview mirrors it.
+    icons::row_icon_target(thickness, title_extra, 0)
 }
 
 /// The themed icon widget at the sensor row's size, or `None` when the

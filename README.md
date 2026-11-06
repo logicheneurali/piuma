@@ -443,6 +443,9 @@ Each sensor's `source` object has a `type` plus the parameters listed
 | `media`          | MPRIS player: `⏵  title — artist` (25 chars each); click play/pause, wheel prev/next | —                                                        |
 | `tray`           | system tray icons (StatusNotifierItem)                       | —                                                                       |
 | `notifications`  | newest active notification (`N6 newest (5)`)                 | —                                                                       |
+| `lock`           | lock-screen trigger: shows its name/icon, **clicking locks** every output (password to unlock) | —                                            |
+| `caffeine`       | idle-inhibit toggle: shows `on`/`off`, clicking flips it; while on, the idle lock stays away | —                                              |
+| `power`          | power menu trigger: **clicking** opens lock / log out / suspend / reboot / shut down | —                                                       |
 
 `net_info`, `power_profile`, `bluetooth` and `keyboard` are the
 runtime-state sensors. `net_info` reads the active NetworkManager
@@ -463,6 +466,13 @@ the first run. The `list` source runs its command the same way and keeps
 every stdout line for the hover popup (at most `max_lines`, shown in the
 same overlay as the icon tooltips); its bar text is the sensor `name`,
 or the first line when the name is empty.
+
+A volume or brightness change (from the bar, the media/volume keys or
+`wpctl`) shows a small **OSD** card with the new value and a
+palette-coloured bar; it sits exactly where the notification popup sits
+(same `popup_position` / `popup_margin_h` / `popup_margin_v`, same auto
+fallback, same width and reserved-strip handling) and fades after 1.2 s.
+Nothing runs while the value is still.
 
 Network rates and the CPU percentage are computed from consecutive
 counter samples (`/proc/net/dev`, `/proc/stat`): the very first refresh
@@ -685,9 +695,35 @@ dispatch).
   "borders": {
     "enabled": true, "size": 1,
     "active": "#ffffff99", "inactive": "#ffffff33"
-  }
+  },
+  "screensaver": { "enabled": true, "minutes": 10 },
+  "glass": { "enabled": true, "opacity": 0.35 },
+  "auto_hide": { "enabled": true }
 }
 ```
+
+**Screensaver** cuts every output into a grid of 35 rows by 25 columns
+whose cells walk the active palette at a pace set by their own
+brightness — a white cell finishes a colour cycle in 3 s, a black one
+takes 30, and the curve is exponential (`3 · 10^(1 − luma)`), so
+mid-tones move faster than a straight line and the screen is mostly
+dark — at 5 fps (a light full-surface redraw), after `minutes` of
+inactivity (1–120, default 10). It stays off while the focused window is
+fullscreen or a video is playing: the sound server's `media.role`
+(`pactl`, so PulseAudio and PipeWire alike) marks video/game streams and
+leaves music alone, while MPRIS `Playing` is the fallback when no stream
+is visible (muted video, bare ALSA, no player role). A windowed video is
+therefore never covered either. Any click or pointer movement closes it
+(a key press too
+when it started from the idle timer, via the compositor's resume event).
+It does not lock the session: add hyprlock (and its own listener) if you
+want authentication on resume. The idle comes straight from the
+compositor (`ext-idle-notify-v1`), so no hypridle is needed. On a v2
+compositor it tracks **input** idle and ignores idle inhibitors on
+purpose: one client pinning an inhibitor would otherwise disable the
+feature for the whole session, and the fullscreen check is what protects
+videos and games. `SIGUSR1` shows it at once (the setup's *Show now*
+button), and disabling the tweak leaves no idle thread running.
 
 **Dynamic gaps** shrink Hyprland's gaps as more windows open. The gap
 to the screen edge (`general:gaps_out`) follows the configured value:

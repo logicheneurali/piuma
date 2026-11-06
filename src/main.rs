@@ -22,12 +22,14 @@ use iced_runtime::core::widget::operation::Outcome;
 use iced_exwlshell::ExWlSettings;
 use iced_exwlshell::daemon;
 use iced_exwlshell::reexport::{
-    Anchor, KeyboardInteractivity, Layer, NewLayerShellSettings, OutputOption,
+    Anchor, BlurOption, KeyboardInteractivity, Layer, Margin, NewLayerShellSettings,
+    OutputOption,
 };
 use iced_exwlshell::settings::{LayerShellSettings, LayerSize, StartMode};
 use iced_exwlshell::to_layer_message;
 
 mod app_theme;
+mod auth;
 mod autostart;
 mod calendar;
 mod config;
@@ -38,17 +40,22 @@ mod fill_sections;
 mod geometry;
 mod graphs;
 mod hypr;
+mod idle;
 mod icons;
 mod instance_lock;
 mod layouts;
 mod logging;
 mod menus;
 mod mpris;
+mod osd;
 mod notifications;
 mod palette;
+mod playback;
+mod power_menu;
 mod popup_calendar;
 mod popup_graph;
 mod popup_notifications;
+mod screensaver;
 mod sensor_runner;
 mod sensors;
 mod styles;
@@ -440,6 +447,54 @@ pub(crate) struct Panel {
     /// overlay surface per output corner, keyed "output:corner:radius";
     /// empty while the feature is off.
     pub(crate) corners: Vec<(String, iced::window::Id)>,
+    /// Idle screensaver surfaces, one per output, keyed by output name:
+    /// empty while the overlay is down.
+    pub(crate) screensaver: Vec<(String, iced::window::Id)>,
+    /// Whether the overlay is up (the app decides; the idle event only
+    /// starts the fullscreen check).
+    pub(crate) screensaver_on: bool,
+    /// When the overlay opened: the animation clock and the input grace.
+    pub(crate) screensaver_start: Option<Instant>,
+    /// Idle arrived while the focused window is fullscreen: checked
+    /// again every minute until it clears.
+    pub(crate) screensaver_wait: bool,
+    /// Next fullscreen check while `screensaver_wait`.
+    pub(crate) screensaver_retry: Option<Instant>,
+    /// Every cell's palette phase, row-major (`COLS`×`ROWS`): the frame
+    /// message advances it (see `screensaver::advance`).
+    pub(crate) screensaver_phases: Vec<f32>,
+    /// When the phases last advanced: the frame's dt.
+    pub(crate) screensaver_last: Option<Instant>,
+    /// The password field's text while the lock screen is up (never
+    /// logged, cleared after every attempt).
+    pub(crate) screensaver_password: String,
+    /// The last failed attempt's message, `None` while none failed.
+    pub(crate) screensaver_error: Option<String>,
+    /// A PAM check is running: further submits are ignored.
+    pub(crate) screensaver_pending: bool,
+    /// The surface with the password field (the first output opened): the
+    /// only one that grabs the keyboard.
+    pub(crate) screensaver_prompt: Option<iced::window::Id>,
+    /// Whether the password card is on screen: it appears on the first
+    /// input (a click, a key), never by itself — the idle lock shows
+    /// just the grid.
+    pub(crate) screensaver_prompt_open: bool,
+    /// The `caffeine` sensors' state: while on, the idle lock stays away.
+    pub(crate) caffeine: bool,
+    /// The bar surfaces are pushed out of the output (auto-hide while a
+    /// fullscreen window has focus).
+    pub(crate) bars_hidden: bool,
+    /// The extra bar surfaces (panel 2 and later) with their own anchor:
+    /// the same window→layout mapping the daemon keeps, reachable from
+    /// the tick.
+    pub(crate) bar_windows: Vec<(iced::window::Id, Option<String>)>,
+    /// Whether the glass tweak was applied to the surfaces: a reload
+    /// toggles `BlurOptionChange` only on a real change.
+    pub(crate) last_glass: bool,
+    /// The open power menu surface and its auto-close deadline.
+    pub(crate) power_menu: Option<(iced::window::Id, Instant)>,
+    /// The volume/brightness OSD card while it lingers, `None` otherwise.
+    pub(crate) osd: Option<osd::Osd>,
     /// Colours derived from the wallpaper (`panel.wallpaper_palette`):
     /// the active dark/light variant the bar draws with. Runtime-only —
     /// never written back to the config file.
@@ -604,6 +659,24 @@ pub(crate) enum Message {
     /// cursor is inside it (iced can fire an enter whose bounds changed
     /// under a still pointer).
     SensorRectFound(usize, usize, (i32, i32, i32, i32)),
+    /// The idle notification fired (`true`) or the seat woke up
+    /// (`false`): the screensaver starts or closes (see `screensaver`).
+    Idle(bool),
+    /// Answer of the gate check that starts the screensaver: `true` =
+    /// blocked (a fullscreen window or media playing).
+    ScreensaverBlocked(bool),
+    /// The setup's button (SIGUSR1): show the overlay now.
+    ScreensaverManual,
+    /// One animation frame of the overlay.
+    ScreensaverFrame,
+    /// The password field changed.
+    ScreensaverPasswordChanged(String),
+    /// Enter pressed or the Unlock button: check the password.
+    ScreensaverSubmit,
+    /// PAM answer for the submitted password.
+    ScreensaverAuthResult(Result<(), String>),
+    /// One row of the power menu.
+    PowerAction(power_menu::Action),
     /// A sensor was clicked: (section_index, sensor_index, action).
     SensorPressed(usize, usize, Option<String>),
     /// Right-click on the bar outside any widget that owns that button
@@ -808,6 +881,54 @@ fn cursor_in_rect(cursor: Option<(f32, f32)>, rect: (i32, i32, i32, i32)) -> boo
         return false;
     };
     x >= rect.0 as f32 && x < rect.2 as f32 && y >= rect.1 as f32 && y < rect.3 as f32
+}
+
+/// The compositor blur for piuma's surfaces: on while the glass tweak
+/// is enabled.
+pub(crate) fn glass_blur(config: &config::Config) -> BlurOption {
+    if config.glass().is_some() {
+        BlurOption::FullRegion
+    } else {
+        BlurOption::None
+    }
+}
+
+/// The OSD label for the readings it follows.
+fn osd_label(source: &config::SensorSource) -> Option<&'static str> {
+    match source {
+        config::SensorSource::PercVolume { .. } | config::SensorSource::VolumeMeter { .. } => {
+            Some("Volume")
+        }
+        config::SensorSource::PercBacklight {} => Some("Brightness"),
+        _ => None,
+    }
+}
+
+/// The margin that pushes a bar surface off its edge: the anchored
+/// side gets a negative margin of the bar's thickness (the side edges
+/// first, so a vertical panel with Top|Bottom is not read as a bottom
+/// bar).
+fn hidden_margin(anchor: Anchor, thickness: i32) -> Margin {
+    let mut margin = Margin::default();
+    if anchor.contains(Anchor::Left) && !anchor.contains(Anchor::Right) {
+        margin.left = -thickness;
+    } else if anchor.contains(Anchor::Right) {
+        margin.right = -thickness;
+    } else if anchor.contains(Anchor::Top) && !anchor.contains(Anchor::Bottom) {
+        margin.top = -thickness;
+    } else {
+        margin.bottom = -thickness;
+    }
+    margin
+}
+
+/// Run a system command on its own thread: the menu must close at once
+/// and the UI thread must never wait for logind.
+fn spawn(program: &'static str, args: &'static [&'static str]) -> Command<Message> {
+    std::thread::spawn(move || {
+        let _ = std::process::Command::new(program).args(args).status();
+    });
+    Command::none()
 }
 
 // ── helpers ─────────────────────────────────────────────────────────
@@ -1102,6 +1223,9 @@ fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<Command<Mess
     // sensor, collected here so the sections and the history never
     // borrow the panel at once).
     let mut graph_samples: Vec<((usize, usize), f64)> = Vec::new();
+    // Volume/brightness changes for the on-screen display (the last one
+    // of the pass wins).
+    let mut osd_updates: Vec<(&'static str, String)> = Vec::new();
     let effect_mode = panel.config.panel.value_effect.as_deref().unwrap_or("off");
     let effect_enabled = matches!(effect_mode, effects::UNDERLINE | effects::SHEEN);
     let mut effect_starts: Vec<(usize, usize)> = Vec::new();
@@ -1138,6 +1262,26 @@ fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<Command<Mess
                     }
                 }
                 let mut value = read.text;
+                // The OSD follows the real changes of the volume and
+                // brightness sliders, whatever moved them.
+                if let Some(label) = osd_label(&s.source) {
+                    let old = panel
+                        .sections
+                        .get(section_idx)
+                        .and_then(|section| section.sensors.get(sensor_idx))
+                        .map(|sensor| sensor.value.clone());
+                    if old
+                        .as_deref()
+                        .is_some_and(|old| !old.is_empty() && old != value)
+                    {
+                        osd_updates.push((label, value.clone()));
+                    }
+                }
+                // A caffeine sensor mirrors the panel toggle: the runner
+                // cannot see it.
+                if matches!(s.source, config::SensorSource::Caffeine {}) {
+                    value = if panel.caffeine { "on" } else { "off" }.to_string();
+                }
                 // A layout sensor shows the engine's state (✓ saved /
                 // ✓ applied / ⋯ armed / nothing while the file is
                 // absent) instead of any reading.
@@ -1264,6 +1408,12 @@ fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<Command<Mess
     update_icon_targets(panel);
 
     let mut cmds: Vec<Command<Message>> = Vec::new();
+    if let Some((label, value)) = osd_updates.pop() {
+        let fraction = sensors::leading_number(&value)
+            .map(|v| (v / 100.0).clamp(0.0, 1.0))
+            .unwrap_or(0.0);
+        cmds.push(osd::show(panel, label, &value, fraction));
+    }
     // A popup that lost both its sensor and its pointer gets
     // reaped once its grace runs out: the sensor's leave can act
     // on stale coordinates and, after the cursor rests on another
@@ -1379,6 +1529,46 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
                         zone_size: panel.last_exclusive_zone,
                     }));
                 }
+                // Auto-hide: slide every bar out of the output while the
+                // focused window is fullscreen, and give its strip back.
+                let hide = panel.config.auto_hide()
+                    && hypr::focused_is_fullscreen(panel.hypr.as_ref());
+                if hide != panel.bars_hidden {
+                    panel.bars_hidden = hide;
+                    let thickness = panel_thickness(&panel.config) as i32;
+                    let mut bars: Vec<(iced::window::Id, Option<String>)> =
+                        vec![(bar_id, panel.first_anchor.clone())];
+                    bars.extend(panel.bar_windows.iter().cloned());
+                    for (id, anchor) in bars {
+                        let edge = panel_anchor_for(&panel.config, anchor.as_deref());
+                        let margin = if hide {
+                            hidden_margin(edge, thickness)
+                        } else {
+                            Margin::default()
+                        };
+                        cmds.push(Command::done(Message::MarginChange { id, margin }));
+                        cmds.push(Command::done(Message::ExclusiveZoneChange {
+                            id,
+                            zone_size: if hide { 0 } else { thickness },
+                        }));
+                    }
+                }
+                // Glass: the surfaces were created with the right blur at
+                // startup; a reload that flips the tweak updates them.
+                let glass = panel.config.glass().is_some();
+                if glass != panel.last_glass {
+                    panel.last_glass = glass;
+                    let option = if glass {
+                        BlurOption::FullRegion
+                    } else {
+                        BlurOption::None
+                    };
+                    let mut ids = vec![bar_id];
+                    ids.extend(panel.bar_windows.iter().map(|(id, _)| *id));
+                    for id in ids {
+                        cmds.push(Command::done(Message::BlurOptionChange { id, option: option.clone() }));
+                    }
+                }
             }
             // An open graph popup dies with a reload too: its columns
             // were rebuilt underneath it (and its sensor may be gone).
@@ -1406,9 +1596,17 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             // The corner masks ride the same tick (roadmap angoli):
             // enable/radius/output changes reopen the squares cheaply.
             cmds.push(sync_corners(panel));
+            // The idle screensaver follows its tweak and the monitor
+            // list; while its overlay covers the outputs the readings
+            // are not drawn anywhere, so the pass is skipped.
+            cmds.push(screensaver::sync(panel));
             // The floating window menu follows its tweak the same way:
             // created on enable, closed on disable, re-placed on edits.
             cmds.push(window_menu::sync(panel));
+            // The volume/brightness OSD and the power menu close
+            // themselves after their linger.
+            cmds.push(osd::sync(panel));
+            cmds.push(power_menu::sync(panel));
             // The derived palette follows the same cadence: extracted
             // off-thread only when the wallpaper file changes, dropped
             // when the option turns off.
@@ -1417,7 +1615,7 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             // on a worker; its reply rebuilds the sections. A pass
             // already in flight covers this second — one at a time
             // keeps replies ordered.
-            if !panel.read_pending {
+            if !panel.read_pending && !panel.screensaver_on {
                 cmds.push(spawn_read(panel));
             }
             Command::batch(cmds)
@@ -1453,6 +1651,30 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             Command::none()
         }
         Message::IcedEvent(id, e) => {
+            // While locked, input never unlocks: only the password does.
+            // The prompt surface asks for keyboard focus when it opens.
+            if power_menu::is_window(panel, id)
+                && matches!(e, Event::Mouse(iced::mouse::Event::CursorLeft))
+            {
+                return power_menu::close(panel);
+            }
+            if power_menu::settled(panel)
+                && BAR_ID.get().copied() == Some(id)
+                && matches!(e, Event::Mouse(iced::mouse::Event::ButtonPressed { .. }))
+            {
+                return power_menu::close(panel);
+            }
+            if screensaver::is_window(panel, id) {
+                // The card appears on the first real input: until then
+                // the lock is just the grid.
+                if !panel.screensaver_prompt_open && screensaver::reveal_input(&e) {
+                    panel.screensaver_prompt_open = true;
+                    if screensaver::is_prompt(panel, id) {
+                        return screensaver::focus_input();
+                    }
+                }
+                return Command::none();
+            }
             // Mouse enter/leave/press are handled per-sensor by MouseArea,
             // which emits Message::SensorHovered / SensorPressed. The cursor
             // position itself is remembered for tray activation hints — but
@@ -1819,6 +2041,16 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
                     std::thread::spawn(sensors::keyboard_next_layout);
                     return Command::none();
                 }
+                Some(config::SensorSource::Lock {}) => {
+                    return screensaver::show(panel);
+                }
+                Some(config::SensorSource::Caffeine {}) => {
+                    panel.caffeine = !panel.caffeine;
+                    return Command::none();
+                }
+                Some(config::SensorSource::Power {}) => {
+                    return crate::power_menu::open(panel);
+                }
                 _ => {}
             }
             let action = action.filter(|a| !a.trim().is_empty());
@@ -1928,16 +2160,25 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
                 if let Some(device) = volume_device {
                     // Reflect the change on the bar right away (same math as
                     // the backend adjust); the next tick confirms it.
-                    if let Some(sensor_value) = panel
+                    let shown = panel
                         .sections
                         .get_mut(section_index)
                         .and_then(|sec| sec.sensors.get_mut(sensor_index))
-                    {
-                        if let Some(next) = sensors::next_volume(&sensor_value.value, up) {
+                        .and_then(|sensor_value| {
+                            let next = sensors::next_volume(&sensor_value.value, up)?;
                             sensor_value.value = format!("{next:.0}%");
-                        }
-                    }
+                            Some(sensor_value.value.clone())
+                        });
                     std::thread::spawn(move || sensors::adjust_volume(&device, up));
+                    // The OSD here, not from the next read: the bar already
+                    // shows the new value, so the read comparison sees no
+                    // change and the wheel used to miss its own popup.
+                    if let Some(value) = shown {
+                        let fraction = sensors::leading_number(&value)
+                            .map(|v| (v / 100.0).clamp(0.0, 1.0))
+                            .unwrap_or(0.0);
+                        return osd::show(panel, "Volume", &value, fraction);
+                    }
                 }
             }
             Command::none()
@@ -1952,7 +2193,14 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             {
                 sensor_value.value = format!("{percent:.0}%");
             }
-            Command::none()
+            // Same as the wheel: the bar pre-updates its value, so the OSD
+            // cannot wait for the next read to find a difference.
+            osd::show(
+                panel,
+                "Volume",
+                &format!("{percent:.0}%"),
+                percent / 100.0,
+            )
         }
         Message::VolumeCommitted(section_index, sensor_index) => {
             let device = panel
@@ -2210,6 +2458,94 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             panel.hovered = Some((section_index, sensor_index));
             hover_sync(panel, section_index, sensor_index, true)
         }
+        Message::Idle(idle) => {
+            if !idle {
+                // Input while locked does not unlock: the password does.
+                if panel.screensaver_on {
+                    return Command::none();
+                }
+                panel.screensaver_wait = false;
+                panel.screensaver_retry = None;
+                return Command::none();
+            }
+            if panel.config.screensaver().is_none() || panel.screensaver_on || panel.caffeine {
+                return Command::none();
+            }
+            // The overlay must not cover a fullscreen app or a playing
+            // video (even windowed): ask the compositor and MPRIS before
+            // opening anything.
+            panel.screensaver_wait = true;
+            panel.screensaver_retry = None;
+            Command::perform(
+                smol::unblock(|| {
+                    hypr::active_is_fullscreen() == Some(true) || playback::blocks_screensaver()
+                }),
+                Message::ScreensaverBlocked,
+            )
+        }
+        Message::ScreensaverBlocked(blocked) => {
+            if !panel.screensaver_wait || panel.screensaver_on {
+                return Command::none(); // superseded by a resume or a manual start
+            }
+            if blocked || panel.caffeine {
+                // A fullscreen app or a playing video: no overlay;
+                // `sync` checks again in a minute.
+                return Command::none();
+            }
+            screensaver::show(panel)
+        }
+        Message::ScreensaverManual => screensaver::show(panel),
+        Message::PowerAction(action) => {
+            let close = power_menu::close(panel);
+            let command = match action {
+                power_menu::Action::Lock => screensaver::show(panel),
+                power_menu::Action::Logout => spawn("hyprctl", &["dispatch", "exit"]),
+                power_menu::Action::Suspend => spawn("systemctl", &["suspend"]),
+                power_menu::Action::Reboot => spawn("systemctl", &["reboot"]),
+                power_menu::Action::Shutdown => spawn("systemctl", &["poweroff"]),
+            };
+            Command::batch([close, command])
+        }
+        Message::ScreensaverPasswordChanged(value) => {
+            panel.screensaver_password = value;
+            Command::none()
+        }
+        Message::ScreensaverSubmit => {
+            if !panel.screensaver_on || panel.screensaver_pending {
+                return Command::none();
+            }
+            let password = std::mem::take(&mut panel.screensaver_password);
+            if password.is_empty() {
+                return Command::none();
+            }
+            panel.screensaver_pending = true;
+            panel.screensaver_error = None;
+            Command::perform(
+                smol::unblock(move || auth::verify(&password)),
+                Message::ScreensaverAuthResult,
+            )
+        }
+        Message::ScreensaverAuthResult(result) => {
+            panel.screensaver_pending = false;
+            if !panel.screensaver_on {
+                return Command::none(); // unlocked by a previous attempt
+            }
+            match result {
+                Ok(()) => {
+                    panel.screensaver_password.clear();
+                    screensaver::close(panel)
+                }
+                Err(_) => {
+                    panel.screensaver_password.clear();
+                    panel.screensaver_error = Some("Wrong password".to_string());
+                    screensaver::focus_input()
+                }
+            }
+        }
+        Message::ScreensaverFrame => {
+            screensaver::advance(panel);
+            Command::none()
+        }
         Message::GraphPopupExited => {
             // The pointer left the surface: this exit is the fast
             // close, while the flag reset leaves the tick's reap ready
@@ -2311,6 +2647,18 @@ fn subscription(app: &App) -> Subscription<Message> {
         .as_ref()
         .is_some_and(|menu| menu.from.is_some())
         .then(|| time::every(window_menu::FRAME).map(|_| Message::WindowMenuFrame));
+    // The screensaver: its idle notification exists only while the
+    // tweak is on (disabled = no thread, no wake), its frames only while
+    // the overlay is up, its SIGUSR1 trigger only when it can be shown.
+    let saver_minutes = panel.config.screensaver();
+    let saver_idle = saver_minutes.map(idle::subscription);
+    // The SIGUSR1 handler is installed even when the tweak is off: the
+    // default disposition of that signal would terminate the bar (the
+    // setup's button and a stray `kill -USR1` must never do that).
+    let saver_signal = Some(screensaver::signal_subscription());
+    let saver_frames = panel
+        .screensaver_on
+        .then(|| time::every(screensaver::FRAME).map(|_| Message::ScreensaverFrame));
     Subscription::batch(
         [
             time::every(std::time::Duration::from_secs(1)).map(|_| Message::Tick),
@@ -2321,7 +2669,10 @@ fn subscription(app: &App) -> Subscription<Message> {
         .chain(notif_sub)
         .chain(effect_sub)
         .chain(menu_sub)
-        .chain(menu_frames),
+        .chain(menu_frames)
+        .chain(saver_idle)
+        .chain(saver_signal)
+        .chain(saver_frames),
     )
 }
 
@@ -2404,6 +2755,15 @@ fn bar_view<'a>(
         if cp.id == window {
             return calendar_popup_view(panel, cp);
         }
+    }
+    if power_menu::is_window(panel, window) {
+        return power_menu::view(panel);
+    }
+    if osd::is_window(panel, window) {
+        return osd::view(panel);
+    }
+    if screensaver::is_window(panel, window) {
+        return screensaver::view(panel, window);
     }
     if panel.popup == Some(window) {
         return popup_view(panel);
@@ -2568,7 +2928,8 @@ fn bar_view<'a>(
             let value_text = text(&s.value)
                 .color(value_color)
                 .size(font_size)
-                .font(value_font_obj);
+                .font(value_font_obj)
+                .line_height(iced::widget::text::LineHeight::Relative(1.2));
             let effect_value = s.effect
                 && matches!(value_effect, effects::UNDERLINE | effects::SHEEN);
             let value_width = if effect_value {
@@ -2588,7 +2949,7 @@ fn bar_view<'a>(
                 effects::underline(
                     value_text.into(),
                     value_width,
-                    (font_size as f32 * 1.3).max(1.0),
+                    (font_size as f32 * 1.2).max(1.0),
                     text_color,
                     effect_progress,
                 )
@@ -2596,7 +2957,7 @@ fn bar_view<'a>(
                 effects::sheen(
                     value_text.into(),
                     value_width,
-                    (font_size as f32 * 1.3).max(1.0),
+                    (font_size as f32 * 1.2).max(1.0),
                     text_color,
                     effect_progress,
                 )
@@ -2629,25 +2990,15 @@ fn bar_view<'a>(
             // panel, the screen along a horizontal bar's main axis (the
             // bar spans it) — net of the box's horizontal inset only (the
             // wrap runs along it).
-            // The pill inset, resolved once for both: workspace buttons,
-            // tray icons and taskbar slots are boxes themselves and fill
-            // the cross (thickness) axis — the icons take the whole row
-            // height there, the sensor padding would only squeeze them —
-            // so the box keeps that padding on the main axis alone, and
-            // the buttons drop it too (they carry it, roadmap2 #4).
-            // `vertical` swaps which axis is which; every other sensor
-            // keeps the padding on both axes. The dropped cross-axis part
-            // is what `icons::font_icon_edge` gives back to the icon.
-            let (pad_h, pad_v) = if s.workspaces.is_some() {
-                (0, 0)
-            } else if s.tray.is_some() || s.taskbar.is_some() {
-                if vertical {
-                    (0, s.padding)
-                } else {
-                    (s.padding, 0)
-                }
+            // The sensor's padding is horizontal only: the content is
+            // always centred on the thickness axis, whatever the box's
+            // size, so a large padding can never squeeze the text to
+            // nothing on a thin bar. Workspace buttons carry the inset
+            // themselves (roadmap2 #4), so their box drops it.
+            let pad_h = if s.workspaces.is_some() {
+                0
             } else {
-                (s.padding, s.padding)
+                s.padding
             };
             let icon_room = (if vertical {
                 panel_thickness(&panel.config)
@@ -2796,7 +3147,8 @@ fn bar_view<'a>(
                     let name_text = text(&s.name)
                         .color(text_color)
                         .size(font_size)
-                        .font(font_obj);
+                        .font(font_obj)
+                        .line_height(iced::widget::text::LineHeight::Relative(1.2));
                     if vertical {
                         let mut col = Column::new().push(name_text);
                         if show_value {
@@ -2823,7 +3175,8 @@ fn bar_view<'a>(
                 let desc_widget = text(desc_value)
                     .color(Color::from_rgba(0.5, 0.5, 0.5, 0.7))
                     .size(font_size.saturating_sub(2))
-                    .font(font_obj);
+                    .font(font_obj)
+                    .line_height(iced::widget::text::LineHeight::Relative(1.2));
                 Column::new().push(main).push(desc_widget).into()
             } else {
                 main
@@ -2836,14 +3189,13 @@ fn bar_view<'a>(
                 s.bg_color
             };
             let border_color = s.border_color;
-            // The pill inset resolved above (`pad_h`/`pad_v`): the rows
-            // that own their boxes fill the thickness axis, so their
-            // padding survives on the main axis only.
+            // Horizontal inset only; the box centres the content on the
+            // thickness axis by itself (see `styled_box`).
             let pad = iced::Padding {
                 left: pad_h as f32,
                 right: pad_h as f32,
-                top: pad_v as f32,
-                bottom: pad_v as f32,
+                top: 0.0,
+                bottom: 0.0,
             };
 
             // The wrapper only tags the box for `FindSensorRect`: same
@@ -2913,7 +3265,8 @@ fn bar_view<'a>(
             text(section.name.clone())
                 .color(title_color)
                 .size(font_size.saturating_add(2))
-                .font(font_obj),
+                .font(font_obj)
+                .line_height(iced::widget::text::LineHeight::Relative(1.2)),
         )
         .align_x(Alignment::Center)
         .padding(SECTION_CONTENT_PAD)
@@ -3261,7 +3614,7 @@ pub(crate) fn popup_style(config: &config::Config, pal: Option<&palette::Palette
 /// Card height for the surface math: 2×padding + five lines of font —
 /// the default style gives exactly the F3 geometry (2×12 + 5×12 = 84),
 /// so the stack stays click-exact for every style.
-fn popup_card_h(style: &PopupStyle) -> u32 {
+pub(crate) fn popup_card_h(style: &PopupStyle) -> u32 {
     2 * style.padding + 8 * style.font_size
 }
 
@@ -3641,6 +3994,24 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         wallpaper: Vec::new(),
                         wallpaper_hidden: Vec::new(),
                         corners: Vec::new(),
+                        screensaver: Vec::new(),
+                        screensaver_on: false,
+                        screensaver_start: None,
+                        screensaver_wait: false,
+                        screensaver_retry: None,
+                        screensaver_phases: Vec::new(),
+                        screensaver_last: None,
+                        screensaver_password: String::new(),
+                        screensaver_error: None,
+                        screensaver_pending: false,
+                        screensaver_prompt: None,
+                        screensaver_prompt_open: false,
+                        caffeine: false,
+                        bars_hidden: false,
+                        bar_windows: Vec::new(),
+                        last_glass: cfg.glass().is_some(),
+                        power_menu: None,
+                        osd: None,
                         palette: None,
                         palette_seed: None,
                         palette_key: None,
@@ -3669,9 +4040,10 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                             output_option: layout_output_option(&layout),
                             events_transparent: false,
                             namespace: Some(format!("piuma-{}", index + 1)),
-                            blur_option: Default::default(),
+                            blur_option: glass_blur(&cfg),
                         });
                         app.windows.insert(id, index);
+                        app.state.bar_windows.push((id, layout.anchor.clone()));
                         task = Command::batch([task, open]);
                     }
                     (app, task)
@@ -3691,6 +4063,7 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                     anchor: panel_anchor_for(&panel_config, layouts[0].anchor.as_deref()),
                     layer: Layer::Top,
                     start_mode: start_mode_for_layout(&layouts[0]),
+                    blur_option: glass_blur(&panel_config),
                     ..Default::default()
                 },
                 ..Default::default()

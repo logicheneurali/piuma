@@ -83,6 +83,16 @@ pub enum Message {
     BorderSizeChanged(i32),
     BorderActiveChanged(String),
     BorderInactiveChanged(String),
+    /// The idle screensaver: switch, delay, and the "show now" button.
+    ScreensaverEnabled(bool),
+    ScreensaverMinutesChanged(u32),
+    ScreensaverShow,
+    /// Glass: blur + bar alpha.
+    GlassEnabled(bool),
+    /// 5..=100, stored as 0.05..=1.0.
+    GlassOpacityChanged(i32),
+    /// Auto-hide while a fullscreen window has focus.
+    AutoHideEnabled(bool),
     /// Sidebar category switch (roadmap N4).
     TabSelected(Tab),
     ThicknessChanged(u32),
@@ -302,11 +312,11 @@ impl Tab {
     /// Sidebar order.
     pub(crate) const ALL: [Tab; 9] = [
         Tab::Panel,
-        Tab::Notifications,
         Tab::SectionDefaults,
         Tab::SensorDefaults,
         Tab::Sections,
         Tab::Wallpaper,
+        Tab::Notifications,
         Tab::AutostartApps,
         Tab::Layouts,
         Tab::Tweaks,
@@ -317,7 +327,10 @@ impl Tab {
     pub(crate) fn icon(self) -> &'static str {
         match self {
             Tab::Panel => "▤",
-            Tab::Notifications => "◍",
+            // Same font as the neighbouring glyphs (JetBrainsMono):
+            // the old ◍ fell back to Meslo, whose metrics sat the icon
+            // off the label's centre line.
+            Tab::Notifications => "◉",
             Tab::SensorDefaults => "◈",
             Tab::SectionDefaults => "◫",
             Tab::Sections => "≡",

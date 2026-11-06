@@ -699,7 +699,7 @@ pub(crate) fn sensor_view<'a>(
                 move |value| Message::SensorBorderRadiusChanged(section_index, sensor_index, value),
                 reset(Message::SensorBorderRadiusChanged(section_index, sensor_index, -1)),
             )),
-            ("Padding", slider_control_over(
+            ("Padding (h)", slider_control_over(
                 -1i32..=20,
                 sensor.padding.unwrap_or(-1),
                 state.field_err(&spath("padding")),
@@ -774,7 +774,7 @@ pub(crate) fn sensor_defaults_view(state: &PiumaSetup) -> Element<'_, Message> {
             ("Border Hover", color_control_over(d.border_color_hover.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.border_color_hover"), None, |value| Message::DefaultsStyleChanged("border_color_hover".to_string(), value), Some(Message::DefaultsStyleChanged("border_color_hover".to_string(), String::new())))),
             ("Border Width", slider_control_over(-1i32..=10, d.border_width.unwrap_or(-1), state.field_err("panel.sensor_defaults.border_width"), None, |value| Message::DefaultsNumberChanged("border_width".to_string(), value), Some(Message::DefaultsNumberChanged("border_width".to_string(), -1)))),
             ("Border Radius", slider_control_over(-1i32..=20, d.border_radius.unwrap_or(-1), state.field_err("panel.sensor_defaults.border_radius"), None, |value| Message::DefaultsNumberChanged("border_radius".to_string(), value), Some(Message::DefaultsNumberChanged("border_radius".to_string(), -1)))),
-            ("Padding", slider_control_over(-1i32..=20, d.padding.unwrap_or(-1), state.field_err("panel.sensor_defaults.padding"), None, |value| Message::DefaultsNumberChanged("padding".to_string(), value), Some(Message::DefaultsNumberChanged("padding".to_string(), -1)))),
+            ("Padding (h)", slider_control_over(-1i32..=20, d.padding.unwrap_or(-1), state.field_err("panel.sensor_defaults.padding"), None, |value| Message::DefaultsNumberChanged("padding".to_string(), value), Some(Message::DefaultsNumberChanged("padding".to_string(), -1)))),
             ("Border Type", invalid_under(
                 picklist(
                     border_type_options(),

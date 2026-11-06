@@ -1,0 +1,22 @@
+{
+  "name": "Bianco su verde",
+  "panel": {
+    "theme_mode": "dark",
+    "wallpaper_palette": false,
+    "default_bg_color": "#1f5f4bff",
+    "default_text_color": "#f1f7f3ff",
+    "sensor_defaults": {
+      "text_color": "#f1f7f3ff",
+      "text_color_hover": "#ffffffff",
+      "bg_color": "#276b55ff",
+      "bg_color_hover": "#2f7a62ff",
+      "border_color": "#4a8f76ff",
+      "border_color_hover": "#6aa78fff"
+    },
+    "section_defaults": {
+      "bg_color": "#1a5140ff",
+      "text_color": "#f1f7f3ff",
+      "border_color": "#4a8f76ff"
+    }
+  }
+}

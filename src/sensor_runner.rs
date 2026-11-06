@@ -347,6 +347,13 @@ pub fn run(source: &SensorSource, hypr: Option<&crate::hypr::Snapshot>) -> Read 
         // MPRIS state is read by the same background pass; no player
         // yields an empty value and the view hides the sensor.
         SensorSource::Media {} => plain(crate::mpris::display_value()),
+        // A trigger, not a reading: its value is empty, the name/icon is
+        // what the bar draws (the click locks, see `main::update`).
+        SensorSource::Lock {} => plain(String::new()),
+        // Also a trigger: the state text comes from `apply_read`
+        // (the runner cannot see the panel's toggle).
+        SensorSource::Caffeine {} => plain("off".to_string()),
+        SensorSource::Power {} => plain(String::new()),
         // Tray items carry no text: the icons come from the shared tray
         // state (see `tray.rs`), rendered by the view directly.
         SensorSource::Tray {} => plain(String::new()),

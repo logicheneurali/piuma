@@ -753,6 +753,59 @@ fn dynamic_gaps_tweaks_roundtrip() {
     assert!(config::validate_config(&clamped).is_empty());
 }
 
+/// The screensaver block: first touch seeds the bar's defaults (off, 10
+/// minutes), the delay is clamped to 1..=120, and the saved shape parses
+/// back into the bar's own config.
+#[test]
+fn screensaver_tweaks_roundtrip() {
+    let mut s = test_state();
+    let json: JsonValue = serde_json::from_str(&s.serialize().unwrap()).unwrap();
+    assert!(json["panel"].get("tweaks").is_none(), "absent until touched");
+
+    let _ = update(&mut s, Message::ScreensaverEnabled(true));
+    let saved = s.serialize().unwrap();
+    let parsed: config::Config = serde_json::from_str(&saved).unwrap();
+    assert_eq!(
+        parsed.panel.tweaks.as_ref().and_then(|t| t.screensaver.as_ref()).map(|v| (v.enabled, v.minutes)),
+        Some((true, 10)),
+        "first touch seeds the bar's defaults"
+    );
+
+    let _ = update(&mut s, Message::ScreensaverMinutesChanged(45));
+    let _ = update(&mut s, Message::ScreensaverMinutesChanged(999));
+    let parsed: config::Config = serde_json::from_str(&s.serialize().unwrap()).unwrap();
+    let saver = parsed
+        .panel
+        .tweaks
+        .as_ref()
+        .and_then(|t| t.screensaver.as_ref())
+        .expect("the block must reach the bar");
+    assert!(saver.enabled);
+    assert_eq!(saver.minutes, 120, "clamped to the bar's range");
+    assert!(config::validate_config(&parsed).is_empty());
+}
+
+/// Glass and auto-hide: first touch seeds the bar's defaults, the
+/// opacity round-trips as 0.05..1.0, and both parse back into the bar.
+#[test]
+fn glass_and_auto_hide_roundtrip() {
+    let mut s = test_state();
+    let _ = update(&mut s, Message::GlassEnabled(true));
+    let _ = update(&mut s, Message::GlassOpacityChanged(60));
+    let _ = update(&mut s, Message::AutoHideEnabled(true));
+    let parsed: config::Config = serde_json::from_str(&s.serialize().unwrap()).unwrap();
+    let tweaks = parsed.panel.tweaks.as_ref().expect("tweaks");
+    let glass = tweaks.glass.as_ref().expect("glass");
+    assert!(glass.enabled);
+    assert!((glass.opacity - 0.60).abs() < 1e-6);
+    assert!(tweaks.auto_hide.as_ref().expect("auto_hide").enabled);
+    assert!(config::validate_config(&parsed).is_empty());
+
+    let _ = update(&mut s, Message::GlassOpacityChanged(1000));
+    let parsed: config::Config = serde_json::from_str(&s.serialize().unwrap()).unwrap();
+    assert_eq!(parsed.panel.tweaks.unwrap().glass.unwrap().opacity, 1.0);
+}
+
 /// The footer's reload hint watches the root `panels` value: a changed
 /// panel set needs the bar restarted, everything else hot-reloads.
 #[test]

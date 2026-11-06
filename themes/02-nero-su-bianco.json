@@ -1,0 +1,22 @@
+{
+  "name": "Nero su bianco",
+  "panel": {
+    "theme_mode": "light",
+    "wallpaper_palette": false,
+    "default_bg_color": "#eeeeeeff",
+    "default_text_color": "#111111ff",
+    "sensor_defaults": {
+      "text_color": "#111111ff",
+      "text_color_hover": "#000000ff",
+      "bg_color": "#e2e2e2ff",
+      "bg_color_hover": "#d4d4d4ff",
+      "border_color": "#b9b9b9ff",
+      "border_color_hover": "#8f8f8fff"
+    },
+    "section_defaults": {
+      "bg_color": "#f6f6f6ff",
+      "text_color": "#111111ff",
+      "border_color": "#b9b9b9ff"
+    }
+  }
+}

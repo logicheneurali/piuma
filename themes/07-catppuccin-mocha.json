@@ -1,0 +1,22 @@
+{
+  "name": "Catppuccin Mocha",
+  "panel": {
+    "theme_mode": "dark",
+    "wallpaper_palette": false,
+    "default_bg_color": "#1e1e2eff",
+    "default_text_color": "#cdd6f4ff",
+    "sensor_defaults": {
+      "text_color": "#cdd6f4ff",
+      "text_color_hover": "#f5e0dcff",
+      "bg_color": "#313244ff",
+      "bg_color_hover": "#45475aff",
+      "border_color": "#89b4faff",
+      "border_color_hover": "#b4befe"
+    },
+    "section_defaults": {
+      "bg_color": "#181825ff",
+      "text_color": "#cdd6f4ff",
+      "border_color": "#45475aff"
+    }
+  }
+}

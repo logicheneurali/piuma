@@ -1,0 +1,22 @@
+{
+  "name": "Nord",
+  "panel": {
+    "theme_mode": "dark",
+    "wallpaper_palette": false,
+    "default_bg_color": "#2e3440ff",
+    "default_text_color": "#eceff4ff",
+    "sensor_defaults": {
+      "text_color": "#eceff4ff",
+      "text_color_hover": "#eceff4ff",
+      "bg_color": "#3b4252ff",
+      "bg_color_hover": "#434c5eff",
+      "border_color": "#88c0d0ff",
+      "border_color_hover": "#8fbcbbff"
+    },
+    "section_defaults": {
+      "bg_color": "#292e39ff",
+      "text_color": "#eceff4ff",
+      "border_color": "#4c566aff"
+    }
+  }
+}

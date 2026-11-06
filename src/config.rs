@@ -252,6 +252,88 @@ pub struct TweaksConfig {
     /// Hyprland's window borders (`general:border_size`, `general:col`).
     #[serde(default)]
     pub borders: Option<BordersConfig>,
+    /// The idle screensaver: full-screen palette rectangles after
+    /// `minutes` of inactivity, dismissed by any input.
+    #[serde(default)]
+    pub screensaver: Option<ScreensaverConfig>,
+    /// Frosted glass: blur behind the bar and its popups, with the bar's
+    /// background alpha lowered so the blur shows.
+    #[serde(default)]
+    pub glass: Option<GlassConfig>,
+    /// Hide the bar while the focused window is fullscreen.
+    #[serde(default)]
+    pub auto_hide: Option<AutoHideConfig>,
+}
+
+/// `panel.tweaks.glass`: compositor blur (`ext-background-effect-v1`)
+/// behind piuma's surfaces. `opacity` is the bar background's alpha
+/// while the tweak is on (0.05..=1.0).
+#[derive(Deserialize, serde::Serialize, Clone)]
+pub struct GlassConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_glass_opacity")]
+    pub opacity: f32,
+}
+
+fn default_glass_opacity() -> f32 {
+    0.35
+}
+
+/// `panel.tweaks.auto_hide`: the bar slides out of the output while the
+/// focused window is fullscreen, and the reserved strip goes with it.
+#[derive(Deserialize, serde::Serialize, Clone)]
+pub struct AutoHideConfig {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+/// `panel.tweaks.screensaver`: full-screen overlay after an idle period.
+/// It never starts while the active window is fullscreen, and it does
+/// not lock the session (a lock needs hyprlock and its own listener).
+#[derive(Deserialize, serde::Serialize, Clone)]
+pub struct ScreensaverConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Idle minutes before the overlay appears (1..=120).
+    #[serde(default = "default_screensaver_minutes")]
+    pub minutes: u32,
+}
+
+fn default_screensaver_minutes() -> u32 {
+    10
+}
+
+impl Config {
+    /// The bar background's alpha while the glass tweak is on, else
+    /// `None`.
+    pub fn glass(&self) -> Option<f32> {
+        self.panel
+            .tweaks
+            .as_ref()
+            .and_then(|t| t.glass.as_ref())
+            .filter(|g| g.enabled)
+            .map(|g| g.opacity.clamp(0.05, 1.0))
+    }
+
+    /// Whether the bar hides itself while a fullscreen window has focus.
+    pub fn auto_hide(&self) -> bool {
+        self.panel
+            .tweaks
+            .as_ref()
+            .and_then(|t| t.auto_hide.as_ref())
+            .is_some_and(|a| a.enabled)
+    }
+
+    /// The screensaver is on and has a usable delay.
+    pub fn screensaver(&self) -> Option<u32> {
+        self.panel
+            .tweaks
+            .as_ref()
+            .and_then(|t| t.screensaver.as_ref())
+            .filter(|s| s.enabled)
+            .map(|s| s.minutes.clamp(1, 120))
+    }
 }
 
 /// `panel.tweaks.borders`: the border every window gets. While the block
@@ -746,6 +828,20 @@ pub enum SensorSource {
     /// named by their window set.
     #[serde(rename = "layout")]
     Layout {},
+    /// Lock screen trigger: the sensor shows its name or icon, and a
+    /// click locks every output with the password overlay (PAM). No
+    /// value, no configured action: the click *is* the action.
+    #[serde(rename = "lock")]
+    Lock {},
+    /// Idle-inhibit toggle: "on" while piuma's lock screen must stay
+    /// away; clicking flips it. No compositor inhibitor is created —
+    /// only piuma's own idle lock consults it.
+    #[serde(rename = "caffeine")]
+    Caffeine {},
+    /// Power menu trigger: clicking opens lock/logout/suspend/reboot/
+    /// shutdown next to the bar.
+    #[serde(rename = "power")]
+    Power {},
 }
 
 // ── defaults ────────────────────────────────────────────────────────
@@ -1032,6 +1128,25 @@ pub fn validate_config(cfg: &Config) -> Vec<ConfigError> {
         }
         err_color(&mut errors, &format!("{path}.color"), Some(&s.color));
         err_color(&mut errors, &format!("{path}.color_inactive"), Some(&s.color_inactive));
+    }
+
+    if let Some(g) = p.tweaks.as_ref().and_then(|t| t.glass.as_ref()) {
+        if !(0.05..=1.0).contains(&g.opacity) {
+            errors.push(ConfigError {
+                path: "panel.tweaks.glass.opacity".to_string(),
+                message: format!("{}: expected 0.05..=1", g.opacity),
+            });
+        }
+    }
+
+    if let Some(s) = p.tweaks.as_ref().and_then(|t| t.screensaver.as_ref()) {
+        err_range_u32(
+            &mut errors,
+            "panel.tweaks.screensaver.minutes",
+            Some(s.minutes),
+            1,
+            120,
+        );
     }
 
     if let Some(d) = &p.sensor_defaults {
@@ -1323,6 +1438,107 @@ pub fn save_config(path: &std::path::Path, config: &Config) -> std::io::Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shipped theme fragments: a `name` plus the colour keys the
+    /// theme picker will merge into `panel`. Every colour parses and the
+    /// text stays readable on the bar and on the sensor pills (WCAG
+    /// 4.5:1), so the picker never offers an unreadable combination.
+    #[test]
+    fn shipped_themes_are_valid_and_readable() {
+        #[derive(serde::Deserialize)]
+        struct Theme {
+            name: String,
+            panel: ThemePanel,
+        }
+        #[derive(serde::Deserialize)]
+        struct ThemePanel {
+            theme_mode: Option<String>,
+            wallpaper_palette: Option<bool>,
+            default_bg_color: Option<String>,
+            default_text_color: Option<String>,
+            sensor_defaults: SensorDefaults,
+            section_defaults: SectionDefaults,
+        }
+
+        let files: [&str; 10] = [
+            include_str!("../themes/01-bianco-su-nero.json"),
+            include_str!("../themes/02-nero-su-bianco.json"),
+            include_str!("../themes/03-nero-su-arancione.json"),
+            include_str!("../themes/04-bianco-su-verde.json"),
+            include_str!("../themes/05-ciano-su-blu-scuro.json"),
+            include_str!("../themes/06-dracula.json"),
+            include_str!("../themes/07-catppuccin-mocha.json"),
+            include_str!("../themes/08-gruvbox-dark.json"),
+            include_str!("../themes/09-nord.json"),
+            include_str!("../themes/10-tokyo-night.json"),
+        ];
+        for json in files {
+            let theme: Theme =
+                serde_json::from_str(json).unwrap_or_else(|e| panic!("theme parse: {e}"));
+            let name = &theme.name;
+            let p = &theme.panel;
+            assert!(p.wallpaper_palette != Some(true), "{name}: palette must stay off");
+            assert!(
+                matches!(p.theme_mode.as_deref(), Some("dark" | "light")),
+                "{name}: theme_mode"
+            );
+            let colour = |value: &Option<String>, what: &str| {
+                parse_color(value.as_deref().unwrap_or_else(|| panic!("{name}: missing {what}")))
+                    .unwrap_or_else(|e| panic!("{name}: {what}: {e}"))
+            };
+            let bg = colour(&p.default_bg_color, "bar bg");
+            let fg = colour(&p.default_text_color, "bar text");
+            assert!(
+                contrast(bg, fg) >= 4.5,
+                "{name}: bar contrast {}",
+                contrast(bg, fg)
+            );
+            let s = &p.sensor_defaults;
+            let (sbg, stx) = (
+                colour(&s.bg_color, "pill bg"),
+                colour(&s.text_color, "pill text"),
+            );
+            assert!(
+                contrast(sbg, stx) >= 4.5,
+                "{name}: pill contrast {}",
+                contrast(sbg, stx)
+            );
+            // Every other colour the theme sets must parse too.
+            for (value, what) in [
+                (&s.text_color_hover, "pill hover text"),
+                (&s.bg_color_hover, "pill hover bg"),
+                (&s.border_color, "pill border"),
+                (&s.border_color_hover, "pill hover border"),
+            ] {
+                let _ = colour(value, what);
+            }
+            let sd = &p.section_defaults;
+            for (value, what) in [
+                (&sd.bg_color, "section bg"),
+                (&sd.text_color, "section text"),
+                (&sd.border_color, "section border"),
+            ] {
+                let _ = colour(value, what);
+            }
+        }
+    }
+
+    /// WCAG relative-luminance contrast between two opaque colours.
+    fn contrast(a: Color, b: Color) -> f32 {
+        let lum = |c: Color| {
+            let channel = |v: f32| {
+                if v <= 0.03928 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b)
+        };
+        let (l1, l2) = (lum(a), lum(b));
+        let (hi, lo) = if l1 > l2 { (l1, l2) } else { (l2, l1) };
+        (hi + 0.05) / (lo + 0.05)
+    }
 
     /// The shipped default is the embedded file, not the built-in
     /// fallback: a broken embed must fail here instead of silently
@@ -1866,6 +2082,56 @@ mod tests {
         for path in ["panel.tweaks.borders.size", "panel.tweaks.borders.active"] {
             assert!(errors.iter().any(|e| e.path == path), "missing {path}");
         }
+    }
+
+    /// The screensaver block: absent fields take the bar's defaults (off,
+    /// 10 minutes), the delay validates 1..=120, and the runtime helper
+    /// clamps a hand-edited value instead of trusting it.
+    #[test]
+    fn screensaver_tweaks_parse_validate_and_clamp() {
+        let mut cfg = default_config();
+        assert_eq!(cfg.screensaver(), None, "absent block: no screen saver");
+
+        let parsed: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[],"tweaks":{"screensaver":{"enabled":true}}}}"#,
+        )
+        .expect("screensaver must parse");
+        let saver = parsed
+            .panel
+            .tweaks
+            .as_ref()
+            .and_then(|t| t.screensaver.as_ref())
+            .expect("screensaver");
+        assert!(saver.enabled);
+        assert_eq!(saver.minutes, 10, "the bar's default delay");
+        assert_eq!(parsed.screensaver(), Some(10));
+        assert!(validate_config(&parsed).is_empty());
+
+        cfg.panel.tweaks = Some(TweaksConfig {
+            dynamic_gaps: None,
+            window_menu: None,
+            shadows: None,
+            borders: None,
+            screensaver: Some(ScreensaverConfig {
+                enabled: true,
+                minutes: 0,
+            }),
+            glass: None,
+            auto_hide: None,
+        });
+        assert!(
+            validate_config(&cfg)
+                .iter()
+                .any(|e| e.path == "panel.tweaks.screensaver.minutes"),
+            "0 minutes is a config error"
+        );
+        assert_eq!(cfg.screensaver(), Some(1), "the runtime clamps it");
+
+        cfg.panel.tweaks.as_mut().unwrap().screensaver = Some(ScreensaverConfig {
+            enabled: false,
+            minutes: 30,
+        });
+        assert_eq!(cfg.screensaver(), None, "disabled means off");
     }
 
     /// The shadow block: absent fields take Hyprland's own defaults, and

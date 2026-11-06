@@ -22,6 +22,21 @@ fn bar_binary() -> Result<PathBuf, String> {
         .ok_or_else(|| format!("piuma not found next to piuma-setup ({})", bar.display()))
 }
 
+/// Ask the running bar to show its screensaver now: `SIGUSR1` reaches
+/// the signal subscription (see `screensaver::signal_subscription`), so
+/// the overlay appears without waiting for the idle timer.
+pub(crate) fn trigger_screensaver() -> Result<(), String> {
+    let out = Command::new("pkill")
+        .args(["-USR1", "-x", "piuma"])
+        .output()
+        .map_err(|e| format!("cannot signal piuma: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err("piuma is not running".to_string())
+    }
+}
+
 /// Restart the bar with `config`. A no-op wait for a bar that was not
 /// running: the button doubles as "start it".
 pub(crate) fn reload(config: PathBuf) -> Result<(), String> {

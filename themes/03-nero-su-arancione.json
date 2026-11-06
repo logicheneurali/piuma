@@ -1,0 +1,22 @@
+{
+  "name": "Nero su arancione",
+  "panel": {
+    "theme_mode": "dark",
+    "wallpaper_palette": false,
+    "default_bg_color": "#c47a3aff",
+    "default_text_color": "#1a120bff",
+    "sensor_defaults": {
+      "text_color": "#1a120bff",
+      "text_color_hover": "#000000ff",
+      "bg_color": "#cf8a4eff",
+      "bg_color_hover": "#d99a63ff",
+      "border_color": "#9c5f28ff",
+      "border_color_hover": "#7a491cff"
+    },
+    "section_defaults": {
+      "bg_color": "#b96f33ff",
+      "text_color": "#1a120bff",
+      "border_color": "#9c5f28ff"
+    }
+  }
+}

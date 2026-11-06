@@ -1,0 +1,22 @@
+{
+  "name": "Tokyo Night",
+  "panel": {
+    "theme_mode": "dark",
+    "wallpaper_palette": false,
+    "default_bg_color": "#1a1b26ff",
+    "default_text_color": "#c0caf5ff",
+    "sensor_defaults": {
+      "text_color": "#c0caf5ff",
+      "text_color_hover": "#c0caf5ff",
+      "bg_color": "#24283bff",
+      "bg_color_hover": "#414868ff",
+      "border_color": "#7aa2f7ff",
+      "border_color_hover": "#bb9af7ff"
+    },
+    "section_defaults": {
+      "bg_color": "#16161eff",
+      "text_color": "#c0caf5ff",
+      "border_color": "#414868ff"
+    }
+  }
+}

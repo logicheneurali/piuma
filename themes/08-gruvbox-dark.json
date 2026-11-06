@@ -1,0 +1,22 @@
+{
+  "name": "Gruvbox Dark",
+  "panel": {
+    "theme_mode": "dark",
+    "wallpaper_palette": false,
+    "default_bg_color": "#282828ff",
+    "default_text_color": "#ebdbb2ff",
+    "sensor_defaults": {
+      "text_color": "#ebdbb2ff",
+      "text_color_hover": "#fbf1c7ff",
+      "bg_color": "#3c3836ff",
+      "bg_color_hover": "#504945ff",
+      "border_color": "#d79921ff",
+      "border_color_hover": "#fabd2fff"
+    },
+    "section_defaults": {
+      "bg_color": "#1d2021ff",
+      "text_color": "#ebdbb2ff",
+      "border_color": "#504945ff"
+    }
+  }
+}

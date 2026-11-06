@@ -109,7 +109,12 @@ pub fn row<'a>(
                 (Some(style.bg_color), style.text_color)
             };
             let label = crate::styled_box(
-                text(&ws.name).color(fg).size(font_size).font(font).into(),
+                text(&ws.name)
+                    .color(fg)
+                    .size(font_size)
+                    .font(font)
+                    .line_height(iced::widget::text::LineHeight::Relative(1.2))
+                    .into(),
                 bg,
                 style.border_color,
                 style.border_width,
@@ -117,7 +122,14 @@ pub fn row<'a>(
                 &style.border_type,
                 // Sensors sit inside sections: never on a screen edge.
                 [false, false, false, false],
-                iced::Padding::from(style.padding),
+                // Same rule as the sensor boxes: padding on the horizontal
+                // axis only, the label centres itself vertically.
+                iced::Padding {
+                    left: style.padding as f32,
+                    right: style.padding as f32,
+                    top: 0.0,
+                    bottom: 0.0,
+                },
                 Length::Shrink,
                 Length::Shrink,
             );

@@ -33,6 +33,18 @@ pub(crate) fn display_value() -> String {
     selected().map(|player| format_player(&player)).unwrap_or_default()
 }
 
+/// Whether any player is playing right now: the idle screensaver stays
+/// off while media runs, so a windowed video (not fullscreen, no idle
+/// inhibitor) is never covered. MPRIS is the one cross-player signal;
+/// the trade-off is that music blocks it too.
+pub(crate) fn any_playing() -> bool {
+    any_playing_in(&players())
+}
+
+fn any_playing_in(players: &[Player]) -> bool {
+    players.iter().any(|player| player.status == "Playing")
+}
+
 pub(crate) fn play_pause() {
     call("PlayPause", |_| true);
 }
@@ -242,6 +254,19 @@ mod tests {
         );
         assert_eq!(text, expected);
         assert!(text.starts_with("⏵  "));
+    }
+
+    /// The screensaver gate: any player mid-playback blocks it, paused
+    /// or stopped players do not (the browser keeps them listed).
+    #[test]
+    fn any_playing_catches_a_playing_player() {
+        assert!(!any_playing_in(&[]));
+        assert!(!any_playing_in(&[player("a", "Paused", "A", "")]));
+        assert!(!any_playing_in(&[player("a", "Stopped", "A", "")]));
+        assert!(any_playing_in(&[
+            player("a", "Paused", "A", ""),
+            player("b", "Playing", "B", ""),
+        ]));
     }
 
     #[test]

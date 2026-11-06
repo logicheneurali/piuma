@@ -1,0 +1,22 @@
+{
+  "name": "Ciano su blu scuro",
+  "panel": {
+    "theme_mode": "dark",
+    "wallpaper_palette": false,
+    "default_bg_color": "#0e2238ff",
+    "default_text_color": "#7fe3ffff",
+    "sensor_defaults": {
+      "text_color": "#7fe3ffff",
+      "text_color_hover": "#b5f2ffff",
+      "bg_color": "#123049ff",
+      "bg_color_hover": "#17405fff",
+      "border_color": "#2a6f8fff",
+      "border_color_hover": "#3f8fb3ff"
+    },
+    "section_defaults": {
+      "bg_color": "#0a1c2eff",
+      "text_color": "#7fe3ffff",
+      "border_color": "#2a6f8fff"
+    }
+  }
+}

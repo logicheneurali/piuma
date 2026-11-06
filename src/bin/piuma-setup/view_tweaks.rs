@@ -3,13 +3,13 @@
 //! of Hyprland (`panel.tweaks.dynamic_gaps`) and the floating
 //! window-actions menu (`panel.tweaks.window_menu`).
 
-use iced::widget::{column, pick_list, text, toggler, Row, Slider};
+use iced::widget::{button, column, pick_list, text, toggler, Row, Slider};
 use iced::{Alignment, Element, Length};
 
 use crate::controls::{color_control, form_grid, invalid_under, slider_control};
 use crate::model::{
-    window_menu_label, BordersCfg, ShadowsCfg, BORDER_ACTIVE, BORDER_INACTIVE, SHADOW_COLOR,
-    SHADOW_COLOR_INACTIVE, WINDOW_MENU_POSITIONS,
+    window_menu_label, AutoHideCfg, BordersCfg, GlassCfg, ScreensaverCfg, ShadowsCfg,
+    BORDER_ACTIVE, BORDER_INACTIVE, SHADOW_COLOR, SHADOW_COLOR_INACTIVE, WINDOW_MENU_POSITIONS,
 };
 use crate::state::{Message, PiumaSetup};
 use crate::style::*;
@@ -67,6 +67,9 @@ pub(crate) fn tweaks_settings(state: &PiumaSetup) -> Element<'_, Message> {
         window_menu_card(state, pal),
         shadows_card(state, pal),
         borders_card(state, pal),
+        screensaver_card(state, pal),
+        glass_card(state, pal),
+        auto_hide_card(state, pal),
     ]
     .spacing(12)
     .width(Length::Fill)
@@ -367,6 +370,118 @@ fn borders_card(state: &PiumaSetup, pal: Palette) -> Element<'_, Message> {
             )
             .size(BODY)
             .style(muted_text(pal)),
+        ]
+        .spacing(10)
+        .width(Length::Fill),
+    )
+    .into()
+}
+
+/// `panel.tweaks.screensaver`: the idle overlay, its delay and a button
+/// that shows it now (SIGUSR1 to the bar).
+fn screensaver_card(state: &PiumaSetup, pal: Palette) -> Element<'_, Message> {
+    let saver = state
+        .config
+        .tweaks
+        .as_ref()
+        .and_then(|t| t.screensaver.as_ref());
+    let enabled = saver.is_some_and(|s| s.enabled);
+    // Absent block = the bar's defaults (off, 10 minutes).
+    let d = ScreensaverCfg::default();
+    let minutes = saver.map_or(d.minutes, |s| s.minutes) as i32;
+    card(
+        pal,
+        column![
+            text("Screensaver").size(16).style(fg_text(pal)),
+            toggler(enabled)
+                .label("After the idle delay, cover the outputs with palette rectangles")
+                .on_toggle(Message::ScreensaverEnabled),
+            invalid_under(
+                form_grid(vec![(
+                    "Idle minutes",
+                    slider_control(
+                        1..=120,
+                        minutes,
+                        state.field_err("panel.tweaks.screensaver.minutes"),
+                        |value| Message::ScreensaverMinutesChanged(value as u32),
+                    ),
+                )]),
+                None,
+            ),
+            button(text("Lock now").size(BODY))
+                .on_press(Message::ScreensaverShow)
+                .padding(10)
+                .style(move |t, s| btn_secondary(pal, t, s)),
+            text(
+                "Locks the screen after the idle delay with a palette grid, unlocked by your \
+                 session password (no hyprlock needed). A `lock` sensor locks at once; it \
+                 stays off while a window is fullscreen or a video is playing."
+            )
+            .size(BODY)
+            .style(muted_text(pal)),
+        ]
+        .spacing(10)
+        .width(Length::Fill),
+    )
+    .into()
+}
+
+/// `panel.tweaks.glass`: compositor blur behind the bar, with the bar
+/// alpha that lets it show.
+fn glass_card(state: &PiumaSetup, pal: Palette) -> Element<'_, Message> {
+    let glass = state.config.tweaks.as_ref().and_then(|t| t.glass.as_ref());
+    let enabled = glass.is_some_and(|g| g.enabled);
+    let d = GlassCfg::default();
+    let opacity = (glass.map_or(d.opacity, |g| g.opacity) * 100.0).round() as i32;
+    card(
+        pal,
+        column![
+            text("Glass").size(16).style(fg_text(pal)),
+            toggler(enabled)
+                .label("Blur behind the bar and its popups")
+                .on_toggle(Message::GlassEnabled),
+            invalid_under(
+                form_grid(vec![(
+                    "Bar opacity",
+                    slider_control(
+                        5..=100,
+                        opacity,
+                        state.field_err("panel.tweaks.glass.opacity"),
+                        Message::GlassOpacityChanged,
+                    ),
+                )]),
+                None,
+            ),
+            text("Uses the compositor's own blur; the bar's background keeps its colour at the chosen opacity.")
+                .size(BODY)
+                .style(muted_text(pal)),
+        ]
+        .spacing(10)
+        .width(Length::Fill),
+    )
+    .into()
+}
+
+/// `panel.tweaks.auto_hide`: the bar leaves the screen while a
+/// fullscreen window has focus.
+fn auto_hide_card(state: &PiumaSetup, pal: Palette) -> Element<'_, Message> {
+    let enabled = state
+        .config
+        .tweaks
+        .as_ref()
+        .and_then(|t| t.auto_hide.as_ref())
+        .is_some_and(|a| a.enabled);
+    let _ = AutoHideCfg::default();
+    card(
+        pal,
+        column![
+            text("Auto-hide").size(16).style(fg_text(pal)),
+            toggler(enabled)
+                .label("Hide the bar while a fullscreen window has focus")
+                .on_toggle(Message::AutoHideEnabled),
+            text("The reserved strip is given back to the window; the bar returns when fullscreen ends.")
+                .size(BODY)
+                .style(muted_text(pal)),
         ]
         .spacing(10)
         .width(Length::Fill),

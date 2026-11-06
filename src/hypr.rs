@@ -49,6 +49,33 @@ pub(crate) fn fresh_clients() -> Option<Vec<windows::WinRow>> {
     fetch("clients").map(|json| windows::parse_clients(&json))
 }
 
+/// Whether the focused window is fullscreen, from the shared snapshot
+/// (no fork): the auto-hide tweak reads it every tick.
+pub fn focused_is_fullscreen(snapshot: Option<&Snapshot>) -> bool {
+    snapshot
+        .and_then(|s| s.clients.as_deref())
+        .unwrap_or(&[])
+        .iter()
+        .any(|row| row.focused && row.fullscreen)
+}
+
+/// Whether the focused window is fullscreen (1 = within the gaps, 2 =
+/// bare): the idle screensaver stays off then, so a game or a video
+/// that does not inhibit idle is never covered. `None` when the
+/// compositor cannot answer — the caller treats it as "not fullscreen",
+/// an unreachable compositor must not disable the feature silently.
+pub fn active_is_fullscreen() -> Option<bool> {
+    let json = fetch("activewindow")?;
+    parse_fullscreen(&json)
+}
+
+/// `fullscreen` (0/1/2) of the `activewindow` document: missing keys
+/// mean no focused window, which is not fullscreen.
+fn parse_fullscreen(json: &str) -> Option<bool> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    Some(v.get("fullscreen").and_then(|f| f.as_u64()).unwrap_or(0) != 0)
+}
+
 /// `hyprctl <cmd> -j` stdout, or `None` when the command fails (the
 /// sensor's own "no data" path).
 fn fetch(cmd: &str) -> Option<String> {
@@ -101,6 +128,56 @@ mod tests {
         assert_eq!(names, vec!["1", "10", "mail"]);
         assert!(parse_workspaces("not json at all").is_none());
         assert!(parse_workspaces("[]").unwrap().is_empty());
+    }
+
+    /// The snapshot check for auto-hide: the focused row must be
+    /// fullscreen, a fullscreen window that is not focused must not hide
+    /// the bar.
+    #[test]
+    fn focused_fullscreen_reads_the_focused_row() {
+        let row = |focused: bool, fullscreen: bool| crate::windows::WinRow {
+            address: "0x1".into(),
+            class: "app".into(),
+            title: "t".into(),
+            workspace: "1".into(),
+            focused,
+            x: 0,
+            y: 0,
+            w: 10,
+            h: 10,
+            floating: false,
+            fullscreen,
+            visible: true,
+            pinned: false,
+        };
+        assert!(!focused_is_fullscreen(None));
+        assert!(!focused_is_fullscreen(Some(&Snapshot {
+            clients: Some(vec![row(true, false)]),
+            ..Default::default()
+        })));
+        assert!(focused_is_fullscreen(Some(&Snapshot {
+            clients: Some(vec![row(true, true)]),
+            ..Default::default()
+        })));
+        assert!(
+            !focused_is_fullscreen(Some(&Snapshot {
+                clients: Some(vec![row(false, true)]),
+                ..Default::default()
+            })),
+            "a fullscreen window without focus keeps the bar"
+        );
+    }
+
+    /// Only the focused window's `fullscreen` matters: 1 and 2 both
+    /// count, a missing key (no focused window) does not, and a
+    /// document that is not JSON yields `None`.
+    #[test]
+    fn fullscreen_comes_from_the_active_window() {
+        assert_eq!(parse_fullscreen(r#"{"fullscreen":0}"#), Some(false));
+        assert_eq!(parse_fullscreen(r#"{"fullscreen":1}"#), Some(true));
+        assert_eq!(parse_fullscreen(r#"{"fullscreen":2}"#), Some(true));
+        assert_eq!(parse_fullscreen("{}"), Some(false), "no window");
+        assert_eq!(parse_fullscreen("not json"), None);
     }
 
     /// `activeworkspace -j` → its name; junk yields none.
