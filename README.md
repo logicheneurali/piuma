@@ -63,7 +63,7 @@ The active theme is saved in its own file,
 `~/.config/piuma/theme.json`):
 
 ```json
-{ "theme": "viola-su-grafite" }
+{ "theme": "purple-on-graphite" }
 ```
 
 **`piuma.json` is never rewritten** by a theme switch: the bar reads
@@ -77,7 +77,7 @@ The fragment format (also documented in `themes/README.md`):
 
 ```json
 {
-  "name": "Viola su grafite",
+  "name": "Purple on graphite",
   "panel": {
     "theme_mode": "dark",
     "wallpaper_palette": false,

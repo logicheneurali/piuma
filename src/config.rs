@@ -1477,16 +1477,16 @@ mod tests {
         }
 
         let files: [&str; 10] = [
-            include_str!("../themes/01-bianco-su-nero.json"),
-            include_str!("../themes/02-nero-su-bianco.json"),
-            include_str!("../themes/03-nero-su-arancione.json"),
-            include_str!("../themes/04-bianco-su-verde.json"),
-            include_str!("../themes/05-ciano-su-blu-scuro.json"),
-            include_str!("../themes/06-viola-su-grafite.json"),
-            include_str!("../themes/07-lavanda-su-indaco.json"),
-            include_str!("../themes/08-ambra-su-carbone.json"),
-            include_str!("../themes/09-ghiaccio-su-ardesia.json"),
-            include_str!("../themes/10-blu-su-mezzanotte.json"),
+            include_str!("../themes/01-white-on-black.json"),
+            include_str!("../themes/02-black-on-white.json"),
+            include_str!("../themes/03-black-on-orange.json"),
+            include_str!("../themes/04-white-on-green.json"),
+            include_str!("../themes/05-cyan-on-navy.json"),
+            include_str!("../themes/06-purple-on-graphite.json"),
+            include_str!("../themes/07-lavender-on-indigo.json"),
+            include_str!("../themes/08-amber-on-charcoal.json"),
+            include_str!("../themes/09-ice-on-slate.json"),
+            include_str!("../themes/10-blue-on-midnight.json"),
         ];
         for json in files {
             let theme: Theme =

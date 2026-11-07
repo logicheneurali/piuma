@@ -10,7 +10,7 @@ untouched) and save only the active slug in
 
 ```json
 {
-  "name": "Bianco su nero",
+  "name": "White on black",
   "panel": {
     "theme_mode": "dark",
     "wallpaper_palette": false,
@@ -44,16 +44,16 @@ untouched) and save only the active slug in
 
 | File | Name | Notes |
 |---|---|---|
-| `01-bianco-su-nero.json` | Bianco su nero | `#333333` background |
-| `02-nero-su-bianco.json` | Nero su bianco | `#eeeeee` background |
-| `03-nero-su-arancione.json` | Nero su arancione | muted orange |
-| `04-bianco-su-verde.json` | Bianco su verde | muted green |
-| `05-ciano-su-blu-scuro.json` | Ciano su blu scuro | cyan on navy |
-| `06-viola-su-grafite.json` | Viola su grafite | graphite background, purple accent |
-| `07-lavanda-su-indaco.json` | Lavanda su indaco | indigo background, lavender/blue accents |
-| `08-ambra-su-carbone.json` | Ambra su carbone | charcoal background, amber accent |
-| `09-ghiaccio-su-ardesia.json` | Ghiaccio su ardesia | slate background, ice-blue accent |
-| `10-blu-su-mezzanotte.json` | Blu su mezzanotte | midnight-blue background, periwinkle/blue accents |
+| `01-white-on-black.json` | White on black | `#333333` background |
+| `02-black-on-white.json` | Black on white | `#eeeeee` background |
+| `03-black-on-orange.json` | Black on orange | muted orange |
+| `04-white-on-green.json` | White on green | muted green |
+| `05-cyan-on-navy.json` | Cyan on navy | cyan on navy |
+| `06-purple-on-graphite.json` | Purple on graphite | graphite background, purple accent |
+| `07-lavender-on-indigo.json` | Lavender on indigo | indigo background, lavender/blue accents |
+| `08-amber-on-charcoal.json` | Amber on charcoal | charcoal background, amber accent |
+| `09-ice-on-slate.json` | Ice on slate | slate background, ice-blue accent |
+| `10-blue-on-midnight.json` | Blue on midnight | midnight-blue background, periwinkle/blue accents |
 
 `cargo test --bin piuma shipped_themes` parses every file and checks the
 bar and pill contrasts meet WCAG 4.5:1.

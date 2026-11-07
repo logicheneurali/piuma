@@ -35,16 +35,16 @@ pub struct ThemePanel {
 
 /// The embedded files, in picker order.
 const FILES: [(&str, &str); 10] = [
-    ("bianco-su-nero", include_str!("../themes/01-bianco-su-nero.json")),
-    ("nero-su-bianco", include_str!("../themes/02-nero-su-bianco.json")),
-    ("nero-su-arancione", include_str!("../themes/03-nero-su-arancione.json")),
-    ("bianco-su-verde", include_str!("../themes/04-bianco-su-verde.json")),
-    ("ciano-su-blu-scuro", include_str!("../themes/05-ciano-su-blu-scuro.json")),
-    ("viola-su-grafite", include_str!("../themes/06-viola-su-grafite.json")),
-    ("lavanda-su-indaco", include_str!("../themes/07-lavanda-su-indaco.json")),
-    ("ambra-su-carbone", include_str!("../themes/08-ambra-su-carbone.json")),
-    ("ghiaccio-su-ardesia", include_str!("../themes/09-ghiaccio-su-ardesia.json")),
-    ("blu-su-mezzanotte", include_str!("../themes/10-blu-su-mezzanotte.json")),
+    ("white-on-black", include_str!("../themes/01-white-on-black.json")),
+    ("black-on-white", include_str!("../themes/02-black-on-white.json")),
+    ("black-on-orange", include_str!("../themes/03-black-on-orange.json")),
+    ("white-on-green", include_str!("../themes/04-white-on-green.json")),
+    ("cyan-on-navy", include_str!("../themes/05-cyan-on-navy.json")),
+    ("purple-on-graphite", include_str!("../themes/06-purple-on-graphite.json")),
+    ("lavender-on-indigo", include_str!("../themes/07-lavender-on-indigo.json")),
+    ("amber-on-charcoal", include_str!("../themes/08-amber-on-charcoal.json")),
+    ("ice-on-slate", include_str!("../themes/09-ice-on-slate.json")),
+    ("blue-on-midnight", include_str!("../themes/10-blue-on-midnight.json")),
 ];
 
 /// Every theme, parsed once.
@@ -185,7 +185,7 @@ mod tests {
             "panels": []
         }"##;
         let mut cfg: Config = serde_json::from_str(json).unwrap();
-        let purple = apply(&mut cfg, "viola-su-grafite").expect("the purple theme");
+        let purple = apply(&mut cfg, "purple-on-graphite").expect("the purple theme");
         assert_eq!(cfg.panel.default_bg_color.as_deref(), purple.panel.default_bg_color.as_deref());
         assert_eq!(cfg.panel.wallpaper_palette, Some(false), "palette suspended");
         let sensors = cfg.panel.sensor_defaults.as_ref().expect("sensor defaults");
@@ -211,8 +211,8 @@ mod tests {
     fn active_theme_roundtrips() {
         let dir = std::env::temp_dir().join(format!("piuma-theme-{}", std::process::id()));
         let path = dir.join("theme.json");
-        write_at(&path, Some("ghiaccio-su-ardesia")).expect("write");
-        assert_eq!(read_at(&path).as_deref(), Some("ghiaccio-su-ardesia"));
+        write_at(&path, Some("ice-on-slate")).expect("write");
+        assert_eq!(read_at(&path).as_deref(), Some("ice-on-slate"));
         write_at(&path, Some("does-not-exist")).expect("write");
         assert_eq!(read_at(&path), None, "unknown slugs are ignored");
         write_at(&path, None).expect("write");
