@@ -22,9 +22,44 @@ struct Player {
     title: String,
     artist: String,
     identity: String,
+    art: Option<String>,
+    /// Track length and current position in milliseconds (MPRIS reports
+    /// microseconds); `None` when the player omits them.
+    length_ms: Option<u64>,
+    position_ms: Option<u64>,
     can_control: bool,
     can_previous: bool,
     can_next: bool,
+}
+
+/// What the dashboard shows about the selected player. Read only when
+/// the dashboard is open (see `sensor_runner::read_all`): the bar's own
+/// `media` sensor keeps using the compact `display_value`.
+#[derive(Clone, Debug)]
+pub(crate) struct NowPlaying {
+    pub title: String,
+    pub artist: String,
+    pub status: String,
+    /// `mpris:artUrl` as reported (usually `file:///…`), never fetched.
+    pub art: Option<String>,
+    pub length_ms: Option<u64>,
+    pub position_ms: Option<u64>,
+}
+
+pub(crate) fn now_playing() -> Option<NowPlaying> {
+    let player = selected()?;
+    Some(NowPlaying {
+        title: if player.title.is_empty() {
+            player.identity
+        } else {
+            player.title
+        },
+        artist: player.artist,
+        status: player.status,
+        art: player.art,
+        length_ms: player.length_ms,
+        position_ms: player.position_ms,
+    })
 }
 
 /// The text shown by the sensor: status glyph, title and artist. An
@@ -112,6 +147,15 @@ fn player(conn: &zbus::blocking::Connection, bus: &str) -> Option<Player> {
     let metadata: HashMap<String, OwnedValue> = proxy.get_property("Metadata").unwrap_or_default();
     let title = meta_string(&metadata, "xesam:title").unwrap_or_default();
     let artist = meta_artists(&metadata);
+    let art = meta_string(&metadata, "mpris:artUrl");
+    let length_ms = meta_i64(&metadata, "mpris:length")
+        .filter(|micros| *micros > 0)
+        .map(|micros| micros as u64 / 1000);
+    let position_ms = proxy
+        .get_property::<i64>("Position")
+        .ok()
+        .filter(|micros| *micros >= 0)
+        .map(|micros| micros as u64 / 1000);
     let identity = Proxy::new(conn, bus, PLAYER_PATH, ROOT_IFACE)
         .ok()
         .and_then(|root| root.get_property::<String>("Identity").ok())
@@ -122,6 +166,9 @@ fn player(conn: &zbus::blocking::Connection, bus: &str) -> Option<Player> {
         title,
         artist,
         identity,
+        art,
+        length_ms,
+        position_ms,
         can_control: proxy.get_property("CanControl").unwrap_or(false),
         can_previous: proxy.get_property("CanGoPrevious").unwrap_or(false),
         can_next: proxy.get_property("CanGoNext").unwrap_or(false),
@@ -194,6 +241,16 @@ fn meta_string(metadata: &HashMap<String, OwnedValue>, key: &str) -> Option<Stri
     }
 }
 
+/// An integer metadata value (`mpris:length` is a signed microsecond
+/// count; some players send it unsigned).
+fn meta_i64(metadata: &HashMap<String, OwnedValue>, key: &str) -> Option<i64> {
+    match Value::from(metadata.get(key)?.clone()) {
+        Value::I64(value) => Some(value),
+        Value::U64(value) => i64::try_from(value).ok(),
+        _ => None,
+    }
+}
+
 fn meta_artists(metadata: &HashMap<String, OwnedValue>) -> String {
     let Some(value) = metadata.get("xesam:artist") else {
         return String::new();
@@ -223,6 +280,9 @@ mod tests {
             title: title.to_string(),
             artist: artist.to_string(),
             identity: String::new(),
+            art: None,
+            length_ms: None,
+            position_ms: None,
             can_control: true,
             can_previous: true,
             can_next: true,

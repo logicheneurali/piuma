@@ -665,6 +665,29 @@ pub fn backlight_perc() -> Option<(String, f64)> {
     None
 }
 
+/// Whether `brightnessctl` is on PATH: the dashboard's brightness
+/// slider only appears when it can actually write the backlight.
+pub fn have_brightnessctl() -> bool {
+    static HAVE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *HAVE.get_or_init(|| {
+        std::env::var_os("PATH").is_some_and(|paths| {
+            std::env::split_paths(&paths).any(|dir| dir.join("brightnessctl").is_file())
+        })
+    })
+}
+
+/// Set the backlight to `pct` (0..=100) through `brightnessctl`; a
+/// failure is logged, never fatal.
+pub fn set_backlight(pct: f64) {
+    let pct = pct.clamp(0.0, 100.0).round();
+    if let Err(e) = Command::new("brightnessctl")
+        .args(["set", &format!("{pct:.0}%")])
+        .status()
+    {
+        eprintln!("[piuma] backlight set failed: {e}");
+    }
+}
+
 // ── temperature (hwmon / thermal zone) ──────────────────────────────
 
 /// Read `attr` from the hwmon device whose `name` matches (millidegrees).
@@ -988,19 +1011,21 @@ mod tests {
 /// are cached too (a missing daemon does not spawn a process a second).
 const PROBE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 
-type ProbeSlot = OnceLock<Mutex<Option<(Instant, Option<String>)>>>;
+type ProbeSlot<T> = OnceLock<Mutex<Option<(Instant, Option<T>)>>>;
 
-static NET_INFO_PROBE: ProbeSlot = OnceLock::new();
-static POWER_PROFILE_PROBE: ProbeSlot = OnceLock::new();
-static BLUETOOTH_PROBE: ProbeSlot = OnceLock::new();
+static NET_INFO_PROBE: ProbeSlot<String> = OnceLock::new();
+static POWER_PROFILE_PROBE: ProbeSlot<String> = OnceLock::new();
+static BLUETOOTH_PROBE: ProbeSlot<String> = OnceLock::new();
+static WIFI_PROBE: ProbeSlot<WifiStatus> = OnceLock::new();
+static INTERNET_PROBE: ProbeSlot<bool> = OnceLock::new();
 
 /// A cached CLI probe: the command runs at most every `ttl`; `None`
 /// means "no reading" and the sensor shows N/A.
-fn cached_probe(
-    slot: &'static ProbeSlot,
+fn cached_probe<T: Clone>(
+    slot: &'static ProbeSlot<T>,
     ttl: std::time::Duration,
-    read: impl FnOnce() -> Option<String>,
-) -> Option<String> {
+    read: impl FnOnce() -> Option<T>,
+) -> Option<T> {
     let mut cached = slot.get_or_init(Default::default).lock().ok()?;
     if let Some((at, value)) = cached.as_ref() {
         if at.elapsed() < ttl {
@@ -1014,7 +1039,7 @@ fn cached_probe(
 
 /// Drop a probe's cached answer after an action changed the state, so
 /// the next tick re-reads it instead of showing the old value for `ttl`.
-fn invalidate_probe(slot: &'static ProbeSlot) {
+fn invalidate_probe<T>(slot: &'static ProbeSlot<T>) {
     if let Some(lock) = slot.get() {
         if let Ok(mut cached) = lock.lock() {
             *cached = None;
@@ -1068,6 +1093,215 @@ pub fn net_info() -> String {
         Some(best.map_or_else(|| "offline".to_string(), |(_, name)| truncate_chars(&name, 24)))
     })
     .unwrap_or_else(|| "N/A".to_string())
+}
+
+/// Wi-Fi state for the `wifi` sensor. NetworkManager is the primary
+/// source (its own connectivity check answers "internet"); iwd is the
+/// fallback, queried over D-Bus (iwd's bus policy allows `wheel` and
+/// `network` members, the groups its setups put the desktop user in).
+/// The probe is cached for [`PROBE_TTL`]; the internet TCP check has its
+/// own, longer TTL.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WifiStatus {
+    pub connected: bool,
+    /// The link has internet access (NM connectivity `full`, or the
+    /// fallback TCP probe succeeding when the manager cannot tell).
+    pub internet: bool,
+    pub ssid: String,
+    /// Signal 0..=100, `None` while disconnected or unknown.
+    pub signal: Option<u8>,
+}
+
+impl WifiStatus {
+    /// The sensor text: the SSID when online, `no internet` when the
+    /// link is up without access, `off` when down.
+    pub fn label(&self) -> String {
+        if !self.connected {
+            "off".to_string()
+        } else if !self.internet {
+            "no internet".to_string()
+        } else if self.ssid.is_empty() {
+            "on".to_string()
+        } else {
+            truncate_chars(&self.ssid, 24)
+        }
+    }
+}
+
+/// The current Wi-Fi state, or `None` when neither NetworkManager nor
+/// iwd answers (the sensor then shows `N/A`).
+pub fn wifi_status() -> Option<WifiStatus> {
+    cached_probe(&WIFI_PROBE, PROBE_TTL, || {
+        network_manager_wifi().or_else(iwd_wifi)
+    })
+}
+
+/// NetworkManager: the active access point (signal + SSID) and its
+/// connectivity state. `None` only when nmcli itself is unavailable or
+/// NetworkManager is not running, so the caller can try iwd.
+fn network_manager_wifi() -> Option<WifiStatus> {
+    let out = Command::new("nmcli")
+        .args(["-t", "-f", "IN-USE,SIGNAL,SSID", "device", "wifi"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let active = parse_active_wifi(&String::from_utf8_lossy(&out.stdout));
+    let Some((ssid, signal)) = active else {
+        return Some(WifiStatus {
+            connected: false,
+            internet: false,
+            ssid: String::new(),
+            signal: None,
+        });
+    };
+    let internet = match nm_connectivity().as_deref() {
+        Some("full") => true,
+        Some("limited" | "portal" | "none") => false,
+        // Connectivity checking disabled or not answered yet: ask the
+        // network directly instead of guessing.
+        _ => internet_reachable(),
+    };
+    Some(WifiStatus {
+        connected: true,
+        internet,
+        ssid,
+        signal,
+    })
+}
+
+/// The `*` line of `nmcli -t -f IN-USE,SIGNAL,SSID device wifi`:
+/// `(SSID, signal)`. `None` = no active access point.
+fn parse_active_wifi(text: &str) -> Option<(String, Option<u8>)> {
+    text.lines().find_map(|line| {
+        let mut parts = line.splitn(3, ':');
+        if parts.next()?.trim() != "*" {
+            return None;
+        }
+        let signal = parts.next()?.trim().parse::<u8>().ok();
+        let ssid = parts.next().map(unescape_terse).unwrap_or_default();
+        Some((ssid, signal))
+    })
+}
+
+/// nmcli's terse mode escapes `:`, `\` and `;` with a backslash.
+fn unescape_terse(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(next) = chars.next() {
+                out.push(next);
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn nm_connectivity() -> Option<String> {
+    let out = Command::new("nmcli")
+        .args(["-t", "-f", "CONNECTIVITY", "general"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// iwd fallback, over its D-Bus API: the station's state, connected
+/// network name and the signal from `GetOrderedNetworks` (int16 dBm).
+fn iwd_wifi() -> Option<WifiStatus> {
+    use zbus::zvariant::OwnedObjectPath;
+
+    let conn = zbus::blocking::Connection::system().ok()?;
+    let manager = zbus::blocking::Proxy::new(
+        &conn,
+        "net.connman.iwd",
+        "/",
+        "org.freedesktop.DBus.ObjectManager",
+    )
+    .ok()?;
+    let reply = manager.call_method("GetManagedObjects", &()).ok()?;
+    let objects: HashMap<OwnedObjectPath, HashMap<String, HashMap<String, zbus::zvariant::OwnedValue>>> =
+        reply.body().deserialize().ok()?;
+    let station_path = objects.iter().find_map(|(path, interfaces)| {
+        interfaces
+            .contains_key("net.connman.iwd.Station")
+            .then(|| path.clone())
+    })?;
+    let station = zbus::blocking::Proxy::new(
+        &conn,
+        "net.connman.iwd",
+        station_path.as_str(),
+        "net.connman.iwd.Station",
+    )
+    .ok()?;
+    let state: String = station.get_property("State").ok()?;
+    if state != "connected" {
+        return Some(WifiStatus {
+            connected: false,
+            internet: false,
+            ssid: String::new(),
+            signal: None,
+        });
+    }
+    let network_path: OwnedObjectPath = station.get_property("ConnectedNetwork").ok()?;
+    let network = zbus::blocking::Proxy::new(
+        &conn,
+        "net.connman.iwd",
+        network_path.as_str(),
+        "net.connman.iwd.Network",
+    )
+    .ok()?;
+    let ssid: String = network.get_property("Name").unwrap_or_default();
+    let ordered: Vec<(OwnedObjectPath, i16)> = station
+        .call_method("GetOrderedNetworks", &())
+        .ok()?
+        .body()
+        .deserialize()
+        .ok()?;
+    let signal = ordered
+        .iter()
+        .find(|(path, _)| path == &network_path)
+        .map(|(_, dbm)| dbm_to_percent(*dbm));
+    Some(WifiStatus {
+        connected: true,
+        internet: internet_reachable(),
+        ssid,
+        signal,
+    })
+}
+
+/// RSSI (dBm) → 0..=100: -50 dBm or better is full scale, -100 dBm is
+/// zero (the usual 2 dB per percent slope).
+fn dbm_to_percent(dbm: i16) -> u8 {
+    ((i32::from(dbm) + 100) * 2).clamp(0, 100) as u8
+}
+
+/// Whether a TCP connection to a public address succeeds. iwd has no
+/// connectivity API, and NetworkManager may report `unknown` when its
+/// own check is disabled; one SYN per [`INTERNET_TTL`] with a 1.5 s
+/// timeout is the cheap, manager-independent answer. The address is
+/// only a reachability target, not fetched or trusted.
+const INTERNET_CHECK: &str = "1.1.1.1:443";
+const INTERNET_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn internet_reachable() -> bool {
+    cached_probe(&INTERNET_PROBE, INTERNET_TTL, || {
+        let address = INTERNET_CHECK.parse::<std::net::SocketAddr>().ok()?;
+        Some(
+            std::net::TcpStream::connect_timeout(
+                &address,
+                std::time::Duration::from_millis(1500),
+            )
+            .is_ok(),
+        )
+    })
+    .unwrap_or(false)
 }
 
 /// power-profiles-daemon's active profile, as a readable label.
@@ -1230,4 +1464,62 @@ pub fn keyboard_next_layout() {
     let _ = Command::new("hyprctl")
         .args(["switchxkblayout", name, "next"])
         .status();
+}
+
+#[cfg(test)]
+mod wifi_tests {
+    use super::*;
+
+    /// The active access point is the `*` line; escaped colons in the
+    /// SSID survive the terse parser and the others are ignored.
+    #[test]
+    fn active_access_point_parses_from_terse_output() {
+        assert_eq!(
+            parse_active_wifi(" :80:OTHER\n*:57:FASTWEB-3N2E64\n :77:\n"),
+            Some(("FASTWEB-3N2E64".to_string(), Some(57)))
+        );
+        assert_eq!(
+            parse_active_wifi("*:65:My\\:Network"),
+            Some(("My:Network".to_string(), Some(65)))
+        );
+        assert_eq!(parse_active_wifi(" :80:OTHER\n"), None);
+        assert_eq!(parse_active_wifi(""), None);
+    }
+
+    /// dBm mapping: -50 or better is 100, -100 is 0, 2 dB per percent.
+    #[test]
+    fn dbm_maps_to_five_signal_levels() {
+        assert_eq!(dbm_to_percent(-40), 100);
+        assert_eq!(dbm_to_percent(-50), 100);
+        assert_eq!(dbm_to_percent(-60), 80);
+        assert_eq!(dbm_to_percent(-70), 60);
+        assert_eq!(dbm_to_percent(-80), 40);
+        assert_eq!(dbm_to_percent(-90), 20);
+        assert_eq!(dbm_to_percent(-100), 0);
+        assert_eq!(dbm_to_percent(-120), 0);
+    }
+
+    /// The text names the state, and a hidden SSID still reads "on".
+    #[test]
+    fn wifi_labels_name_the_state() {
+        let label = |connected, internet, ssid: &str| WifiStatus {
+            connected,
+            internet,
+            ssid: ssid.to_string(),
+            signal: None,
+        }
+        .label();
+        assert_eq!(label(false, false, "home"), "off");
+        assert_eq!(label(true, false, "home"), "no internet");
+        assert_eq!(label(true, true, ""), "on");
+        assert_eq!(label(true, true, "home"), "home");
+    }
+
+    /// The internet probe talks to a reachable public endpoint on this
+    /// machine (the cache makes it one attempt); it must not panic and
+    /// must answer whether the network is up.
+    #[test]
+    fn internet_probe_answers() {
+        let _ = internet_reachable();
+    }
 }

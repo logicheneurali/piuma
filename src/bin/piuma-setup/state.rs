@@ -11,6 +11,7 @@ use crate::controls;
 use crate::icons;
 use crate::modal::Modal;
 use crate::model::*;
+use crate::themes;
 use crate::view_wallpaper::{scan_wallpaper_dirs, wallpaper_dirs};
 
 /// The shipped default config (the same file the bar writes on a first
@@ -29,6 +30,9 @@ pub enum Message {
     IconThemeChanged(String),
     /// Freedesktop autostart toggle (roadmap N2).
     AutostartChanged(bool),
+    /// Apply a theme (slug) or restore the user's colours (`None`):
+    /// written to `theme.json`, never to `piuma.json`.
+    ThemeApplied(Option<String>),
     /// One autostart app switched in its tab: (file name, enable) — the
     /// write lands in the user's override file (roadmap2 #2).
     AutostartAppToggled(String, bool),
@@ -106,6 +110,8 @@ pub enum Message {
     /// Section border style number of the card at `usize`: (field name, number)
     /// for `border_width` / `border_radius`.
     SectionNumberChanged(usize, String, i32),
+    /// The section collapses to a dot in the bar.
+    SectionCollapsibleChanged(usize, bool),
     /// Section style defaults: same keys as the section style fields,
     /// for the fields of `panel.section_defaults`.
     SecDefaultsStyleChanged(String, String),
@@ -303,6 +309,7 @@ pub enum Tab {
     SectionDefaults,
     Sections,
     Wallpaper,
+    Themes,
     AutostartApps,
     Layouts,
     Tweaks,
@@ -310,12 +317,13 @@ pub enum Tab {
 
 impl Tab {
     /// Sidebar order.
-    pub(crate) const ALL: [Tab; 9] = [
+    pub(crate) const ALL: [Tab; 10] = [
         Tab::Panel,
         Tab::SectionDefaults,
         Tab::SensorDefaults,
         Tab::Sections,
         Tab::Wallpaper,
+        Tab::Themes,
         Tab::Notifications,
         Tab::AutostartApps,
         Tab::Layouts,
@@ -335,6 +343,7 @@ impl Tab {
             Tab::SectionDefaults => "◫",
             Tab::Sections => "≡",
             Tab::Wallpaper => "▩",
+            Tab::Themes => "◐",
             Tab::AutostartApps => "▷",
             Tab::Layouts => "⊞",
             Tab::Tweaks => "⚙",
@@ -350,6 +359,7 @@ impl Tab {
             Tab::SectionDefaults => "Section Defaults",
             Tab::Sections => "Sections",
             Tab::Wallpaper => "Wallpaper",
+            Tab::Themes => "Themes",
             Tab::AutostartApps => "Autostart apps",
             Tab::Layouts => "Layouts",
             Tab::Tweaks => "Tweaks",
@@ -403,6 +413,9 @@ pub struct PiumaSetup {
     /// Saved window layouts (piuma-layouts.json): loaded when the
     /// Layouts tab is selected, refreshed after every delete.
     pub(crate) layouts: Vec<SavedLayout>,
+    /// The active theme's slug from `theme.json`, `None` = custom. Kept
+    /// out of `piuma.json`: the Themes tab only writes that file.
+    pub(crate) active_theme: Option<&'static str>,
 }
 
 impl PiumaSetup {
@@ -429,6 +442,7 @@ impl PiumaSetup {
             hypr_wallpaper_disabled: crate::hyprland_wallpaper::read_disabled(),
             autostart_apps: Vec::new(),
             layouts: Vec::new(),
+            active_theme: themes::active(),
         };
         match fs::read_to_string(file_path(&state.current_file)) {
             Ok(content) => match state.load_from_json(&content) {

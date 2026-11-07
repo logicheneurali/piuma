@@ -14,6 +14,7 @@ use crate::view_layouts::*;
 use crate::view_panel::*;
 use crate::view_sections::*;
 use crate::view_tweaks::*;
+use crate::view_themes::*;
 use crate::view_wallpaper::*;
 use crate::state::{Message, PiumaSetup, Tab};
 
@@ -76,6 +77,7 @@ fn active_card(state: &PiumaSetup) -> Element<'_, Message> {
         Tab::SectionDefaults => section_defaults_view(state),
         Tab::Sections => sections_list(state),
         Tab::Wallpaper => wallpaper_settings(state),
+        Tab::Themes => themes_settings(state),
         Tab::AutostartApps => autostart_apps_settings(state),
         Tab::Layouts => layouts_settings(state),
         Tab::Tweaks => tweaks_settings(state),
@@ -204,7 +206,7 @@ fn tab_error_count(state: &PiumaSetup, tab: Tab) -> usize {
             })
             .count(),
         Tab::Tweaks => under("panel.tweaks."),
-        Tab::AutostartApps | Tab::Layouts => 0,
+        Tab::AutostartApps | Tab::Layouts | Tab::Themes => 0,
     }
 }
 

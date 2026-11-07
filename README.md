@@ -47,6 +47,67 @@ also has a switch for Hyprland's own 8K default wallpaper/logo (it edits
 the `misc.disable_hyprland_logo` and `misc.force_default_wallpaper`
 values in the Hyprland config and reloads it).
 
+### Themes
+
+Ten colour themes ship inside the binary (no files to install): white on
+black, black on white, black on muted orange, white on muted green, cyan
+on navy, purple on graphite, lavender on indigo, amber on charcoal, ice
+on slate and blue on midnight.
+A theme is a colour-only fragment — bar background/text, sensor defaults
+and section defaults — applied **over** the user's config in memory;
+sections, panels, sensors and layout are untouched, and an explicit
+per-sensor or per-section colour still wins.
+
+The active theme is saved in its own file,
+`$XDG_CONFIG_HOME/piuma/theme.json` (usually
+`~/.config/piuma/theme.json`):
+
+```json
+{ "theme": "viola-su-grafite" }
+```
+
+**`piuma.json` is never rewritten** by a theme switch: the bar reads
+`theme.json` at startup and watches it while running, so picking a theme
+in `piuma-setup`'s *Themes* tab or in the `theme` sensor applies it live.
+Absent, `null` or an unknown slug means *Custom* — the user's own
+colours. A theme suspends `wallpaper_palette` in memory (the wallpaper's
+tones would otherwise repaint it); switching back to Custom restores it.
+
+The fragment format (also documented in `themes/README.md`):
+
+```json
+{
+  "name": "Viola su grafite",
+  "panel": {
+    "theme_mode": "dark",
+    "wallpaper_palette": false,
+    "default_bg_color": "#282a36ff",
+    "default_text_color": "#f8f8f2ff",
+    "sensor_defaults": { "text_color": "#f8f8f2ff", "bg_color": "#44475aff", "...": "..." },
+    "section_defaults": { "bg_color": "#21222cff", "...": "..." }
+  }
+}
+```
+
+### Dashboard
+
+The `dashboard` sensor opens a full-screen command center: a dimmed
+scrim with a centred two-column card. The header carries the clock and
+date plus battery and uptime; the left column has the playing track
+with its local cover art, transport, a position bar, the stateful
+controls (power profile with the current profile, Caffeine, Bluetooth,
+Lock) and the volume slider — brightness too when `brightnessctl` can
+write it; the right column shows every numeric sensor as a tile with its
+value and sparkline, then the scrollable notification list. Each control
+displays its state and updates immediately (the power profile shows the
+next profile at once and the real one on the next probe; the volume and
+brightness sliders write on release). When the notification list is
+empty the sensor tiles stretch to fill the card. A click outside the
+card, the ✕ or the sensor again closes it. The probe (MPRIS, profile,
+volume, brightness, Bluetooth, network, uptime) and the cover decode run
+only while the dashboard is open: a closed dashboard costs nothing — no
+polling, no extra D-Bus traffic.
+
 ### Sensor Types
 
 Sensor `type` values follow a naming convention by category:
@@ -61,7 +122,8 @@ Sensor `type` values follow a naming convention by category:
 - **`temp_`** – temperature: `temp_cpu`
 - **no prefix** – not numeric: `net_state`, `uptime`, `clock`, `window`,
   `workspace`, `workspace_dots`, `command`, `env_var`, `static_text` (Text/Icon),
-  `volume_meter`, `media`, `tray`, `notifications`, `taskbar`, `layout`
+  `volume_meter`, `media`, `tray`, `notifications`, `taskbar`, `layout`,
+  `lock`, `caffeine`, `power`, `theme`, `dashboard`, `wifi`
 
 The old names (`ProcCpu`, `NvidiaGpu`, `ProcMem`, `ProcDisk`, `Audio`,
 `Network`, `Uptime`, `Clock`, `Window`, `Workspace`, `Command`, `EnvVar`,
@@ -93,6 +155,10 @@ save writes the new names into `piuma.json`.
 - **Border Styling**: Customizable borders with radius and width
 - **Padding Control**: Space around sensor content
 - **Section-level Styling**: Background and text colors per section
+- **Collapsible sections**: `"collapsible": true` on a section adds a
+  clickable dot in the section's own text colour; clicking it collapses
+  the section to the dot and back. Runtime state only: the bar starts
+  with every section expanded, and a collapsed section's popups close.
 - **Rounded Screen Corners**: `panel.screen_corners { enable, color, radius }`
   masks each display corner with a solid-colour square minus the inner
   quarter disk, so the screen itself reads as rounded like the panel —
@@ -396,6 +462,13 @@ last one, `center` = none). Touching sides (corner included) render
 square — background and border flush with the screen — only the sides
 *away* from the edge keep the rounded corners.
 
+`"collapsible": true` on a section (a toggle in `piuma-setup`'s section
+card, written only when on) adds a dot handle at the start of that
+section. Clicking the dot collapses the section to the dot alone and
+clicking it again expands it; the dot takes the section's text colour,
+so it follows the section palette or the active theme. Collapsing closes
+that section's graph/calendar popups and clears its hover.
+
 ### Sensor sources
 
 Each sensor's `source` object has a `type` plus the parameters listed
@@ -428,6 +501,7 @@ Each sensor's `source` object has a `type` plus the parameters listed
 | `temp_cpu`       | CPU package temperature (`65°C`, hwmon `coretemp`/`k10temp`) | —                                                                       |
 | `net_state`      | interface state (`connected`)                                | `interface`                                                             |
 | `net_info`       | active NetworkManager connection: VPN, Wi-Fi SSID or wired name (`offline` when none) | —                                                     |
+| `wifi`           | Wi-Fi state: SSID when online, `no internet` when associated without access, `off` when down; **the icon shows the signal** (excellent ≥75%, good ≥50%, ok ≥25%, weak below) | — |
 | `power_profile`  | power-profiles-daemon profile (`Balanced`); click cycles it   | —                                                                       |
 | `bluetooth`      | BlueZ adapter (`Off`, `On`, `On (2)` or the connected device); click toggles it | —                                                     |
 | `keyboard`       | main keyboard layout (`IT`, `IT CAPS`, `IT NUM`); click switches layout | —                                                              |
@@ -446,11 +520,22 @@ Each sensor's `source` object has a `type` plus the parameters listed
 | `lock`           | lock-screen trigger: shows its name/icon, **clicking locks** every output (password to unlock) | —                                            |
 | `caffeine`       | idle-inhibit toggle: shows `on`/`off`, clicking flips it; while on, the idle lock stays away | —                                              |
 | `power`          | power menu trigger: **clicking** opens lock / log out / suspend / reboot / shut down | —                                                       |
+| `theme`          | active theme's name (`Custom` when none); **clicking** opens the theme picker, the choice is saved in `theme.json` | —                                                       |
+| `dashboard`      | dashboard trigger: **clicking** opens the full-screen command center | —                                                       |
 
-`net_info`, `power_profile`, `bluetooth` and `keyboard` are the
+`net_info`, `power_profile`, `bluetooth`, `keyboard` and `wifi` are the
 runtime-state sensors. `net_info` reads the active NetworkManager
 connection (display only; a configured `action` can bind a click, e.g.
-`nm-connection-editor`). The other three probe their daemon at most
+`nm-connection-editor`). `wifi` reads the active access point every five
+seconds from NetworkManager (signal and SSID) and its connectivity state
+(`full` = internet); when NetworkManager is not running it falls back to
+**iwd**'s D-Bus API (state, SSID, signal in dBm), which requires the user
+to be in iwd's allowed groups (`wheel` or `network`). If the manager
+cannot report connectivity, a cached TCP reachability probe decides
+`internet` (one attempt every 30 s, 1.5 s timeout). A static `icon` set
+on the sensor overrides the signal icon; otherwise the theme's
+`network-wireless-signal-*` symbols are used, so the icon theme must
+provide them. The other three probe their daemon at most
 every five seconds (no fork per tick) and their click controls the
 state: `power_profile` cycles balanced → performance → power-saver,
 `bluetooth` toggles the adapter, `keyboard` advances the layout (a
@@ -853,8 +938,9 @@ right-click menus, every other zone starts the editor found next to the
 bar binary.
 
 `piuma-setup` loads `~/.config/piuma/piuma.json` on startup. The
-categories sit behind **side tabs** on the left — Panel, Notifications,
-Sensor Defaults, Section Defaults, Sections — and only the selected
+categories sit behind **side tabs** on the left — Panel, Section
+Defaults, Sensor Defaults, Sections, Wallpaper, Themes, Notifications,
+Autostart apps, Layouts, Tweaks — and only the selected
 category's card is shown, so the growing configuration stays readable;
 unsaved edits live in memory, so switching tabs never loses work. The
 bottom bar offers:
@@ -873,6 +959,13 @@ up/down in the panel order (the arrow is disabled on the first/last item).
 ## License
 
 Apache-2.0. The licenses of every dependency compiled into the Linux
-binaries are listed in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md);
-the MPL-2.0 text applying to `option-ext` is in
-[LICENSES/MPL-2.0.txt](LICENSES/MPL-2.0.txt).
+binaries are listed in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md),
+together with the copyright notices and full license texts a binary
+distribution must carry; the MPL-2.0 text applying to `option-ext` is
+also in [LICENSES/MPL-2.0.txt](LICENSES/MPL-2.0.txt).
+
+The file is generated from the resolved Cargo graph with
+`scripts/gen-third-party-licenses.py`; rerun it after any dependency
+change. Any binary or archive distribution must ship `LICENSE`,
+`THIRD_PARTY_LICENSES.md` and the `LICENSES/` directory alongside the
+executables — `scripts/package-release.sh` builds a tarball that does.

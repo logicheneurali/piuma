@@ -322,6 +322,18 @@ pub fn run(source: &SensorSource, hypr: Option<&crate::hypr::Snapshot>) -> Read 
         SensorSource::TempCpu {} => optional(sensors::cpu_temp(), source),
         // everything else (no numeric category)
         SensorSource::NetInfo {} => plain(sensors::net_info()),
+        // Wi-Fi: the text names the state; the signal percentage is the
+        // numeric sample the icon (and an opted graph) derives from.
+        SensorSource::Wifi {} => match sensors::wifi_status() {
+            Some(status) => {
+                let text = status.label();
+                match (status.connected, status.signal) {
+                    (true, Some(signal)) => measured(text, source, f64::from(signal)),
+                    _ => plain(text),
+                }
+            }
+            None => plain("N/A".to_string()),
+        },
         SensorSource::PowerProfile {} => plain(sensors::power_profile()),
         SensorSource::Bluetooth {} => plain(sensors::bluetooth_info()),
         SensorSource::Keyboard {} => plain(sensors::keyboard_info()),
@@ -354,6 +366,10 @@ pub fn run(source: &SensorSource, hypr: Option<&crate::hypr::Snapshot>) -> Read 
         // (the runner cannot see the panel's toggle).
         SensorSource::Caffeine {} => plain("off".to_string()),
         SensorSource::Power {} => plain(String::new()),
+        // The active theme's name comes from `apply_read` (only the bar
+        // reads `theme.json`), like the caffeine toggle.
+        SensorSource::Theme {} => plain("Custom".to_string()),
+        SensorSource::Dashboard {} => plain(String::new()),
         // Tray items carry no text: the icons come from the shared tray
         // state (see `tray.rs`), rendered by the view directly.
         SensorSource::Tray {} => plain(String::new()),
@@ -377,13 +393,17 @@ pub fn run(source: &SensorSource, hypr: Option<&crate::hypr::Snapshot>) -> Read 
 pub struct Reads {
     pub hypr: Option<crate::hypr::Snapshot>,
     pub values: Vec<Read>,
+    /// The dashboard's snapshot (media, power profile, volume,
+    /// brightness, Bluetooth, network, uptime) while the card is open;
+    /// `None` otherwise — a closed dashboard reads nothing.
+    pub dashboard: Option<crate::dashboard::Probe>,
 }
 
 /// Read every source off the UI thread (the tick spawns this on a
 /// worker, see `spawn_read`): one pass forks the compositor documents
 /// every Hyprland-backed source shares and then each sensor in turn —
 /// but duplicated sensors share one run (see the cache below).
-pub fn read_all(sources: &[SensorSource], want_hypr: bool) -> Reads {
+pub fn read_all(sources: &[SensorSource], want_hypr: bool, want_dashboard: bool) -> Reads {
     let needs_hypr = want_hypr
         || sources.iter().any(|s| {
             matches!(
@@ -418,7 +438,8 @@ pub fn read_all(sources: &[SensorSource], want_hypr: bool) -> Reads {
             read
         })
         .collect();
-    Reads { hypr, values }
+    let dashboard = want_dashboard.then(crate::dashboard::probe);
+    Reads { hypr, values, dashboard }
 }
 
 #[cfg(test)]
@@ -589,7 +610,7 @@ mod tests {
                 static_text: "other".into(),
             },
         ];
-        let reads = read_all(&sources, false);
+        let reads = read_all(&sources, false, false);
         assert_eq!(reads.values.len(), 3);
         assert_eq!(reads.values[0].text, "same");
         assert_eq!(

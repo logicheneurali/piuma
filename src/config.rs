@@ -564,7 +564,7 @@ pub struct NotificationsConfig {
 /// Style values applied to every sensor unless the sensor overrides them:
 /// the same style fields as `SensorConfig`, minus name/description/source/
 /// action (defaults are style only).
-#[derive(Deserialize, serde::Serialize, Clone)]
+#[derive(Debug, Default, Deserialize, serde::Serialize, Clone)]
 pub struct SensorDefaults {
     pub text_color: Option<String>,
     pub bg_color: Option<String>,
@@ -582,7 +582,7 @@ pub struct SensorDefaults {
 /// Style values applied to every section unless the section overrides them:
 /// the style fields of `SectionConfig` (bg, text, border) — layout/weight are
 /// structure and stay per-section only. Same group rule as `sensor_defaults`.
-#[derive(Deserialize, serde::Serialize, Clone)]
+#[derive(Debug, Default, Deserialize, serde::Serialize, Clone)]
 #[allow(clippy::upper_variable_names)]
 pub struct SectionDefaults {
     pub bg_color: Option<String>,
@@ -614,6 +614,10 @@ pub struct SectionConfig {
     /// Border drawing style: `full` (default), `corners`, `underline`,
     /// `upperline`, `left` or `right`.
     pub border_type: Option<String>,
+    /// The section can be collapsed to a clickable dot: the dot toggles
+    /// it, and the bar lays out only that dot while collapsed.
+    #[serde(default)]
+    pub collapsible: bool,
     pub sensors: Vec<SensorConfig>,
 }
 
@@ -772,6 +776,10 @@ pub enum SensorSource {
     /// (`offline` when nothing is up).
     #[serde(rename = "net_info")]
     NetInfo {},
+    /// Wi-Fi state: connected + internet access (NetworkManager, with an
+    /// iwd fallback), signal strength carried by the icon. No params.
+    #[serde(rename = "wifi")]
+    Wifi {},
     /// power-profiles-daemon's active profile (balanced, performance,
     /// power-saver); click cycles it.
     #[serde(rename = "power_profile")]
@@ -842,6 +850,13 @@ pub enum SensorSource {
     /// shutdown next to the bar.
     #[serde(rename = "power")]
     Power {},
+    /// Theme picker: shows the active theme's name (or "Custom"), and a
+    /// click opens the list; the choice is saved in `theme.json`.
+    #[serde(rename = "theme")]
+    Theme {},
+    /// Dashboard trigger: clicking opens the full-screen command center.
+    #[serde(rename = "dashboard")]
+    Dashboard {},
 }
 
 // ── defaults ────────────────────────────────────────────────────────
@@ -863,6 +878,7 @@ pub fn default_config() -> Config {
         border_width: None,
         border_radius: None,
         border_type: None,
+        collapsible: false,
         sensors: vec![
             SensorConfig { name: "CPU".to_string(), description: None, icon: None, source: SensorSource::PercCpu {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false, effect: false, color_rules: None },
             SensorConfig { name: "GPU".to_string(), description: None, icon: None, source: SensorSource::PercGpu {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false, effect: false, color_rules: None },
@@ -1466,11 +1482,11 @@ mod tests {
             include_str!("../themes/03-nero-su-arancione.json"),
             include_str!("../themes/04-bianco-su-verde.json"),
             include_str!("../themes/05-ciano-su-blu-scuro.json"),
-            include_str!("../themes/06-dracula.json"),
-            include_str!("../themes/07-catppuccin-mocha.json"),
-            include_str!("../themes/08-gruvbox-dark.json"),
-            include_str!("../themes/09-nord.json"),
-            include_str!("../themes/10-tokyo-night.json"),
+            include_str!("../themes/06-viola-su-grafite.json"),
+            include_str!("../themes/07-lavanda-su-indaco.json"),
+            include_str!("../themes/08-ambra-su-carbone.json"),
+            include_str!("../themes/09-ghiaccio-su-ardesia.json"),
+            include_str!("../themes/10-blu-su-mezzanotte.json"),
         ];
         for json in files {
             let theme: Theme =
@@ -2253,6 +2269,7 @@ mod tests {
                 {"name":"P","source":{"type":"power_profile"}},
                 {"name":"B","source":{"type":"bluetooth"}},
                 {"name":"K","source":{"type":"keyboard"}},
+                {"name":"W","source":{"type":"wifi"}},
                 {"name":"C","source":{"type":"command","command":"date","interval":30}}
             ]}]}}"#,
         )
@@ -2266,8 +2283,9 @@ mod tests {
         assert!(matches!(sources[1], SensorSource::PowerProfile {}));
         assert!(matches!(sources[2], SensorSource::Bluetooth {}));
         assert!(matches!(sources[3], SensorSource::Keyboard {}));
+        assert!(matches!(sources[4], SensorSource::Wifi {}));
         assert!(matches!(
-            sources[4],
+            sources[5],
             SensorSource::Command { interval: Some(30), .. }
         ));
         assert!(validate_config(&cfg).is_empty());

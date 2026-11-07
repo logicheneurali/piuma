@@ -118,6 +118,19 @@ pub fn widget<'a>(path: &Path, size: f32) -> Element<'a, crate::Message> {
 
 /// Number of remembered resolutions (tests assert the miss path does not
 /// walk the disk again).
+/// The freedesktop icon for a Wi-Fi signal percentage (0..=100): the
+/// standard `network-wireless-signal-*` names, present in breeze-dark,
+/// Adwaita and Papirus. `None` = disconnected or no reading.
+pub fn wifi_signal_icon(signal: Option<f32>) -> &'static str {
+    match signal {
+        Some(s) if s >= 75.0 => "network-wireless-signal-excellent-symbolic",
+        Some(s) if s >= 50.0 => "network-wireless-signal-good-symbolic",
+        Some(s) if s >= 25.0 => "network-wireless-signal-ok-symbolic",
+        Some(s) if s > 0.0 => "network-wireless-signal-weak-symbolic",
+        _ => "network-wireless-disconnected-symbolic",
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn cache_len() -> usize {
     cache()
@@ -139,6 +152,11 @@ pub const VOLUME_ICON: &str = "audio-volume-high";
 /// has to fit inside (single source — the formula must match what the
 /// view really draws).
 pub const SECTION_CONTENT_PAD: u16 = 4;
+
+/// Section content padding on a narrow side bar: the `thickness` axis is
+/// only a few pixels wider than the icon itself, so a vertical panel
+/// spends less of it on the inset and gives the icon the room to read.
+pub const SECTION_CONTENT_PAD_NARROW: u16 = 2;
 
 /// Thickness (px) a section title eats when it shares the thickness axis:
 /// a vertically laid out section draws the title above its sensors, as
@@ -162,8 +180,8 @@ pub fn stacked_title_extra(layout: &str, name: &str, font: u32) -> u32 {
 /// the sensor row really is this tall, and this is the height the row's text
 /// already fills. Tray icons, sensor icons and the setup's live preview all
 /// size to this one number.
-pub fn row_icon_target(thickness: u32, title_extra: u32, padding: u32) -> u16 {
-    let chrome = 2 * (u32::from(SECTION_CONTENT_PAD) + padding) + title_extra;
+pub fn row_icon_target(thickness: u32, section_pad: u32, title_extra: u32, padding: u32) -> u16 {
+    let chrome = 2 * (section_pad + padding) + title_extra;
     thickness.saturating_sub(chrome).clamp(4, 48) as u16
 }
 
@@ -177,7 +195,7 @@ pub fn row_icon_target(thickness: u32, title_extra: u32, padding: u32) -> u16 {
 /// separate ceiling: tray and taskbar take the smaller of the two, so
 /// both rows show the same size wherever physics allows.
 pub fn font_icon_edge(font: u32, padding: u32) -> u16 {
-    (font + 2 + 2 * padding).clamp(18, 48) as u16
+    (font + 2 + 2 * padding).clamp(20, 48) as u16
 }
 
 /// How many icon slots of `slot` px with `gap` px between them fit on
@@ -218,26 +236,28 @@ mod tests {
     /// A bare 26px bar: only the section content padding (4px a side).
     #[test]
     fn row_icon_target_subtracts_section_padding() {
-        assert_eq!(row_icon_target(26, 0, 0), 18);
+        assert_eq!(row_icon_target(26, 4, 0, 0), 18);
     }
 
     /// The sensor's own padding (6px a side) subtracts on top of it.
     #[test]
     fn row_icon_target_subtracts_sensor_padding() {
-        assert_eq!(row_icon_target(44, 0, 6), 24);
+        assert_eq!(row_icon_target(44, 4, 0, 6), 24);
     }
 
     /// A stacked section title eats thickness as well (font 14 → 14+2+8).
     #[test]
     fn row_icon_target_subtracts_stacked_title() {
-        assert_eq!(row_icon_target(44, 24, 0), 12);
+        assert_eq!(row_icon_target(44, 4, 24, 0), 12);
     }
 
     /// Clamped: never smaller than 4px, never larger than 48px.
     #[test]
     fn row_icon_target_clamps() {
-        assert_eq!(row_icon_target(10, 0, 0), 4);
-        assert_eq!(row_icon_target(400, 0, 0), 48);
+        assert_eq!(row_icon_target(10, 4, 0, 0), 4);
+        assert_eq!(row_icon_target(400, 4, 0, 0), 48);
+        // A narrow side bar spends less inset: a 28 px panel leaves 24.
+        assert_eq!(row_icon_target(28, 2, 0, 0), 24);
     }
 
     /// The title term applies only to a vertical layout with a name to
@@ -259,6 +279,40 @@ mod tests {
         assert_eq!(icons_per_line(u32::MAX, 1, 0), u16::MAX);
     }
 
+    /// Wi-Fi signal → standard freedesktop icon: the thresholds sit at
+    /// 25/50/75 and no reading means disconnected.
+    #[test]
+    fn wifi_icons_follow_the_signal() {
+        assert_eq!(
+            wifi_signal_icon(None),
+            "network-wireless-disconnected-symbolic"
+        );
+        assert_eq!(
+            wifi_signal_icon(Some(0.0)),
+            "network-wireless-disconnected-symbolic"
+        );
+        assert_eq!(
+            wifi_signal_icon(Some(10.0)),
+            "network-wireless-signal-weak-symbolic"
+        );
+        assert_eq!(
+            wifi_signal_icon(Some(25.0)),
+            "network-wireless-signal-ok-symbolic"
+        );
+        assert_eq!(
+            wifi_signal_icon(Some(50.0)),
+            "network-wireless-signal-good-symbolic"
+        );
+        assert_eq!(
+            wifi_signal_icon(Some(75.0)),
+            "network-wireless-signal-excellent-symbolic"
+        );
+        assert_eq!(
+            wifi_signal_icon(Some(100.0)),
+            "network-wireless-signal-excellent-symbolic"
+        );
+    }
+
     /// The font's line height plus the sensor padding (2×) is the size
     /// reference, clamped to sane bounds: small fonts take the legibility
     /// floor, big fonts the cap.
@@ -266,7 +320,7 @@ mod tests {
     fn font_icon_edge_follows_font_and_padding() {
         assert_eq!(font_icon_edge(12, 4), 22); // 14 + 8
         assert_eq!(font_icon_edge(16, 4), 26); // 18 + 8
-        assert_eq!(font_icon_edge(12, 0), 18); // floor, no padding
+        assert_eq!(font_icon_edge(12, 0), 20); // floor, no padding
         assert_eq!(font_icon_edge(24, 0), 26);
         assert_eq!(font_icon_edge(200, 4), 48); // cap
     }

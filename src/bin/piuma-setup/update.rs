@@ -239,6 +239,25 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
             let min = gaps.min.clamp(1, 200);
             gaps.max = value.clamp(min, 200);
         }
+        Message::ThemeApplied(slug) => {
+            // An unknown slug is custom, exactly like a hand-edited file:
+            // never leave a name the bar would silently ignore.
+            let chosen = slug.as_deref().and_then(|s| crate::themes::find(s)).map(|t| t.slug);
+            match crate::themes::write_active(chosen) {
+                Ok(()) => {
+                    state.active_theme = chosen;
+                    let label = chosen
+                        .and_then(crate::themes::find)
+                        .map(|t| t.name.clone())
+                        .unwrap_or_else(|| "Custom".to_string());
+                    state.set_status(
+                        format!("Theme: {label} (saved in theme.json; the bar applies it live)"),
+                        false,
+                    );
+                }
+                Err(e) => state.set_status(e, true),
+            }
+        }
         Message::TabSelected(tab) => {
             // The Layouts tab reads the bar's file on every selection,
             // so layouts saved meanwhile show up without a restart; an
@@ -252,6 +271,10 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                         state.set_status(e, true);
                     }
                 }
+            }
+            // The theme file may have changed from the bar's sensor.
+            if tab == Tab::Themes {
+                state.active_theme = crate::themes::active();
             }
             state.active_tab = tab;
             // Wallpaper thumbnails decode once, off the UI thread; the
@@ -305,6 +328,11 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                     "border_type" => s.border_type = v,
                     _ => {}
                 }
+            }
+        }
+        Message::SectionCollapsibleChanged(index, value) => {
+            if let Some(section) = state.config.sections.get_mut(index) {
+                section.collapsible = value;
             }
         }
         Message::SectionNumberChanged(index, field, value) => {

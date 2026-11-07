@@ -2,7 +2,63 @@
 //! per-corner touching and the shared placement rectangle.
 
 use crate::config;
+use crate::icons;
 use iced_exwlshell::reexport::{Anchor, Margin};
+
+/// What a section's title and inset take from the icon's cross axis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct IconRoom {
+    /// The stacked title's room, only on a horizontal panel.
+    pub title_extra: u32,
+    /// Section content padding on the cross axis: tighter on a vertical
+    /// side bar, where the panel width is only a little wider than the
+    /// icon.
+    pub pad: u16,
+}
+
+/// Per-section icon room. A title shares the cross axis only on a
+/// HORIZONTAL panel whose sensors are stacked vertically; a vertical
+/// panel's title runs along the bar's length, so it never narrows the
+/// icons. A section shown on a vertical panel alone gets the narrow
+/// inset; one also shown horizontally keeps the normal inset (its icon
+/// must fit the tighter panel). Hidden titles consume nothing.
+pub(crate) fn section_icon_room(config: &config::Config, font_size: u32) -> Vec<IconRoom> {
+    let normal = IconRoom {
+        title_extra: 0,
+        pad: icons::SECTION_CONTENT_PAD,
+    };
+    let mut rooms = vec![normal; config.panel.sections.len()];
+    let titles = config.panel.section_title.unwrap_or(true);
+    let mut on_horizontal = vec![false; config.panel.sections.len()];
+    for layout in config::panel_layouts(config) {
+        let vertical = panel_vertical(config, layout.anchor.as_deref());
+        for (index, section) in config.panel.sections.iter().enumerate() {
+            let visible = match &layout.sections {
+                Some(names) => names.iter().any(|name| name == &section.name),
+                None => true,
+            };
+            if !visible {
+                continue;
+            }
+            if vertical {
+                if !on_horizontal[index] {
+                    rooms[index].pad = icons::SECTION_CONTENT_PAD_NARROW;
+                }
+            } else {
+                on_horizontal[index] = true;
+                rooms[index].pad = icons::SECTION_CONTENT_PAD;
+                if titles {
+                    rooms[index].title_extra = icons::stacked_title_extra(
+                        section.layout.as_deref().unwrap_or("horizontal"),
+                        &section.name,
+                        font_size,
+                    );
+                }
+            }
+        }
+    }
+    rooms
+}
 
 /// Panel thickness on the cross axis, in pixels: `panel.thickness` from the
 /// config (default 32px, minimum 1px). Single source of truth for the surface
@@ -139,12 +195,15 @@ pub(crate) fn section_touch_for(
     count: usize,
 ) -> [bool; 4] {
     let vertical = anchor.contains(Anchor::Left) || anchor.contains(Anchor::Right);
-    let mut touch = [
-        anchor.contains(Anchor::Top),
-        anchor.contains(Anchor::Right),
-        anchor.contains(Anchor::Bottom),
-        anchor.contains(Anchor::Left),
-    ];
+    // A vertical surface anchors Top|Bottom too, but only to stretch the
+    // layer: those are the length axis, not the thickness side flush with
+    // the screen. Reading them here squared the top/bottom corners of
+    // every section in a side bar, even the ones parked in the middle.
+    let mut touch = if vertical {
+        [false, anchor.contains(Anchor::Right), false, anchor.contains(Anchor::Left)]
+    } else {
+        [anchor.contains(Anchor::Top), false, anchor.contains(Anchor::Bottom), false]
+    };
     let at_start = if vertical {
         align == "top"
     } else {
@@ -234,10 +293,17 @@ mod tests {
         cfg.panel.section_layout = Some("vertical".to_string());
         cfg.panel.anchor = None;
         cfg.panel.align = Some("top".to_string());
-        // A vertical bar anchors both length edges (Fill), so top and
-        // bottom are flush along with the side edge.
-        assert_eq!(section_touch(&cfg, 0, 2), [true, false, true, true]);
-        assert_eq!(section_touch(&cfg, 1, 2), [true, false, true, true]);
+        // A side bar's surface is stretched between top and bottom, but
+        // those edges are the length axis: only the first section parked
+        // at the top is flush, the rest is rounded there.
+        assert_eq!(section_touch(&cfg, 0, 2), [true, false, false, true]);
+        assert_eq!(section_touch(&cfg, 1, 2), [false, false, false, true]);
+
+        // Centred on a left side bar: only the screen-edge side touches,
+        // the right corners stay rounded.
+        cfg.panel.anchor = Some("left".to_string());
+        cfg.panel.align = Some("center".to_string());
+        assert_eq!(section_touch(&cfg, 0, 1), [false, false, false, true]);
     }
     /// A section on a secondary panel squares the sides of THAT panel:
     /// bottom-anchored, right-aligned, the last section touches bottom+right.
@@ -327,6 +393,57 @@ mod tests {
                 none.bottom_left
             ),
             (12.0, 12.0, 12.0, 12.0)
+        );
+    }
+
+    /// A stacked title shrinks icons only on a horizontal panel; a
+    /// vertical panel's title runs along its length, and a hidden title
+    /// consumes nothing at all. A side bar also gets the narrow inset.
+    #[test]
+    fn icon_room_follows_the_panel_axis() {
+        let config = |panels: &str, section_title: bool| {
+            serde_json::from_str::<config::Config>(&format!(
+                r#"{{"panel":{{"font_size":11,"section_title":{section_title},"sections":[
+                    {{"name":"apps","layout":"vertical","sensors":[]}},
+                    {{"name":"top","layout":"horizontal","sensors":[]}}
+                ]}},"panels":{panels}}}"#
+            ))
+            .expect("test config")
+        };
+        let room = |title_extra, pad| IconRoom { title_extra, pad };
+
+        // Vertical section on a horizontal panel with a visible title:
+        // font 11 + 2 + 2 × SECTION_CONTENT_PAD (4) = 21.
+        assert_eq!(
+            section_icon_room(&config(r#"[{"anchor":"top","sections":["apps"]}]"#, true), 11),
+            vec![room(21, 4), room(0, 4)]
+        );
+        // The same section on a vertical panel: no title cost and the
+        // narrow side-bar inset.
+        assert_eq!(
+            section_icon_room(&config(r#"[{"anchor":"left","sections":["apps"]}]"#, true), 11),
+            vec![room(0, 2), room(0, 4)]
+        );
+        // Hidden titles cost nothing anywhere.
+        assert_eq!(
+            section_icon_room(&config(r#"[{"anchor":"top","sections":["apps"]}]"#, false), 11),
+            vec![room(0, 4), room(0, 4)]
+        );
+        // A horizontal section's title leads the row (length axis).
+        assert_eq!(
+            section_icon_room(&config(r#"[{"anchor":"top","sections":["top"]}]"#, true), 11),
+            vec![room(0, 4), room(0, 4)]
+        );
+        // Shown on both: the horizontal panel's room wins.
+        assert_eq!(
+            section_icon_room(
+                &config(
+                    r#"[{"anchor":"top","sections":["apps"]},{"anchor":"left","sections":["apps"]}]"#,
+                    true
+                ),
+                11
+            ),
+            vec![room(21, 4), room(0, 4)]
         );
     }
 }

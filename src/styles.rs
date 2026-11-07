@@ -81,12 +81,13 @@ pub(crate) fn resolve_styles(
     let icon_theme = icons_theme(cfg);
     let thickness = panel_thickness(cfg);
     let font_size = cfg.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
+    let icon_rooms = crate::geometry::section_icon_room(cfg, font_size);
     let default_bg = panel_background(cfg, pal);
     cfg.panel
         .sections
         .iter()
         .enumerate()
-        .map(|(_section_idx, section_cfg)| {
+        .map(|(section_idx, section_cfg)| {
             let section_default_txt = default_text(&cfg.panel, pal);
 
             // Text colour chain: section > wallpaper palette (when
@@ -151,13 +152,17 @@ pub(crate) fn resolve_styles(
                     // No vertical inset is spent on the box any more
                     // (padding is horizontal only), so the icon gets the
                     // full row height instead of shrinking with it.
+                    let room = icon_rooms
+                        .get(section_idx)
+                        .copied()
+                        .unwrap_or(crate::geometry::IconRoom {
+                            title_extra: 0,
+                            pad: icons::SECTION_CONTENT_PAD,
+                        });
                     let icon_size = icons::row_icon_target(
                         thickness,
-                        icons::stacked_title_extra(
-                            section_cfg.layout.as_deref().unwrap_or("horizontal"),
-                            &section_cfg.name,
-                            font_size,
-                        ),
+                        u32::from(room.pad),
+                        room.title_extra,
                         0,
                     );
                     let icon_name = s.icon.as_deref().or_else(|| {

@@ -123,6 +123,10 @@ pub(crate) fn section_view<'a>(
             .into(),
             state.field_err(&format!("panel.sections[{index}].layout")),
         )),
+        ("Collapsible", toggler(section.collapsible)
+            .label("Dot handle in the bar")
+            .on_toggle(move |value| Message::SectionCollapsibleChanged(index, value))
+            .into()),
         ("BG", color_control_over(
             section.bg_color.as_deref().unwrap_or(""),
             state.field_err(&format!("panel.sections[{index}].bg_color")),

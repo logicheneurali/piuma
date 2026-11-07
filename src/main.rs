@@ -34,6 +34,8 @@ mod autostart;
 mod calendar;
 mod config;
 mod corners;
+mod dashboard;
+mod dashboard_view;
 mod dbusmenu;
 mod effects;
 mod fill_sections;
@@ -61,6 +63,11 @@ mod sensors;
 mod styles;
 mod text_util;
 mod text_width;
+mod theme_menu;
+// The setup shares this module and reads more of it (names, the
+// theme picker): the bar only needs to read and apply.
+#[allow(dead_code)]
+mod themes;
 mod tooltip;
 mod tray;
 mod tweaks;
@@ -96,7 +103,7 @@ use tooltip::{tooltip_close, tooltip_open, tooltip_window_view};
 use wallpaper_ui::{sync_palette, sync_wallpaper, wallpaper_view};
 // Layout padding lives with the icon sizing helpers (icons.rs): the view
 // and the row-height size formula must read the same number.
-use icons::SECTION_CONTENT_PAD;
+use icons::{SECTION_CONTENT_PAD, SECTION_CONTENT_PAD_NARROW};
 
 // ── globals ────────────────────────────────────────────────────────
 
@@ -333,7 +340,18 @@ fn hover_is_fresh(armed: Instant, last_motion: Option<Instant>) -> bool {
 }
 
 pub(crate) struct Panel {
+    /// The effective config: the user's file with the active theme
+    /// applied over its colour keys (in memory only).
     pub(crate) config: config::Config,
+    /// The config exactly as the user wrote it: every theme change
+    /// re-applies over this copy, so switching to "custom" restores the
+    /// user's own colours and no theme value leaks into `piuma.json`.
+    pub(crate) config_base: config::Config,
+    /// Slug of the active theme (`theme.json`), `None` = custom colours.
+    pub(crate) active_theme: Option<&'static str>,
+    /// Change stamp of `theme.json` seen on the last tick: the bar only
+    /// watches that file, it never writes it.
+    pub(crate) theme_state: Option<(SystemTime, u64)>,
     pub(crate) sections: Vec<SectionData>,
     /// Every section's and sensor's resolved style (`resolve_styles`),
     /// rebuilt on config reload and on wallpaper-palette change — the
@@ -493,6 +511,30 @@ pub(crate) struct Panel {
     pub(crate) last_glass: bool,
     /// The open power menu surface and its auto-close deadline.
     pub(crate) power_menu: Option<(iced::window::Id, Instant)>,
+    /// The open theme picker surface and its auto-close deadline.
+    pub(crate) theme_menu: Option<(iced::window::Id, Instant)>,
+    /// The open dashboard overlay, `None` while closed.
+    pub(crate) dashboard: Option<dashboard::Dashboard>,
+    /// The dashboard's snapshot, read only while the card is open.
+    pub(crate) dash_probe: Option<dashboard::Probe>,
+    /// The profile the next power-profile click selects: shown at once,
+    /// cleared when the next probe confirms the real value.
+    pub(crate) dash_profile: Option<String>,
+    /// Slider targets while dragging (and until the next probe lands).
+    pub(crate) dash_volume: Option<f32>,
+    pub(crate) dash_brightness: Option<f32>,
+    /// A drag is in flight: a probe arriving meanwhile must not snap the
+    /// knob back to the old reading.
+    pub(crate) dash_volume_drag: bool,
+    pub(crate) dash_brightness_drag: bool,
+    /// Decoded cover art for `cover_url`.
+    pub(crate) cover: Option<iced::widget::image::Handle>,
+    /// The art URL the last decode was requested for: a failed or
+    /// missing file is not retried on every tick.
+    pub(crate) cover_url: Option<String>,
+    /// Sections collapsed to their dot handle (runtime only: the dot is
+    /// the toggle, and the bar lays out only the dot meanwhile).
+    pub(crate) collapsed_sections: std::collections::HashSet<usize>,
     /// The volume/brightness OSD card while it lingers, `None` otherwise.
     pub(crate) osd: Option<osd::Osd>,
     /// Colours derived from the wallpaper (`panel.wallpaper_palette`):
@@ -677,6 +719,23 @@ pub(crate) enum Message {
     ScreensaverAuthResult(Result<(), String>),
     /// One row of the power menu.
     PowerAction(power_menu::Action),
+    /// The theme picked in the theme menu; `None` = custom colours.
+    ThemeSelected(Option<String>),
+    /// The dashboard's scrim or ✕ was clicked.
+    DashboardClose,
+    /// One dashboard control (stateful tile or transport button).
+    DashboardAction(dashboard::Action),
+    /// The volume slider moved; the mixer is written on release.
+    DashboardVolume(f32),
+    DashboardVolumeRelease,
+    /// The brightness slider moved; written on release.
+    DashboardBrightness(f32),
+    DashboardBrightnessRelease,
+    /// The cover decode finished: the art URL and its handle (`None` on
+    /// an unreadable file).
+    DashboardCover(String, Option<iced::widget::image::Handle>),
+    /// The dot handle of a collapsible section: collapse or expand it.
+    SectionToggled(usize),
     /// A sensor was clicked: (section_index, sensor_index, action).
     SensorPressed(usize, usize, Option<String>),
     /// Right-click on the bar outside any widget that owns that button
@@ -1119,6 +1178,17 @@ fn config_file_state() -> Option<(SystemTime, u64)> {
 /// a half-written file) logs once per change and keeps the previous
 /// config, retrying when the file changes again. The path rides along so
 /// callers do not touch `CONFIG_PATH` again (one static ref per reload).
+/// Rebuild the effective config from the user's saved copy and re-apply
+/// the active theme over it, then re-resolve every colour chain. `None`
+/// as the active theme restores the user's own colours.
+fn apply_active_theme(panel: &mut Panel) {
+    panel.config = panel.config_base.clone();
+    if let Some(slug) = panel.active_theme {
+        themes::apply(&mut panel.config, slug);
+    }
+    restyle(panel);
+}
+
 fn maybe_reload(panel: &mut Panel) -> Option<(config::Config, String)> {
     let state = config_file_state()?;
     if panel.last_reload == Some(state) {
@@ -1178,8 +1248,9 @@ fn spawn_read(panel: &mut Panel) -> Command<Message> {
         .as_ref()
         .and_then(|t| t.dynamic_gaps.as_ref())
         .is_some_and(|g| g.enabled);
+    let want_dashboard = panel.dashboard.is_some();
     Command::perform(
-        smol::unblock(move || sensor_runner::read_all(&sources, dynamic_gaps)),
+        smol::unblock(move || sensor_runner::read_all(&sources, dynamic_gaps, want_dashboard)),
         move |reads| Message::SensorsReady(cfg_gen, reads),
     )
 }
@@ -1189,7 +1260,11 @@ fn spawn_read(panel: &mut Panel) -> Command<Message> {
 /// reaping and the popup/link sync against fresh sections. Returns
 /// the window commands the caller batches.
 fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<Command<Message>> {
-    let sensor_runner::Reads { hypr, values } = data;
+    let sensor_runner::Reads {
+        hypr,
+        values,
+        dashboard,
+    } = data;
     // Dynamic gaps first: the layout pass below measures the tiling the
     // new gap produces, never one it invalidates right after.
     tweaks::sync(
@@ -1262,6 +1337,16 @@ fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<Command<Mess
                     }
                 }
                 let mut value = read.text;
+                // The Wi-Fi icon follows this pass's signal; a static
+                // icon configured on the sensor still wins.
+                let wifi_icon = matches!(s.source, config::SensorSource::Wifi {})
+                    .then(|| {
+                        let name =
+                            icons::wifi_signal_icon(read.graph.map(|(value, _)| value as f32));
+                        icons_theme(&panel.config)
+                            .and_then(|theme| icons::resolve(theme, name, st.icon_size))
+                    })
+                    .flatten();
                 // The OSD follows the real changes of the volume and
                 // brightness sliders, whatever moved them.
                 if let Some(label) = osd_label(&s.source) {
@@ -1281,6 +1366,15 @@ fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<Command<Mess
                 // cannot see it.
                 if matches!(s.source, config::SensorSource::Caffeine {}) {
                     value = if panel.caffeine { "on" } else { "off" }.to_string();
+                }
+                // The theme sensor names the active theme (or Custom);
+                // only the panel knows it.
+                if matches!(s.source, config::SensorSource::Theme {}) {
+                    value = panel
+                        .active_theme
+                        .and_then(themes::find)
+                        .map(|theme| theme.name.clone())
+                        .unwrap_or_else(|| "Custom".to_string());
                 }
                 // A layout sensor shows the engine's state (✓ saved /
                 // ✓ applied / ⋯ armed / nothing while the file is
@@ -1363,7 +1457,7 @@ fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<Command<Mess
                     workspaces: workspace_buttons,
                     taskbar: taskbar_icons,
                     is_notifications: st.is_notifications,
-                    icon: st.icon.clone(),
+                    icon: st.icon.clone().or(wifi_icon),
                     icon_size: st.icon_size,
                     fixed_width,
                 }
@@ -1408,6 +1502,36 @@ fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<Command<Mess
     update_icon_targets(panel);
 
     let mut cmds: Vec<Command<Message>> = Vec::new();
+    // The dashboard's media card: refresh the track text every pass, and
+    // decode the cover once per art URL (never per tick, never from the
+    // network).
+    if panel.dashboard.is_some() {
+        let art = dashboard
+            .as_ref()
+            .and_then(|probe| probe.media.as_ref())
+            .and_then(|media| media.art.clone());
+        panel.dash_probe = dashboard;
+        // The probe is the truth: drop the optimistic hints unless a
+        // slider drag is still in flight.
+        panel.dash_profile = None;
+        if !panel.dash_volume_drag {
+            panel.dash_volume = None;
+        }
+        if !panel.dash_brightness_drag {
+            panel.dash_brightness = None;
+        }
+        if art != panel.cover_url {
+            panel.cover_url = art.clone();
+            panel.cover = None;
+            if let Some(url) = art {
+                let task_url = url.clone();
+                cmds.push(Command::perform(
+                    smol::unblock(move || dashboard::cover(&task_url)),
+                    move |handle| Message::DashboardCover(url, handle),
+                ));
+            }
+        }
+    }
     if let Some((label, value)) = osd_updates.pop() {
         let fraction = sensors::leading_number(&value)
             .map(|v| (v / 100.0).clamp(0.0, 1.0))
@@ -1464,16 +1588,36 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             // (font/padding) lives in the config without affecting the bar's
             // own geometry, so its reposition rides on this flag.
             let mut config_reloaded = false;
+            // Theme changed (`theme.json` written by the setup or the
+            // `theme` sensor): re-resolve the colours from the saved base
+            // config and keep the GTK bridge in step. The file is only
+            // read here — the bar never writes it.
+            let theme_state = themes::state();
+            if theme_state != panel.theme_state {
+                panel.theme_state = theme_state;
+                let slug = themes::active();
+                if slug != panel.active_theme {
+                    panel.active_theme = slug;
+                    apply_active_theme(panel);
+                    if let Some(path) = CONFIG_PATH.get() {
+                        app_theme::sync(
+                            std::path::Path::new(path),
+                            &panel.config.panel,
+                            panel.palette.as_ref(),
+                        );
+                    }
+                }
+            }
             if let Some((reloaded, path)) = maybe_reload(panel) {
                 config_reloaded = true;
-                panel.config = reloaded;
+                panel.config_base = reloaded;
                 // An in-flight data pass was flattened against the
                 // previous sensor list: its reply gets dropped.
                 panel.cfg_gen += 1;
                 // The colour chains follow the new config (see
                 // `restyle`); the readings and the geometry below
                 // don't need them, so one resolve covers the tick.
-                restyle(panel);
+                apply_active_theme(panel);
                 // The graph history follows the new sensor set: one
                 // ring per `draw_graph` column of the new config.
                 panel.graphs = graphs::History::new(&panel.config.panel.sections);
@@ -1607,6 +1751,7 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             // themselves after their linger.
             cmds.push(osd::sync(panel));
             cmds.push(power_menu::sync(panel));
+            cmds.push(theme_menu::sync(panel));
             // The derived palette follows the same cadence: extracted
             // off-thread only when the wallpaper file changes, dropped
             // when the option turns off.
@@ -1663,6 +1808,17 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
                 && matches!(e, Event::Mouse(iced::mouse::Event::ButtonPressed { .. }))
             {
                 return power_menu::close(panel);
+            }
+            if theme_menu::is_window(panel, id)
+                && matches!(e, Event::Mouse(iced::mouse::Event::CursorLeft))
+            {
+                return theme_menu::close(panel);
+            }
+            if theme_menu::settled(panel)
+                && BAR_ID.get().copied() == Some(id)
+                && matches!(e, Event::Mouse(iced::mouse::Event::ButtonPressed { .. }))
+            {
+                return theme_menu::close(panel);
             }
             if screensaver::is_window(panel, id) {
                 // The card appears on the first real input: until then
@@ -2050,6 +2206,12 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
                 }
                 Some(config::SensorSource::Power {}) => {
                     return crate::power_menu::open(panel);
+                }
+                Some(config::SensorSource::Theme {}) => {
+                    return crate::theme_menu::open(panel);
+                }
+                Some(config::SensorSource::Dashboard {}) => {
+                    return crate::dashboard::open(panel);
                 }
                 _ => {}
             }
@@ -2495,6 +2657,115 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             screensaver::show(panel)
         }
         Message::ScreensaverManual => screensaver::show(panel),
+        Message::SectionToggled(index) => {
+            if panel.collapsed_sections.remove(&index) {
+                return Command::none();
+            }
+            panel.collapsed_sections.insert(index);
+            // A collapsed section has no sensors left on screen: its
+            // popups go with it, and a stale hover is cleared.
+            let mut cmds = Vec::new();
+            if let Some(gp) = panel.graph_popup.take_if(|gp| gp.section == index) {
+                cmds.push(iced::window::close(gp.id));
+            }
+            if let Some(cp) = panel.calendar.take_if(|cp| cp.section == index) {
+                cmds.push(iced::window::close(cp.id));
+            }
+            if panel.hovered.is_some_and(|(section, _)| section == index) {
+                panel.hovered = None;
+            }
+            Command::batch(cmds)
+        }
+        Message::DashboardClose => dashboard::close(panel),
+        Message::DashboardCover(url, handle) => {
+            // A decode that raced another art change is stale.
+            if panel.cover_url.as_deref() == Some(url.as_str()) {
+                panel.cover = handle;
+            }
+            Command::none()
+        }
+        Message::DashboardAction(action) => match action {
+            dashboard::Action::PowerProfile => {
+                // Show the next label at once; the probe confirms it.
+                let current = panel
+                    .dash_probe
+                    .as_ref()
+                    .map(|p| p.power_profile.as_str())
+                    .unwrap_or("");
+                panel.dash_profile = Some(dashboard::next_profile(current).to_string());
+                std::thread::spawn(sensors::cycle_power_profile);
+                Command::none()
+            }
+            dashboard::Action::Caffeine => {
+                panel.caffeine = !panel.caffeine;
+                Command::none()
+            }
+            dashboard::Action::Bluetooth => {
+                std::thread::spawn(sensors::toggle_bluetooth);
+                Command::none()
+            }
+            dashboard::Action::Lock => {
+                let closed = dashboard::close(panel);
+                Command::batch([closed, screensaver::show(panel)])
+            }
+            dashboard::Action::PlayPause => {
+                mpris::play_pause();
+                Command::none()
+            }
+            dashboard::Action::Previous => {
+                mpris::step(true);
+                Command::none()
+            }
+            dashboard::Action::Next => {
+                mpris::step(false);
+                Command::none()
+            }
+        },
+        Message::DashboardVolume(value) => {
+            panel.dash_volume = Some(value);
+            panel.dash_volume_drag = true;
+            Command::none()
+        }
+        Message::DashboardVolumeRelease => {
+            panel.dash_volume_drag = false;
+            if let Some(value) = panel.dash_volume {
+                std::thread::spawn(move || sensors::set_volume("", value));
+            }
+            Command::none()
+        }
+        Message::DashboardBrightness(value) => {
+            panel.dash_brightness = Some(value);
+            panel.dash_brightness_drag = true;
+            Command::none()
+        }
+        Message::DashboardBrightnessRelease => {
+            panel.dash_brightness_drag = false;
+            if let Some(value) = panel.dash_brightness {
+                std::thread::spawn(move || sensors::set_backlight(value as f64));
+            }
+            Command::none()
+        },
+        Message::ThemeSelected(slug) => {
+            let close = theme_menu::close(panel);
+            // An unknown slug is custom, exactly like a hand-edited
+            // `theme.json`: never apply it as a broken theme.
+            let chosen = slug.as_deref().and_then(|s| themes::find(s)).map(|t| t.slug);
+            if let Err(err) = themes::write_active(chosen) {
+                eprintln!("[piuma] theme: cannot save the active theme: {err}");
+                return close;
+            }
+            panel.theme_state = themes::state();
+            panel.active_theme = chosen;
+            apply_active_theme(panel);
+            if let Some(path) = CONFIG_PATH.get() {
+                app_theme::sync(
+                    std::path::Path::new(path),
+                    &panel.config.panel,
+                    panel.palette.as_ref(),
+                );
+            }
+            close
+        }
         Message::PowerAction(action) => {
             let close = power_menu::close(panel);
             let command = match action {
@@ -2598,7 +2869,11 @@ pub(crate) fn icons_theme(config: &config::Config) -> Option<&str> {
         .flat_map(|section| section.sensors.iter())
         .any(|sensor| {
             sensor.icon.is_some()
-                || matches!(sensor.source, config::SensorSource::VolumeMeter { .. })
+                || matches!(
+                    sensor.source,
+                    config::SensorSource::VolumeMeter { .. }
+                        | config::SensorSource::Wifi {}
+                )
         });
     if !declares_icon {
         return None;
@@ -2759,6 +3034,12 @@ fn bar_view<'a>(
     if power_menu::is_window(panel, window) {
         return power_menu::view(panel);
     }
+    if theme_menu::is_window(panel, window) {
+        return theme_menu::view(panel);
+    }
+    if dashboard::is_window(panel, window) {
+        return dashboard_view::view(panel);
+    }
     if osd::is_window(panel, window) {
         return osd::view(panel);
     }
@@ -2777,6 +3058,13 @@ fn bar_view<'a>(
     // Panel orientation: the `thickness` axis (the "cross" axis of the panel)
     // is the height for a horizontal panel and the width for a vertical one.
     let vertical = panel_vertical(&panel.config, layout.anchor.as_deref());
+    // A side bar is narrow: spend less of its width on the content inset
+    // so the icons keep their size (styles.rs sizes them to match).
+    let content_pad = if vertical {
+        SECTION_CONTENT_PAD_NARROW
+    } else {
+        SECTION_CONTENT_PAD
+    };
 
     // Build sections.
     let mut section_elements: Vec<Element<'a, Message>> = Vec::new();
@@ -3005,7 +3293,7 @@ fn bar_view<'a>(
             } else {
                 unsafe { SCREEN_WIDTH }
             })
-            .saturating_sub(2 * (u32::from(SECTION_CONTENT_PAD) + u32::from(pad_h)));
+            .saturating_sub(2 * (u32::from(content_pad) + u32::from(pad_h)));
             let is_volume_meter = panel
                 .config
                 .panel
@@ -3269,7 +3557,7 @@ fn bar_view<'a>(
                 .line_height(iced::widget::text::LineHeight::Relative(1.2)),
         )
         .align_x(Alignment::Center)
-        .padding(SECTION_CONTENT_PAD)
+        .padding(content_pad)
         .into();
 
         let sensors_inner: Element<'a, Message> = if stack_sensors {
@@ -3278,7 +3566,7 @@ fn bar_view<'a>(
             let sensor_col = Column::new()
                 .extend(sensor_widgets)
                 .spacing(SENSOR_SPACING)
-                .padding(SECTION_CONTENT_PAD);
+                .padding(content_pad);
             // `stretch` here means: stacked sensors that must fill the
             // thickness (width) so the boxes stretch — a vertical panel
             // always, a horizontal one only for vertical sections; the
@@ -3296,7 +3584,7 @@ fn bar_view<'a>(
             // stretched (Fill-height) sensor boxes.
             let mut row = Row::new()
                 .spacing(SENSOR_SPACING)
-                .padding(SECTION_CONTENT_PAD)
+                .padding(content_pad)
                 .align_y(Alignment::Center);
             if has_title {
                 row = row.push(title_el);
@@ -3306,6 +3594,52 @@ fn bar_view<'a>(
             // fill the thickness (height) so the boxes stretch.
             let row = if stretch { row.height(Length::Fill) } else { row };
             row.into()
+        };
+
+        // A collapsible section leads with a dot handle in the section's
+        // own text colour; collapsed, the box holds only that dot.
+        let collapsible = panel
+            .config
+            .panel
+            .sections
+            .get(section_idx)
+            .is_some_and(|cfg| cfg.collapsible);
+        let collapsed = collapsible && panel.collapsed_sections.contains(&section_idx);
+        let sensors_inner: Element<'a, Message> = if collapsible {
+            let dot: Element<'a, Message> = MouseArea::new(
+                container(Space::new())
+                    .width(Length::Fixed(8.0))
+                    .height(Length::Fixed(8.0))
+                    .style(move |_t| ContainerStyle {
+                        background: Some(Background::Color(section_text)),
+                        border: iced::Border {
+                            radius: 4.0.into(),
+                            ..Default::default()
+                        },
+                        ..ContainerStyle::default()
+                    }),
+            )
+            .on_press(Message::SectionToggled(section_idx))
+            .interaction(iced::mouse::Interaction::Pointer)
+            .into();
+            if collapsed {
+                container(dot).padding(4).into()
+            } else if stack_sensors {
+                Column::new()
+                    .push(container(dot).padding(2))
+                    .push(sensors_inner)
+                    .spacing(4)
+                    .into()
+            } else {
+                Row::new()
+                    .push(container(dot).padding(2))
+                    .push(sensors_inner)
+                    .spacing(6)
+                    .align_y(Alignment::Center)
+                    .into()
+            }
+        } else {
+            sensors_inner
         };
 
         // Wrap in a styled box: section background plus the section border,
@@ -3449,18 +3783,25 @@ fn title_fit_name<'a>(panel: &'a Panel, section: &'a SectionData) -> &'a str {
 fn update_icon_targets(panel: &Panel) {
     let thickness = panel_thickness(&panel.config);
     let font = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
+    let rooms = crate::geometry::section_icon_room(&panel.config, font);
     let mut shared: Option<u16> = None;
-    for section in &panel.sections {
+    for (section_idx, section) in panel.sections.iter().enumerate() {
         // Title height as the view draws it, shared with the sensor icon
-        // fit: text in a box padded SECTION_CONTENT_PAD on both sides.
-        let title_extra =
-            icons::stacked_title_extra(&section.layout, title_fit_name(panel, section), font);
+        // fit: text in a box padded by the section's content inset.
+        let room = rooms
+            .get(section_idx)
+            .copied()
+            .unwrap_or(crate::geometry::IconRoom {
+                title_extra: 0,
+                pad: SECTION_CONTENT_PAD,
+            });
         for sensor in &section.sensors {
             if sensor.tray.is_none() && sensor.taskbar.is_none() {
                 continue;
             }
-            let edge = icons::font_icon_edge(font, u32::from(sensor.padding))
-                .min(icons::row_icon_target(thickness, title_extra, 0));
+            let edge = icons::font_icon_edge(font, u32::from(sensor.padding)).min(
+                icons::row_icon_target(thickness, u32::from(room.pad), room.title_extra, 0),
+            );
             shared = Some(shared.map_or(edge, |m| m.min(edge)));
         }
     }
@@ -3861,7 +4202,7 @@ fn main() -> Result<(), iced_exwlshell::Error> {
 
     // Load configuration once at startup; remember the file it came from so
     // it can be watched for hot reload.
-    let (config, resolved_config_path) = config::load_config(config_path.clone());
+    let (mut config, resolved_config_path) = config::load_config(config_path.clone());
 
     eprintln!(
         "[piuma] Config loaded: {} section(s) from {}",
@@ -3888,6 +4229,16 @@ fn main() -> Result<(), iced_exwlshell::Error> {
             }
         }
         autostart::spawn(pruned);
+    }
+
+    // The active theme lives in its own file (`~/.config/piuma/theme.json`)
+    // and is applied over the config in memory only: the base copy stays
+    // untouched for "custom", and `piuma.json` is never rewritten.
+    let config_base = config.clone();
+    let active_theme = themes::active();
+    if let Some(slug) = active_theme {
+        themes::apply(&mut config, slug);
+        eprintln!("[piuma] Theme: {slug}");
     }
 
     // Roadmap N3: render the GTK theme bridge from the bar's own style
@@ -3931,11 +4282,13 @@ fn main() -> Result<(), iced_exwlshell::Error> {
 
     // Run the iced app on a dedicated thread so the close action can be
     // observed from the main thread without blocking the event loop.
+    let boot_base = config_base.clone();
     let handle = std::thread::Builder::new()
         .name("piuma-panel".to_string())
         .spawn(move || {
             let boot_layouts = layouts.clone();
             let boot_screens = screens.clone();
+            let boot_base = boot_base.clone();
             let outcome = daemon(
                 move || {
                     let cfg = CONFIG
@@ -3958,6 +4311,9 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                     let styles = resolve_styles(&cfg, None);
                     let state = Panel {
                         config: cfg.clone(),
+                        config_base: boot_base.clone(),
+                        active_theme,
+                        theme_state: themes::state(),
                         sections: Vec::new(),
                         styles,
                         read_pending: false,
@@ -4011,7 +4367,18 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         bar_windows: Vec::new(),
                         last_glass: cfg.glass().is_some(),
                         power_menu: None,
+                        theme_menu: None,
+                        dashboard: None,
+                        dash_probe: None,
+                        dash_profile: None,
+                        dash_volume: None,
+                        dash_brightness: None,
+                        dash_volume_drag: false,
+                        dash_brightness_drag: false,
+                        cover: None,
+                        cover_url: None,
                         osd: None,
+                        collapsed_sections: std::collections::HashSet::new(),
                         palette: None,
                         palette_seed: None,
                         palette_key: None,

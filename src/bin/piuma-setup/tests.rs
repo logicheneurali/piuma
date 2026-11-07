@@ -121,7 +121,32 @@ fn fixture() -> PiumaSetup {
         hypr_wallpaper_disabled: None,
         autostart_apps: Vec::new(),
         layouts: Vec::new(),
+        active_theme: None,
     }
+}
+
+/// A section's `collapsible` flag parses, saves as `true` and drops
+/// from the file when off (absent = false, like every boolean here).
+#[test]
+fn collapsible_section_roundtrips() {
+    let mut state = fixture();
+    state
+        .load_from_json(
+            r##"{"panel":{"sections":[{"name":"s","collapsible":true,"sensors":[]}]}}"##,
+        )
+        .expect("parse");
+    assert!(state.config.sections[0].collapsible);
+    let saved: JsonValue =
+        serde_json::from_str(&state.serialize().expect("serialize")).expect("json");
+    assert_eq!(
+        saved["panel"]["sections"][0]["collapsible"].as_bool(),
+        Some(true)
+    );
+
+    state.config.sections[0].collapsible = false;
+    let saved: JsonValue =
+        serde_json::from_str(&state.serialize().expect("serialize")).expect("json");
+    assert!(saved["panel"]["sections"][0].get("collapsible").is_none());
 }
 
 /// Load→save of a legacy config: only the type names may change
@@ -1812,6 +1837,33 @@ fn wallpaper_thumbnails_skip_broken_files_and_cache() {
     assert!(
         fs::read_dir(&cache).map_or(0, |entries| entries.count()) >= 1,
         "the decoded preview must be cached on disk"
+    );
+
+    // A non-16:9 source is cropped to the exact 16:9 thumbnail, so the
+    // grid preview never upscales a narrow side.
+    let wide = dir.join("wide.png");
+    image::RgbaImage::from_pixel(40, 10, image::Rgba([10, 200, 10, 255]))
+        .save(&wide)
+        .expect("wide fixture");
+    let wide_cache = dir.join("cache-wide");
+    crate::view_wallpaper::thumbnail_cached(Some(&wide_cache), &wide)
+        .expect("the wide image must decode");
+    let cached = fs::read_dir(&wide_cache)
+        .expect("cache dir")
+        .next()
+        .expect("one cached preview")
+        .expect("entry")
+        .path();
+    let decoded = image::ImageReader::open(&cached)
+        .expect("open cached png")
+        .with_guessed_format()
+        .expect("png format")
+        .decode()
+        .expect("decode cached png");
+    assert_eq!(
+        (decoded.width(), decoded.height()),
+        (160, 90),
+        "the preview must be 16:9 (cropped, not letterboxed)"
     );
     let _ = fs::remove_dir_all(&dir);
 }

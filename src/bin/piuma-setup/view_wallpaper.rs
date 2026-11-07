@@ -88,9 +88,20 @@ fn collect_images(dir: &Path, out: &mut Vec<PathBuf>, depth: u8) {
     }
 }
 
-/// Thumbnail size in pixels: the visible grid never needs more.
+/// Thumbnail size in pixels: exactly 16:9, cropped from the source, so
+/// the grid preview is always a downscale and never a blurry upscale.
 const THUMB_WIDTH: u32 = 160;
 const THUMB_HEIGHT: u32 = 90;
+/// Bump when the thumbnail pixels change: the cache key includes it, so
+/// an old contain-fit preview is not served for the new crop.
+const THUMB_VERSION: u32 = 2;
+/// Grid preview: a fixed 16:9 box. The width follows the height, it
+/// does not stretch with the window (that was cropping the thumbnail
+/// into an ever-wider strip).
+const PREVIEW_HEIGHT: f32 = 84.0;
+const PREVIEW_WIDTH: f32 = PREVIEW_HEIGHT * 16.0 / 9.0;
+/// Cell width: the preview plus the button's 4 px padding a side.
+const CELL_WIDTH: f32 = PREVIEW_WIDTH + 8.0;
 
 /// `~/.cache/piuma/wallpapers`: downscaled previews live here, so a
 /// later setup run lists every wallpaper without decoding it again.
@@ -105,6 +116,7 @@ fn cache_file(dir: &Path, path: &Path) -> PathBuf {
     use std::hash::{Hash, Hasher};
 
     let mut hasher = DefaultHasher::new();
+    THUMB_VERSION.hash(&mut hasher);
     path.hash(&mut hasher);
     if let Ok(meta) = path.metadata() {
         meta.len().hash(&mut hasher);
@@ -142,7 +154,15 @@ pub(crate) fn thumbnail_cached(cache: Option<&Path>, path: &Path) -> Option<(Str
         .ok()?
         .decode()
         .ok()?;
-    let thumb = decoded.thumbnail(THUMB_WIDTH, THUMB_HEIGHT).to_rgba8();
+    // Crop to fill the 16:9 thumbnail: a portrait/panorama source keeps
+    // its centre, the preview never letterboxes or upscales a narrow side.
+    let thumb = decoded
+        .resize_to_fill(
+            THUMB_WIDTH,
+            THUMB_HEIGHT,
+            ::image::imageops::FilterType::Triangle,
+        )
+        .to_rgba8();
     let mut bytes = Vec::new();
     ::image::DynamicImage::ImageRgba8(thumb)
         .write_to(
@@ -184,13 +204,13 @@ fn wallpaper_cell(
     // still decoding shows a neutral placeholder, never a missing row.
     let preview: Element<'static, Message> = match handle {
         Some(handle) => image(handle.clone())
-            .width(Length::Fill)
-            .height(Length::Fixed(84.0))
+            .width(Length::Fixed(PREVIEW_WIDTH))
+            .height(Length::Fixed(PREVIEW_HEIGHT))
             .content_fit(iced::ContentFit::Cover)
             .into(),
         None => container(text("◌").size(20))
-            .width(Length::Fill)
-            .height(Length::Fixed(84.0))
+            .width(Length::Fixed(PREVIEW_WIDTH))
+            .height(Length::Fixed(PREVIEW_HEIGHT))
             .align_x(Alignment::Center)
             .align_y(Alignment::Center)
             .style(inset_style(pal))
@@ -202,14 +222,17 @@ fn wallpaper_cell(
             text(label)
                 .size(10)
                 .width(Length::Fill)
-                .wrapping(iced::widget::text::Wrapping::Word),
+                // Wallpaper file names have no spaces (dots/underscores):
+                // word wrapping would overflow the 16:9 cell, glyph
+                // wrapping keeps the label inside it.
+                .wrapping(iced::widget::text::Wrapping::Glyph),
         ]
         .spacing(4)
         .width(Length::Fill),
     )
     .on_press(Message::WallpaperPathChanged(path.to_string()))
     .padding(4)
-    .width(Length::Fill)
+    .width(Length::Fixed(CELL_WIDTH))
     .style(move |t, s| {
         if selected {
             btn_primary(pal, t, s)
@@ -329,37 +352,31 @@ pub(crate) fn wallpaper_settings(state: &PiumaSetup) -> Element<'_, Message> {
                 .label("Bar colours from the wallpaper")
                 .on_toggle(Message::PaletteFromWallpaper),
         );
-        // Every wallpaper is a cell from the first frame (name + cover
-        // thumbnail when decoded): three columns, three rows visible and
-        // the scrollbar for the rest. Thumbnails arrive in batches from
-        // the background decode, so the grid fills in without hiding any
-        // file and without blocking the window.
-        let mut grid = column![].spacing(6).width(Length::Fill);
-        let mut row = Row::new().spacing(6).width(Length::Fill);
-        for (i, file) in state.wallpaper_files.iter().enumerate() {
+        // Every wallpaper is a cell from the first frame (name + 16:9
+        // cover thumbnail when decoded). The cells have a fixed 16:9
+        // width, so a wider window shows more columns instead of
+        // stretching (and over-cropping) the previews; the scrollable
+        // keeps about three rows in view. Thumbnails arrive in batches
+        // from the background decode, so the grid fills in without
+        // hiding any file and without blocking the window.
+        let mut cells = Row::new().spacing(6).width(Length::Fill);
+        for file in &state.wallpaper_files {
             let path = file.to_string_lossy();
             let handle = state.wallpaper_thumbs.get(path.as_ref());
-            row = row.push(wallpaper_cell(
+            cells = cells.push(wallpaper_cell(
                 pal,
                 &path,
                 handle,
                 current == path.as_ref(),
             ));
-            if (i + 1) % 3 == 0 {
-                grid = grid.push(row);
-                row = Row::new().spacing(6).width(Length::Fill);
-            }
-        }
-        if state.wallpaper_files.len() % 3 != 0 {
-            grid = grid.push(row);
         }
         let grid: Element<Message> = if state.wallpaper_files.is_empty() {
             text("No wallpapers found in the freedesktop folders.")
                 .size(BODY)
                 .into()
         } else {
-            scrollable(grid)
-                .height(Length::Fixed(3.0 * 116.0))
+            scrollable(cells.wrap().vertical_spacing(6))
+                .height(Length::Fixed(3.0 * 124.0))
                 .width(Length::Fill)
                 .into()
         };

@@ -35,6 +35,12 @@ mod icons;
 #[path = "../../xdg.rs"]
 mod xdg;
 
+// Colour themes: the bar's own module (embedded files + `theme.json`),
+// so the picker applies exactly what the bar reads.
+#[allow(dead_code)]
+#[path = "../../themes.rs"]
+mod themes;
+
 mod controls;
 mod hyprland_wallpaper;
 mod model;
@@ -49,6 +55,7 @@ mod view_layouts;
 mod view_panel;
 mod view_sections;
 mod view_tweaks;
+mod view_themes;
 mod view_wallpaper;
 
 // Re-exported at the root: the shared `icons.rs` (also used by the bar)

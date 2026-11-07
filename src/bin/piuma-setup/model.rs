@@ -527,6 +527,8 @@ pub struct Section {
     pub border_width: Option<i32>,
     pub border_radius: Option<i32>,
     pub border_type: Option<String>,
+    /// The section collapses to a dot in the bar (see `collapsible`).
+    pub collapsible: bool,
     pub sensors: Vec<Sensor>,
 }
 
@@ -626,6 +628,7 @@ impl Default for Section {
             border_width: None,
             border_radius: None,
             border_type: None,
+            collapsible: false,
             sensors: vec![Sensor::default()],
         }
     }
@@ -1127,6 +1130,9 @@ impl PiumaSetup {
         if let Some(bt) = &section.border_type {
             map.insert("border_type".to_string(), JsonValue::String(bt.clone()));
         }
+        if section.collapsible {
+            map.insert("collapsible".to_string(), JsonValue::Bool(true));
+        }
         let sensors_vec: Vec<JsonValue> = section.sensors.iter().map(|s| self.sensor_to_json(s)).collect();
         map.insert("sensors".to_string(), JsonValue::Array(sensors_vec));
         JsonValue::Object(map)
@@ -1559,6 +1565,7 @@ impl PiumaSetup {
             border_width: None,
             border_radius: None,
             border_type: None,
+            collapsible: false,
             sensors: Vec::new(),
         };
 
@@ -1572,6 +1579,10 @@ impl PiumaSetup {
         section.border_width = obj.get("border_width").and_then(|v| v.as_i64()).map(|v| v as i32);
         section.border_radius = obj.get("border_radius").and_then(|v| v.as_i64()).map(|v| v as i32);
         section.border_type = obj.get("border_type").and_then(|v| v.as_str()).map(|s| s.to_string());
+        section.collapsible = obj
+            .get("collapsible")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if let Some(sensors) = obj.get("sensors").and_then(|v| v.as_array()) {
             section.sensors = sensors.iter().filter_map(|s| self.load_sensor(s)).collect();
         }
@@ -1769,7 +1780,7 @@ pub(crate) const SOURCE_TYPES: &[&str] = &[
     "uptime", "clock", "calendar", "window", "workspace",
     "workspace_dots", "command", "list", "env_var", "static_text", "volume_meter",
     "media", "tray", "notifications", "taskbar", "layout", "lock",
-    "caffeine", "power",
+    "caffeine", "power", "theme", "dashboard", "wifi",
 ];
 
 /// The sensor-type combo's options (roadmap2 #6): every canonical type
@@ -1829,6 +1840,9 @@ pub(crate) fn source_label(canonical: &str) -> &'static str {
         "lock" => "Lock screen",
         "caffeine" => "Caffeine (idle inhibit)",
         "power" => "Power menu",
+        "theme" => "Theme picker",
+        "dashboard" => "Dashboard",
+        "wifi" => "Wi-Fi (signal + internet)",
         "command" => "Shell command",
         "list" => "Data list",
         "env_var" => "Environment variable",

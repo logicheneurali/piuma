@@ -416,6 +416,30 @@ window.background.background .sidebar .view:selected {{
   color: {selfg};
 }}
 
+/* The fill must survive app-scoped stylesheets that reset backgrounds for
+   every descendant (e.g. Thunar's `.thunar .frame.standard-view .view
+   *:not(.rubberband) {{ background-color: transparent }}`): that rule is
+   (0,5,0), so the focused row still won through `:selected:focus` while
+   the other selected rows stayed transparent. One extra `.background`
+   lifts this background-only rule to (0,5,2); the text colour stays with
+   the rules above, so an app stylesheet's own selected text tone wins. */
+window.background.background.background treeview.view:selected,
+window.background.background.background treeview.view:selected:focus,
+window.background.background.background treeview.view:selected:backdrop,
+window.background.background.background .view:selected,
+window.background.background.background .view:selected:focus,
+window.background.background.background .view *:selected,
+window.background.background.background iconview:selected,
+window.background.background.background flowbox flowboxchild:selected,
+window.background.background.background listview > row:selected,
+window.background.background.background list > row:selected,
+window.background.background.background placessidebar row:selected,
+window.background.background.background .navigation-sidebar row:selected,
+window.background.background.background .sidebar .view:selected {{
+  background-color: {selb};
+  background-image: none;
+}}
+
 /* container rows hover — section hover tone */
 window.background.background placessidebar row:hover,
 window.background.background .navigation-sidebar row:hover,
@@ -1405,6 +1429,11 @@ mod tests {
         assert!(css.contains(&format!("@define-color accent_bg_color {};", t.selection_bg)));
         assert!(css.contains("button:not(.flat)"));
         assert!(css.contains("popover.menu listview > row:hover"));
+        // Selection fill must outrank app-scoped background resets.
+        assert!(
+            css.contains("window.background.background.background treeview.view:selected"),
+            "selection fill is not raised above app stylesheets"
+        );
     }
 
     #[test]

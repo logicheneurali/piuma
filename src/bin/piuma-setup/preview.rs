@@ -51,6 +51,9 @@ pub(crate) fn sample_value(source_type: &str) -> &'static str {
         "layout" => "Work",
         "lock" => "",
         "caffeine" => "off",
+        "theme" => "Custom",
+        "dashboard" => "",
+        "wifi" => "Home Wi-Fi",
         "power" => "",
         "command" => "42",
         "list" => "line one",
@@ -94,6 +97,9 @@ pub(crate) fn sample_name(source_type: &str) -> &'static str {
         "lock" => "LOCK",
         "caffeine" => "CAF",
         "power" => "POWER",
+        "theme" => "THEME",
+        "dashboard" => "DASH",
+        "wifi" => "WIFI",
         "command" => "CMD",
         "list" => "LIST",
         "net_info" => "NET",
@@ -216,7 +222,7 @@ fn icon_size(cfg: &PiumaConfig, section: Option<&Section>, sensor: &Sensor) -> u
             } else {
                 cfg.thickness
             };
-            icons::row_icon_target(thickness, 0, 0)
+            icons::row_icon_target(thickness, u32::from(icons::SECTION_CONTENT_PAD), 0, 0)
         }
     }
 }
