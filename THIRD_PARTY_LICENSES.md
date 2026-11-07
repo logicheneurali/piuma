@@ -2,13 +2,9 @@
 
 Piuma itself is licensed under Apache-2.0 (see `LICENSE`). This file lists every third-party crate compiled or used at build time for the Linux binaries (`piuma` and `piuma-setup`), resolved for `x86_64-unknown-linux-gnu`.
 
-Generated from the lock file with:
-
-```sh
-scripts/gen-third-party-licenses.py
-```
-
-Packages in the Linux build: **417 third-party crates** (plus piuma itself). Every license is OSI open source.
+Generated from the lock file (`cargo tree` / `cargo metadata`) for the
+Linux build. Packages in the Linux build: **417 third-party crates**
+(plus piuma itself). Every license is OSI open source.
 
 A binary or archive distribution must ship this file together with `LICENSE` and the `LICENSES/` directory: the appendix contains the copyright notices and permission texts required by MIT, BSD, ISC, Zlib and the other licenses below.
 

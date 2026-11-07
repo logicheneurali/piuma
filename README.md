@@ -964,8 +964,7 @@ together with the copyright notices and full license texts a binary
 distribution must carry; the MPL-2.0 text applying to `option-ext` is
 also in [LICENSES/MPL-2.0.txt](LICENSES/MPL-2.0.txt).
 
-The file is generated from the resolved Cargo graph with
-`scripts/gen-third-party-licenses.py`; rerun it after any dependency
+The file is regenerated from the resolved Cargo graph when dependencies
 change. Any binary or archive distribution must ship `LICENSE`,
 `THIRD_PARTY_LICENSES.md` and the `LICENSES/` directory alongside the
-executables — `scripts/package-release.sh` builds a tarball that does.
+executables.
