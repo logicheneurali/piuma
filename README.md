@@ -443,7 +443,8 @@ and `padding` (on sensors, on sections, and on `panel.sensor_defaults` /
 
 Sections support the same border drawing as sensors (`border_color`,
 `border_width`, `border_radius`, `border_type` = `full`, `corners`,
-`underline`, `upperline`, `left`, `right`; no hover variants), with the same
+`underline`, `upperline`, `left`, `right`, `leaf-right`, `leaf-left`;
+no hover variants), with the same
 precedence rule as `panel.sensor_defaults`: a section owns the border group
 only when it sets `border_color`, otherwise the whole group comes from
 `panel.section_defaults`. `bg_color`/`text_color` are single keys: the

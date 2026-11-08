@@ -246,6 +246,26 @@ pub(crate) fn corner_radius(touch: [bool; 4], radius: f32) -> iced::border::Radi
     }
 }
 
+/// Per-corner radius of the leaf shapes: `right` rounds the top-left and
+/// bottom-right corners, `left` rounds the top-right and bottom-left
+/// ones; every other corner is square. A corner flush with a screen edge
+/// stays square too, like every other border type.
+pub(crate) fn leaf_radius(touch: [bool; 4], radius: f32, right: bool) -> iced::border::Radius {
+    let corner = |enabled: bool, flush: bool| {
+        if enabled && !flush {
+            radius
+        } else {
+            0.0
+        }
+    };
+    iced::border::Radius {
+        top_left: corner(right, touch[0] || touch[3]),
+        top_right: corner(!right, touch[0] || touch[1]),
+        bottom_right: corner(right, touch[2] || touch[1]),
+        bottom_left: corner(!right, touch[2] || touch[3]),
+    }
+}
+
 /// Output-space rect `(x0, y0, x1, y1)` of a surface placed by
 /// `menu_placement`: the anchored side starts at its margin, the
 /// flipped side's margin pins the far edge to the output.
@@ -393,6 +413,39 @@ mod tests {
                 none.bottom_left
             ),
             (12.0, 12.0, 12.0, 12.0)
+        );
+    }
+
+    /// The leaf shapes round only their diagonal; a flush screen edge
+    /// still squares the corners it touches.
+    #[test]
+    fn leaf_radius_rounds_only_its_diagonal() {
+        let right = leaf_radius([false; 4], 10.0, true);
+        assert_eq!(
+            (
+                right.top_left,
+                right.top_right,
+                right.bottom_right,
+                right.bottom_left
+            ),
+            (10.0, 0.0, 10.0, 0.0)
+        );
+        let left = leaf_radius([false; 4], 10.0, false);
+        assert_eq!(
+            (
+                left.top_left,
+                left.top_right,
+                left.bottom_right,
+                left.bottom_left
+            ),
+            (0.0, 10.0, 0.0, 10.0)
+        );
+        // The top side is flush: leaf-right loses the top-left round and
+        // leaf-left loses the top-right one.
+        assert_eq!(leaf_radius([true, false, false, false], 10.0, true).top_left, 0.0);
+        assert_eq!(
+            leaf_radius([true, false, false, false], 10.0, false).top_right,
+            0.0
         );
     }
 

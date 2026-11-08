@@ -70,7 +70,9 @@ fn sync_gaps(panel: &config::PanelConfig, clients: Option<&[WinRow]>) {
         .and_then(|t| t.dynamic_gaps.as_ref())
         .filter(|g| g.enabled);
     let Some(gaps) = gaps else {
-        restore();
+        // Only the gaps: `restore()` would put back every tweak and the
+        // same tick would re-apply shadows/borders, once per second.
+        restore_gaps();
         return;
     };
     let Some(clients) = clients else {

@@ -957,7 +957,16 @@ pub struct ConfigError {
 }
 
 /// The `border_type` values the renderer understands (`styles.rs`).
-pub const BORDER_TYPES: [&str; 6] = ["full", "corners", "underline", "upperline", "left", "right"];
+pub const BORDER_TYPES: [&str; 8] = [
+    "full",
+    "corners",
+    "underline",
+    "upperline",
+    "left",
+    "right",
+    "leaf-right",
+    "leaf-left",
+];
 
 /// The `err_*` helpers below each append one `ConfigError` (path +
 /// reason) when a present value does not parse or is out of range;
@@ -2257,6 +2266,18 @@ mod tests {
         assert!(validate_config(&zero)
             .iter()
             .any(|e| e.path == "panel.tweaks.dynamic_gaps.min"));
+    }
+
+    /// The leaf border shapes are part of the accepted set and validate.
+    #[test]
+    fn leaf_border_types_validate() {
+        assert!(BORDER_TYPES.contains(&"leaf-right"));
+        assert!(BORDER_TYPES.contains(&"leaf-left"));
+        let cfg: Config = serde_json::from_str(
+            r##"{"panel":{"sections":[{"sensors":[{"name":"L","source":{"type":"static_text","static_text":"L"},"border_color":"#ffffffff","border_width":2,"border_radius":8,"border_type":"leaf-right"}]}]}}"##,
+        )
+        .expect("leaf border parses");
+        assert!(validate_config(&cfg).is_empty());
     }
 
     /// The runtime-state sources parse with no parameters, and a

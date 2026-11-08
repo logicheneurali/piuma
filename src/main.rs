@@ -82,8 +82,8 @@ mod xdg;
 use corners::{corners_view, sync_corners};
 use fill_sections::FillSections;
 use geometry::{
-    corner_radius, panel_anchor, panel_anchor_for, panel_size, panel_thickness, panel_vertical,
-    placement_rect, section_touch_for,
+    corner_radius, leaf_radius, panel_anchor, panel_anchor_for, panel_size, panel_thickness,
+    panel_vertical, placement_rect, section_touch_for,
 };
 use menus::{
     fit_menu_labels, menu_arrow_h, menu_placement, menu_row_h, menu_size_shown,
@@ -1054,6 +1054,14 @@ pub(crate) fn styled_box<'a>(
             .into()
     };
 
+    // The leaf shapes are a native border with only one diagonal rounded;
+    // the closure below must not borrow the `border_type` string.
+    let leaf = match border_type {
+        "leaf-right" => Some(true),
+        "leaf-left" => Some(false),
+        _ => None,
+    };
+
     // `width`/`height` carry the panel's thickness axis (Fill when the boxes
     // stretch, Shrink otherwise); the content stays content-sized and is
     // centred inside (a no-op on the Shrink axes).
@@ -1086,7 +1094,10 @@ pub(crate) fn styled_box<'a>(
                     // renderer composes background and border once, so a
                     // translucent colour shows no seams and nothing is ever
                     // drawn over the sensors.
-                    style.border.radius = corner_radius(touch, border_radius as f32);
+                    style.border.radius = match leaf {
+                        Some(right) => leaf_radius(touch, border_radius as f32, right),
+                        None => corner_radius(touch, border_radius as f32),
+                    };
                 }
             }
             style
@@ -3943,7 +3954,14 @@ pub(crate) fn popup_style(config: &config::Config, pal: Option<&palette::Palette
             .filter(|t| {
                 matches!(
                     *t,
-                    "full" | "corners" | "underline" | "upperline" | "left" | "right"
+                    "full"
+                        | "corners"
+                        | "underline"
+                        | "upperline"
+                        | "left"
+                        | "right"
+                        | "leaf-right"
+                        | "leaf-left"
                 )
             })
             .unwrap_or(&d.border_type)
