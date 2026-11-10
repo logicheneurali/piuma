@@ -320,6 +320,7 @@ pub fn run(source: &SensorSource, hypr: Option<&crate::hypr::Snapshot>) -> Read 
         SensorSource::DetailDisk {} => plain(sensors::disk_detail()),
         // temp_ — temperatures
         SensorSource::TempCpu {} => optional(sensors::cpu_temp(), source),
+        SensorSource::TempGpu {} => optional(sensors::gpu_temp(), source),
         // everything else (no numeric category)
         SensorSource::NetInfo {} => plain(sensors::net_info()),
         // Wi-Fi: the text names the state; the signal percentage is the

@@ -768,6 +768,11 @@ pub enum SensorSource {
     DetailDisk {},
     #[serde(rename = "temp_cpu")]
     TempCpu {},
+    /// GPU temperature (`62°C`): the same probe as `perc_gpu`
+    /// (nvidia-smi on NVIDIA, DRM hwmon on the other drivers), so a bar
+    /// with both costs one command instead of two.
+    #[serde(rename = "temp_gpu")]
+    TempGpu {},
     #[serde(rename = "uptime", alias = "Uptime")]
     Uptime {},
     #[serde(rename = "net_state", alias = "Network")]

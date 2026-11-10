@@ -119,7 +119,7 @@ Sensor `type` values follow a naming convention by category:
 - **`total_`** – full value: `total_mem`, `total_swap`, `total_disk`,
   `total_battery`
 - **`detail_`** – used/total ratio: `detail_mem`, `detail_swap`, `detail_disk`
-- **`temp_`** – temperature: `temp_cpu`
+- **`temp_`** – temperature: `temp_cpu`, `temp_gpu`
 - **no prefix** – not numeric: `net_state`, `uptime`, `clock`, `window`,
   `workspace`, `workspace_dots`, `command`, `env_var`, `static_text` (Text/Icon),
   `volume_meter`, `media`, `tray`, `notifications`, `taskbar`, `layout`,
@@ -500,6 +500,7 @@ Each sensor's `source` object has a `type` plus the parameters listed
 | `detail_swap`    | swap used/total (`0/31806 MB`)                               | —                                                                       |
 | `detail_disk`    | fs used/total (`619G/950G`)                                  | —                                                                       |
 | `temp_cpu`       | CPU package temperature (`65°C`, hwmon `coretemp`/`k10temp`) | —                                                                       |
+| `temp_gpu`       | GPU temperature (`60°C`): the same probe as `perc_gpu` (nvidia-smi, then DRM hwmon) | —                                                              |
 | `net_state`      | interface state (`connected`)                                | `interface`                                                             |
 | `net_info`       | active NetworkManager connection: VPN, Wi-Fi SSID or wired name (`offline` when none) | —                                                     |
 | `wifi`           | Wi-Fi state: SSID when online, `no internet` when associated without access, `off` when down; **the icon shows the signal** (excellent ≥75%, good ≥50%, ok ≥25%, weak below) | — |
@@ -895,7 +896,8 @@ Sensor sources use the smallest practical set of tools:
   `perc_mem`/`used_mem`/`total_mem`/`detail_mem`, the `perc_swap`/
   `used_swap`/`total_swap`/`detail_swap` families, `uptime`, `net_state`,
   `used_netdown`/`used_netup`, `temp_cpu` (Intel `coretemp`, AMD
-  `k10temp`/`zenpower`), `perc_battery` (battery name is discovered, not
+  `k10temp`/`zenpower`), `temp_gpu` where the DRM hwmon exposes it,
+  `perc_battery` (battery name is discovered, not
   hardcoded), `perc_backlight`.
 - **Base userland** (coreutils — installed everywhere): `perc_disk` and
   the disk families (`df`), `clock` (`date`).
@@ -906,7 +908,10 @@ Sensor sources use the smallest practical set of tools:
   `volume_meter` uses the same backend and offers a clickable bar;
   `perc_gpu` tries
   `nvidia-smi` (NVIDIA) → the
-  amdgpu sysfs counter (AMD), `N/A` on other GPUs.
+  amdgpu sysfs counter (AMD), `N/A` on other GPUs. `temp_gpu` reads the
+  same probe, so a bar with both pays one command per tick; without
+  `nvidia-smi` (nouveau, AMD, Intel) it falls back to the DRM hwmon
+  temperature.
 - **Hyprland** (`hyprctl`): `window`, `workspace` — the only
   compositor-specific sensors, by design.
 - **Yours**: `command` (any POSIX shell), `env_var`, `static_text` (Text/Icon).

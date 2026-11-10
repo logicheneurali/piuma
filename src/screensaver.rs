@@ -1,14 +1,16 @@
 //! The lock screen: full-screen palette rectangles that shift at their
 //! own pace, opened after the idle timeout or from the `lock` sensor.
-//! It is dismissed only by the session password (PAM, `auth.rs`): input
-//! no longer closes it.
+//! It uses `ext-session-lock-v1` when the compositor supports it, so the
+//! compositor hides every window and ignores its normal keybinds while
+//! locked; without the protocol it falls back to a layer-shell overlay.
+//! Either way it is dismissed only by the session password (PAM,
+//! `auth.rs`): input no longer closes it.
 
 use std::time::{Duration, Instant};
 
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path};
 use iced::widget::button::{Status as ButtonStatus, Style as ButtonStyle};
-use iced::widget::text_input::Style as TextInputStyle;
-use iced::widget::{button, container, text, text_input, Column, Stack};
+use iced::widget::{button, container, text, Column, Stack};
 use iced::{Alignment, Color, Element, Length, Point, Size};
 
 use crate::config;
@@ -17,6 +19,7 @@ use iced_exwlshell::reexport::{
     Anchor, KeyboardInteractivity, Layer, NewLayerShellSettings, OutputOption,
 };
 use iced_exwlshell::settings::LayerSize;
+use iced_exwlshell::shell;
 
 /// The grid: 35 rows by 25 columns across the output, whatever its size
 /// (each cell is one pixel of the image stretched to the surface, so the
@@ -27,14 +30,8 @@ pub(crate) const ROWS: u32 = 35;
 /// a full-screen redraw does not need more). Zero frames while it is off.
 pub(crate) const FRAME: Duration = Duration::from_millis(200);
 
-/// Widget id of the password field: the surface asks iced to focus it
-/// when it opens, and again after a rejected password.
-fn input_id() -> iced::widget::Id {
-    iced::widget::Id::new("piuma-lock-password")
-}
-
 /// `SignalScreensaver` from the setup's button: start it now, whatever
-/// the idle state (a manual test still closes on the first input).
+/// the idle state.
 pub(crate) fn signal_subscription() -> iced::Subscription<Message> {
     iced::Subscription::run(|| {
         iced::stream::channel(4, |sender| async move {
@@ -55,6 +52,21 @@ fn listen_signal(mut sender: iced::futures::channel::mpsc::Sender<Message>) {
     }
 }
 
+/// Which protocol holds the session: `ext-session-lock-v1` when the
+/// compositor has it, the layer-shell overlay otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum LockMode {
+    /// No lock requested.
+    #[default]
+    Off,
+    /// `Lock` sent, waiting for the compositor to answer.
+    Requested,
+    /// The compositor granted the session lock.
+    Session,
+    /// The compositor has no `ext-session-lock-v1`: layer overlay.
+    Fallback,
+}
+
 /// Lock now: the idle trigger and the `lock` sensor's click alike (a
 /// manual lock works even with the idle tweak off). A screen with no PAM
 /// stack would lock with no way back, so it refuses to open then.
@@ -67,6 +79,7 @@ pub(crate) fn show(panel: &mut Panel) -> Command<Message> {
         return Command::none();
     }
     panel.screensaver_on = true;
+    panel.screensaver_lock = LockMode::Requested;
     panel.screensaver_start = Some(Instant::now());
     panel.screensaver_wait = false;
     panel.screensaver_retry = None;
@@ -74,15 +87,20 @@ pub(crate) fn show(panel: &mut Panel) -> Command<Message> {
     panel.screensaver_error = None;
     panel.screensaver_pending = false;
     panel.screensaver_prompt_open = false;
+    panel.screensaver.clear();
     // Every cell starts at its own phase, then the brightness of its
     // colour drives its pace (see `advance`).
     panel.screensaver_phases = initial_phases();
     panel.screensaver_last = Some(Instant::now());
-    sync(panel)
+    // The compositor creates one lock surface per output; `on_shell`
+    // adopts them, or `LockDenied` opens the layer fallback.
+    Command::done(Message::Lock)
 }
 
-/// Take every surface down and forget the idle state.
+/// Take the lock down and forget the idle state. The session-lock
+/// surfaces belong to the compositor: the unlock request destroys them.
 pub(crate) fn close(panel: &mut Panel) -> Command<Message> {
+    let mode = std::mem::replace(&mut panel.screensaver_lock, LockMode::Off);
     panel.screensaver_on = false;
     panel.screensaver_start = None;
     panel.screensaver_wait = false;
@@ -92,10 +110,64 @@ pub(crate) fn close(panel: &mut Panel) -> Command<Message> {
     panel.screensaver_password.clear();
     panel.screensaver_error = None;
     panel.screensaver_pending = false;
-    panel.screensaver_prompt = None;
     panel.screensaver_prompt_open = false;
-    let ids: Vec<iced::window::Id> = panel.screensaver.drain(..).map(|(_, id)| id).collect();
-    Command::batch(ids.into_iter().map(iced::window::close))
+    let mut cmds: Vec<Command<Message>> = Vec::new();
+    match mode {
+        // `UnLock` on a request the compositor never granted is harmless.
+        LockMode::Requested | LockMode::Session => cmds.push(Command::done(Message::UnLock)),
+        LockMode::Fallback => cmds.extend(
+            panel
+                .screensaver
+                .drain(..)
+                .map(|(_, id)| iced::window::close(id)),
+        ),
+        LockMode::Off => {}
+    }
+    Command::batch(cmds)
+}
+
+/// One `ShellEvent` from the runtime: the session-lock surfaces it
+/// creates for our request, the compositor's answer, their removal. The
+/// output name is irrelevant here (the compositor places each lock
+/// surface itself), so session entries carry an empty one.
+pub(crate) fn on_shell(panel: &mut Panel, event: shell::ShellEvent) -> Command<Message> {
+    use shell::ShellEvent as E;
+    match event {
+        E::NewShell(info) => {
+            if info.shell == shell::ShellType::SessionLock {
+                if !panel.screensaver.iter().any(|(_, id)| *id == info.window) {
+                    panel.screensaver.push((String::new(), info.window));
+                }
+            }
+            Command::none()
+        }
+        E::Closed(window) => {
+            panel.screensaver.retain(|(_, id)| *id != window);
+            Command::none()
+        }
+        E::Locked => {
+            if panel.screensaver_lock == LockMode::Requested {
+                panel.screensaver_lock = LockMode::Session;
+            }
+            Command::none()
+        }
+        E::LockDenied => {
+            if panel.screensaver_lock != LockMode::Requested {
+                return Command::none();
+            }
+            eprintln!(
+                "[piuma] lock: ext-session-lock-v1 not available, using a layer overlay"
+            );
+            panel.screensaver_lock = LockMode::Fallback;
+            sync(panel)
+        }
+        E::LockedFinished => {
+            panel.screensaver_lock = LockMode::Off;
+            panel.screensaver.clear();
+            Command::none()
+        }
+        _ => Command::none(),
+    }
 }
 
 /// The tick's reconciliation: once the feature is off (or the overlay
@@ -130,6 +202,12 @@ pub(crate) fn sync(panel: &mut Panel) -> Command<Message> {
     if !panel.screensaver_on {
         return Command::batch(cmds);
     }
+    // The session lock drives its surfaces itself (one per output, plus
+    // the ones for monitors plugged in while locked): nothing to open
+    // or reconcile here.
+    if panel.screensaver_lock != LockMode::Fallback {
+        return Command::batch(cmds);
+    }
     let desired = monitor_names();
     let (to_open, to_close) = crate::wallpaper_ui::wallpaper_plan(&panel.screensaver, &desired);
     crate::wallpaper_ui::forget_closed(&mut panel.screensaver, &to_close);
@@ -140,11 +218,11 @@ pub(crate) fn sync(panel: &mut Panel) -> Command<Message> {
     Command::batch(cmds)
 }
 
-/// One overlay on `output`. The first surface opened carries the
-/// password prompt and grabs the keyboard (`Exclusive`), so typing lands
-/// in the field; the others only show the grid.
+/// One overlay on `output`, used only when the compositor has no
+/// `ext-session-lock-v1`. Every surface grabs the keyboard
+/// (`Exclusive`): the card is drawn on all of them, so whichever one the
+/// compositor focuses receives the password.
 fn open_surface(panel: &mut Panel, output: String) -> Command<Message> {
-    let prompt = panel.screensaver_prompt.is_none();
     let (id, open) = Message::layershell_open(NewLayerShellSettings {
         size: LayerSize::FILL,
         layer: Layer::Overlay,
@@ -152,11 +230,7 @@ fn open_surface(panel: &mut Panel, output: String) -> Command<Message> {
         // Ignore the bar's reserved strip: the overlay covers the output.
         exclusive_zone: Some(-1),
         margin: None,
-        keyboard_interactivity: if prompt {
-            KeyboardInteractivity::Exclusive
-        } else {
-            KeyboardInteractivity::None
-        },
+        keyboard_interactivity: KeyboardInteractivity::Exclusive,
         output_option: OutputOption::OutputName(output.clone()),
         // Not transparent: while locked, clicks must not reach the apps
         // underneath.
@@ -164,20 +238,12 @@ fn open_surface(panel: &mut Panel, output: String) -> Command<Message> {
         namespace: Some("piuma-screensaver".to_string()),
         ..Default::default()
     });
-    if prompt {
-        panel.screensaver_prompt = Some(id);
-    }
     panel.screensaver.push((output, id));
     open
 }
 
 pub(crate) fn is_window(panel: &Panel, window: iced::window::Id) -> bool {
     panel.screensaver.iter().any(|(_, id)| *id == window)
-}
-
-/// Whether `window` is the surface with the password field.
-pub(crate) fn is_prompt(panel: &Panel, window: iced::window::Id) -> bool {
-    panel.screensaver_prompt == Some(window)
 }
 
 /// Whether this event means "I want to unlock": a click, a wheel or a
@@ -190,11 +256,6 @@ pub(crate) fn reveal_input(event: &iced::Event) -> bool {
                 | iced::mouse::Event::WheelScrolled { .. }
         ) | iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { .. })
     )
-}
-
-/// Focus the password field (the surface opened, or a password failed).
-pub(crate) fn focus_input() -> Command<Message> {
-    iced_runtime::task::widget(iced::advanced::widget::operation::focusable::focus(input_id()))
 }
 
 /// One animation frame: every cell's phase advances by `dt` divided by
@@ -223,15 +284,16 @@ pub(crate) fn advance(panel: &mut Panel) {
 /// The overlay: one rounded rectangle per cell, drawn on a canvas so
 /// the radius is real screen pixels (4 px) instead of an upscaled
 /// 25×35 texture — the grid stays crisp and the corners are rounded.
-/// The surface that carries the prompt adds the password card.
-pub(crate) fn view(panel: &Panel, window: iced::window::Id) -> Element<'_, Message> {
+/// Every lock surface shows the password card once the user asks to
+/// unlock, so the focused output always has the field.
+pub(crate) fn view(panel: &Panel, _window: iced::window::Id) -> Element<'_, Message> {
     let grid = Canvas::new(Grid {
         phases: &panel.screensaver_phases,
         ramp: ramp(panel),
     })
     .width(Length::Fill)
     .height(Length::Fill);
-    if !is_prompt(panel, window) || !panel.screensaver_prompt_open {
+    if !panel.screensaver_prompt_open {
         return grid.into();
     }
     // A dark scrim keeps the card readable over the moving grid.
@@ -252,6 +314,57 @@ pub(crate) fn view(panel: &Panel, window: iced::window::Id) -> Element<'_, Messa
         .push(scrim)
         .push(container(prompt_card(panel)).center(Length::Fill))
         .into()
+}
+
+/// The field's content: one dot per typed character (capped, so a very
+/// long password cannot outgrow the fixed box), the placeholder while
+/// empty.
+fn password_mask<'a>(panel: &Panel, color: Color) -> Element<'a, Message> {
+    let typed = panel.screensaver_password.chars().count();
+    let content = if typed == 0 {
+        text("Password".to_string())
+            .size(16)
+            .color(Color { a: 0.55, ..color })
+    } else {
+        text("•".repeat(typed.min(24))).size(16).color(color)
+    };
+    content.into()
+}
+
+/// One key while the card is open: printable characters append, Backspace
+/// removes the last one, Enter submits. Keys reach the focused lock
+/// surface through `event::listen`, so no widget focus is involved.
+pub(crate) fn type_key(
+    panel: &mut Panel,
+    key: &iced::keyboard::Key,
+    text: Option<&str>,
+) -> Command<Message> {
+    use iced::keyboard::key::Named;
+    if !panel.screensaver_on || panel.screensaver_pending {
+        return Command::none();
+    }
+    match key {
+        iced::keyboard::Key::Named(Named::Enter) => {
+            if panel.screensaver_password.is_empty() {
+                Command::none()
+            } else {
+                Command::done(Message::ScreensaverSubmit)
+            }
+        }
+        iced::keyboard::Key::Named(Named::Backspace) => {
+            panel.screensaver_password.pop();
+            Command::none()
+        }
+        _ => {
+            if let Some(text) = text {
+                let typed: String = text.chars().filter(|c| !c.is_control()).collect();
+                if !typed.is_empty() {
+                    panel.screensaver_password.push_str(&typed);
+                }
+            }
+            Command::none()
+        }
+    }
 }
 
 /// The password card: title, the secure field, the last failure and the
@@ -275,25 +388,21 @@ fn prompt_card(panel: &Panel) -> Element<'_, Message> {
     let body = Column::new()
         .push(text("Locked").size(30).color(text_color))
         .push(
-            text_input("Password", &panel.screensaver_password)
-                .id(input_id())
-                .secure(true)
+            // A plain masked field, not an iced text input: the lock
+            // surface has no IME/focus plumbing, and the mask needs no
+            // widget state (keys come through `type_key`).
+            container(password_mask(panel, text_color))
                 .padding(10)
                 .width(Length::Fixed(320.0))
-                .style(move |_theme, _status| TextInputStyle {
-                    background: iced::Background::Color(field_bg),
+                .style(move |_t| container::Style {
+                    background: Some(iced::Background::Color(field_bg)),
                     border: iced::Border {
                         color: Color { a: 0.35, ..text_color },
                         width: 1.0,
                         radius: 10.0.into(),
                     },
-                    icon: text_color,
-                    placeholder: Color { a: 0.55, ..text_color },
-                    value: text_color,
-                    selection: Color { a: 0.35, ..accent },
-                })
-                .on_input(Message::ScreensaverPasswordChanged)
-                .on_submit(Message::ScreensaverSubmit),
+                    ..container::Style::default()
+                }),
         )
         .push(match (&panel.screensaver_error, panel.screensaver_pending) {
             (Some(error), _) => text(error)

@@ -81,29 +81,85 @@ fn have_nvidia_smi() -> bool {
     })
 }
 
+/// GPU temperature (millidegrees) from the DRM hwmon of the first GPU
+/// card: the vendor-neutral fallback for drivers without `nvidia-smi`
+/// (amdgpu, nouveau, i915/xe where the kernel exposes it).
+fn gpu_temp_sysfs() -> Option<f64> {
+    let cards = fs::read_dir("/sys/class/drm").ok()?;
+    for card in cards.flatten() {
+        let name = card.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("card") || name.contains('-') {
+            continue;
+        }
+        if let Ok(hwmons) = fs::read_dir(card.path().join("device").join("hwmon")) {
+            for hwmon in hwmons.flatten() {
+                if let Some(milli) = read_num(hwmon.path().join("temp1_input")) {
+                    return Some(milli as f64 / 1000.0);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// `utilization.gpu,temperature.gpu` (`"2, 42"`) → both readings; a
+/// field reporting `N/A` stays `None` (it does not hide the other one).
+fn parse_gpu_csv(text: &str) -> Option<(Option<f64>, Option<f64>)> {
+    let mut fields = text.lines().next()?.split(',');
+    let num = |s: &str| s.trim().parse::<f64>().ok().filter(|v| v.is_finite());
+    let util = fields.next().and_then(num);
+    let temp = fields.next().and_then(num);
+    (util.is_some() || temp.is_some()).then_some((util, temp))
+}
+
+/// NVIDIA readings through nvidia-smi (the proprietary driver and the
+/// nvidia-open modules both ship it); `None` when it rejects the query,
+/// as it does with nouveau, so the sysfs fallback runs.
+fn nvidia_gpu() -> Option<(Option<f64>, Option<f64>)> {
+    let out = Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=utilization.gpu,temperature.gpu",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| parse_gpu_csv(&String::from_utf8_lossy(&out.stdout)))
+        .flatten()
+}
+
+/// One reading per tick shared by `perc_gpu` and `temp_gpu`: a bar with
+/// both pays a single command instead of one each. Just under the 1 s
+/// pass, so every pass refreshes (a full second would elapse as 0.99 s
+/// between ticks and serve the previous reading every other pass).
+const GPU_TTL: std::time::Duration = std::time::Duration::from_millis(900);
+static GPU_PROBE: ProbeSlot<(Option<f64>, Option<f64>)> = OnceLock::new();
+
+fn gpu_probe() -> Option<(Option<f64>, Option<f64>)> {
+    cached_probe(&GPU_PROBE, GPU_TTL, || {
+        if let Some(nvidia) = have_nvidia_smi().then(nvidia_gpu).flatten() {
+            return Some(nvidia);
+        }
+        let (util, temp) = (amdgpu_load(), gpu_temp_sysfs());
+        (util.is_some() || temp.is_some()).then_some((util, temp))
+    })
+}
+
 /// Get GPU load percentage (e.g. `12`) as (text, value): NVIDIA via
 /// nvidia-smi, then the amdgpu sysfs counter (AMD); None elsewhere
 /// (e.g. Intel has no standard interface). No hard dependency on the
 /// NVIDIA driver.
 pub fn gpu_load() -> Option<(String, f64)> {
-    let nvidia = have_nvidia_smi()
-        .then(|| {
-            Command::new("nvidia-smi")
-                .args(["--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"])
-                .output()
-        })
-        .and_then(Result::ok);
-    if let Some(out) = nvidia {
-        if out.status.success() {
-            let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !value.is_empty() {
-                // A non-empty answer ends the search (no AMD fallback),
-                // as before; only a parseable one is a reading.
-                return value.parse::<f64>().ok().map(|perc| (value, perc));
-            }
-        }
-    }
-    amdgpu_load().map(|perc| (format!("{perc}"), perc))
+    gpu_probe()?.0.map(|perc| (format!("{perc}"), perc))
+}
+
+/// GPU temperature as (text, °C), from the same probe as `gpu_load`:
+/// nvidia-smi on NVIDIA, the DRM hwmon on the other drivers.
+pub fn gpu_temp() -> Option<(String, f64)> {
+    let temp = gpu_probe()?.1?;
+    Some((format!("{}°C", temp as i64), temp))
 }
 
 /// Get system uptime (e.g. `up 3 hours, 0 minute`) from /proc/uptime,
@@ -419,14 +475,21 @@ pub fn workspace_name(snap: Option<&crate::hypr::Snapshot>) -> String {
 
 /// `df -h /` row fields: [device, size, used, avail, use%, mount].
 /// Locale-independent: df column headers are localized, positions are not.
+/// `df` is cached for half a minute: filesystem usage does not move at
+/// the bar's 1 Hz, and the three disk sources share one reading.
+const DF_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+static DF_PROBE: ProbeSlot<Vec<String>> = OnceLock::new();
+
 fn df_root() -> Option<Vec<String>> {
-    let out = Command::new("df").args(["-h", "/"]).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let parts: Vec<String> = stdout.lines().nth(1)?.split_whitespace().map(str::to_string).collect();
-    if parts.len() >= 5 { Some(parts) } else { None }
+    cached_probe(&DF_PROBE, DF_TTL, || {
+        let out = Command::new("df").args(["-h", "/"]).output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let parts: Vec<String> = stdout.lines().nth(1)?.split_whitespace().map(str::to_string).collect();
+        (parts.len() >= 5).then_some(parts)
+    })
 }
 
 /// Get disk usage percentage as (text, bare value) (e.g. `66`); df's
@@ -896,6 +959,19 @@ mod tests {
         assert_eq!(leading_number("-3°C"), Some(-3.0));
         assert_eq!(leading_number("N/A"), None);
         assert_eq!(leading_number(""), None);
+    }
+
+    /// The shared GPU probe parses util and temperature from one line;
+    /// an `N/A` field stays missing without hiding the other, and junk
+    /// yields no reading (the sysfs fallback then runs).
+    #[test]
+    fn gpu_csv_keeps_the_fields_it_understands() {
+        assert_eq!(parse_gpu_csv("2, 42\n"), Some((Some(2.0), Some(42.0))));
+        assert_eq!(parse_gpu_csv("N/A, 42"), Some((None, Some(42.0))));
+        assert_eq!(parse_gpu_csv("0, N/A"), Some((Some(0.0), None)));
+        assert_eq!(parse_gpu_csv("N/A, N/A"), None);
+        assert_eq!(parse_gpu_csv("couldn't communicate"), None);
+        assert_eq!(parse_gpu_csv(""), None);
     }
 
     /// Empty device falls back to the amixer `Master` control.

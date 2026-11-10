@@ -50,7 +50,8 @@ pub fn scale_of(source: &config::SensorSource) -> Option<Scale> {
         | S::UsedBattery {}
         | S::UsedNetdown { .. }
         | S::UsedNetup { .. }
-        | S::TempCpu {} => Scale::Auto,
+        | S::TempCpu {}
+        | S::TempGpu {} => Scale::Auto,
         // The user-authored text sources: a number can come out of
         // any of them, taken by the runner's strict whole-string parse
         // — a non-numeric answer simply records nothing (see

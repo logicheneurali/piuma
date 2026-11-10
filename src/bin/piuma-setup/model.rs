@@ -1774,7 +1774,7 @@ pub(crate) const SOURCE_TYPES: &[&str] = &[
     // detail_ — used/total ratios
     "detail_mem", "detail_swap", "detail_disk",
     // temp_ — temperatures
-    "temp_cpu",
+    "temp_cpu", "temp_gpu",
     // no numeric category
     "net_state", "net_info", "power_profile", "bluetooth", "keyboard",
     "uptime", "clock", "calendar", "window", "workspace",
@@ -1821,6 +1821,7 @@ pub(crate) fn source_label(canonical: &str) -> &'static str {
         "detail_swap" => "Swap used/total",
         "detail_disk" => "Disk used/total",
         "temp_cpu" => "CPU temperature",
+        "temp_gpu" => "GPU temperature",
         "net_state" => "Net state",
         "net_info" => "Network info (Wi-Fi/VPN)",
         "power_profile" => "Power profile",

@@ -26,7 +26,7 @@ use iced_exwlshell::reexport::{
     OutputOption,
 };
 use iced_exwlshell::settings::{LayerShellSettings, LayerSize, StartMode};
-use iced_exwlshell::to_layer_message;
+use iced_exwlshell::to_exwlshell_message;
 
 mod app_theme;
 mod auth;
@@ -490,9 +490,11 @@ pub(crate) struct Panel {
     pub(crate) screensaver_error: Option<String>,
     /// A PAM check is running: further submits are ignored.
     pub(crate) screensaver_pending: bool,
-    /// The surface with the password field (the first output opened): the
-    /// only one that grabs the keyboard.
-    pub(crate) screensaver_prompt: Option<iced::window::Id>,
+    /// How the lock is held: the session-lock protocol when the
+    /// compositor has it, the layer overlay otherwise.
+    pub(crate) screensaver_lock: screensaver::LockMode,
+    /// The runtime's surface events: the session-lock windows it creates.
+    pub(crate) shell: iced_exwlshell::shell::ShellReceiver,
     /// Whether the password card is on screen: it appears on the first
     /// input (a click, a key), never by itself — the idle lock shows
     /// just the grid.
@@ -671,7 +673,7 @@ pub(crate) struct CalendarPopup {
 
 // ── messages ────────────────────────────────────────────────────────
 
-#[to_layer_message(multi)]
+#[to_exwlshell_message]
 #[derive(Debug, Clone)]
 pub(crate) enum Message {
     /// Marks a second edge: the tick handler reloads, polls and advances.
@@ -709,10 +711,11 @@ pub(crate) enum Message {
     ScreensaverBlocked(bool),
     /// The setup's button (SIGUSR1): show the overlay now.
     ScreensaverManual,
+    /// A surface event from the Wayland runtime: the session-lock windows
+    /// it creates and the compositor's answer to the lock request.
+    Shell(iced_exwlshell::shell::ShellEvent),
     /// One animation frame of the overlay.
     ScreensaverFrame,
-    /// The password field changed.
-    ScreensaverPasswordChanged(String),
     /// Enter pressed or the Unlock button: check the password.
     ScreensaverSubmit,
     /// PAM answer for the submitted password.
@@ -1833,12 +1836,18 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             }
             if screensaver::is_window(panel, id) {
                 // The card appears on the first real input: until then
-                // the lock is just the grid.
+                // the lock is just the grid. Key presses then type into
+                // the password (the card has no focusable widget).
                 if !panel.screensaver_prompt_open && screensaver::reveal_input(&e) {
                     panel.screensaver_prompt_open = true;
-                    if screensaver::is_prompt(panel, id) {
-                        return screensaver::focus_input();
-                    }
+                }
+                if let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key,
+                    text,
+                    ..
+                }) = &e
+                {
+                    return screensaver::type_key(panel, key, text.as_deref());
                 }
                 return Command::none();
             }
@@ -2668,6 +2677,7 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             screensaver::show(panel)
         }
         Message::ScreensaverManual => screensaver::show(panel),
+        Message::Shell(event) => screensaver::on_shell(panel, event),
         Message::SectionToggled(index) => {
             if panel.collapsed_sections.remove(&index) {
                 return Command::none();
@@ -2788,10 +2798,6 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             };
             Command::batch([close, command])
         }
-        Message::ScreensaverPasswordChanged(value) => {
-            panel.screensaver_password = value;
-            Command::none()
-        }
         Message::ScreensaverSubmit => {
             if !panel.screensaver_on || panel.screensaver_pending {
                 return Command::none();
@@ -2820,7 +2826,7 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
                 Err(_) => {
                     panel.screensaver_password.clear();
                     panel.screensaver_error = Some("Wrong password".to_string());
-                    screensaver::focus_input()
+                    Command::none()
                 }
             }
         }
@@ -2942,6 +2948,9 @@ fn subscription(app: &App) -> Subscription<Message> {
     // default disposition of that signal would terminate the bar (the
     // setup's button and a stray `kill -USR1` must never do that).
     let saver_signal = Some(screensaver::signal_subscription());
+    // The runtime's surface events: the session-lock windows it creates
+    // for a lock request (see `screensaver::on_shell`).
+    let saver_shell = Some(panel.shell.listen().map(Message::Shell));
     let saver_frames = panel
         .screensaver_on
         .then(|| time::every(screensaver::FRAME).map(|_| Message::ScreensaverFrame));
@@ -2958,6 +2967,7 @@ fn subscription(app: &App) -> Subscription<Message> {
         .chain(menu_frames)
         .chain(saver_idle)
         .chain(saver_signal)
+        .chain(saver_shell)
         .chain(saver_frames),
     )
 }
@@ -4300,6 +4310,10 @@ fn main() -> Result<(), iced_exwlshell::Error> {
 
     // Run the iced app on a dedicated thread so the close action can be
     // observed from the main thread without blocking the event loop.
+    // The runtime reports the surfaces it creates on this channel: the
+    // bar listens for the session-lock windows it makes for a lock
+    // request (see `screensaver::on_shell`).
+    let (shell_tx, shell_rx) = iced_exwlshell::shell::channel();
     let boot_base = config_base.clone();
     let handle = std::thread::Builder::new()
         .name("piuma-panel".to_string())
@@ -4307,6 +4321,7 @@ fn main() -> Result<(), iced_exwlshell::Error> {
             let boot_layouts = layouts.clone();
             let boot_screens = screens.clone();
             let boot_base = boot_base.clone();
+            let boot_shell = shell_rx.clone();
             let outcome = daemon(
                 move || {
                     let cfg = CONFIG
@@ -4378,7 +4393,8 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         screensaver_password: String::new(),
                         screensaver_error: None,
                         screensaver_pending: false,
-                        screensaver_prompt: None,
+                        screensaver_lock: screensaver::LockMode::Off,
+                        shell: boot_shell.clone(),
                         screensaver_prompt_open: false,
                         caffeine: false,
                         bars_hidden: false,
@@ -4440,6 +4456,7 @@ fn main() -> Result<(), iced_exwlshell::Error> {
             .subscription(subscription)
             .style(style)
             .wl_settings(ExWlSettings {
+                shell_broadcast: shell_tx,
                 layer_settings: LayerShellSettings {
                     size: panel_size(&panel_config, screens[0].0, layouts[0].anchor.as_deref()),
                     // Reserve exactly the configured thickness: a constant
