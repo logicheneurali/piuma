@@ -17,8 +17,9 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Install system dependencies
-      # Il runner non ha i file di sviluppo di PAM né di xkbcommon:
-      # servono al link del lock screen e a smithay-client-toolkit.
+      # The runner image has neither the PAM nor the xkbcommon development
+      # files: the first links the lock screen to the system libpam, the
+      # second is what smithay-client-toolkit builds against.
       run: |
         sudo apt-get update
         sudo apt-get install -y libpam0g-dev libxkbcommon-dev

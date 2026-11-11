@@ -184,10 +184,16 @@ To build and run Piuma you need:
   compositor-independent
 - **A Rust toolchain** (`cargo`) to build from source — if you don't have
   one, install it from [rustup.rs](https://rustup.rs)
-- **Linux-PAM** for the lock screen: the `pam` package providing
-  `libpam.so` (Debian/Ubuntu also need `libpam0g-dev` to link). Nothing
-  else is required at build time: the PAM binding is a small local FFI
-  module, so no `libclang`/bindgen.
+- **Linux-PAM and libxkbcommon** — the system libraries the build links
+  against: the lock screen calls `libpam` (Arch: `pam`, Debian/Ubuntu:
+  `libpam0g-dev`) and the Wayland toolkit needs `libxkbcommon`
+  (`libxkbcommon` on Arch, `libxkbcommon-dev` on Debian/Ubuntu).
+  There is no `libclang`/bindgen: the PAM binding is a small local FFI
+  module. On Debian/Ubuntu:
+
+  ```sh
+  sudo apt install libpam0g-dev libxkbcommon-dev
+  ```
 - **A few common command-line tools**, depending on which sensors you
   enable: `df` and `date` (coreutils), a mixer tool for volume
   (`amixer`, `wpctl` or `pactl`) and `nvidia-smi` or AMD sysfs for the
