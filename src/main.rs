@@ -52,6 +52,7 @@ mod mpris;
 mod osd;
 mod notifications;
 mod palette;
+mod pam_ffi;
 mod playback;
 mod power_menu;
 mod popup_calendar;

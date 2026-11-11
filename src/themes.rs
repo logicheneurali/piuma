@@ -209,7 +209,10 @@ mod tests {
     /// under a unique temp path: a test never touches the user's file.
     #[test]
     fn active_theme_roundtrips() {
-        let dir = std::env::temp_dir().join(format!("piuma-theme-{}", std::process::id()));
+        // Own prefix: the app-theme test cleans a `piuma-theme-<pid>`
+        // directory in the same process, and the parallel run would
+        // delete each other's files.
+        let dir = std::env::temp_dir().join(format!("piuma-themes-{}", std::process::id()));
         let path = dir.join("theme.json");
         write_at(&path, Some("ice-on-slate")).expect("write");
         assert_eq!(read_at(&path).as_deref(), Some("ice-on-slate"));

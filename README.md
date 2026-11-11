@@ -184,6 +184,10 @@ To build and run Piuma you need:
   compositor-independent
 - **A Rust toolchain** (`cargo`) to build from source — if you don't have
   one, install it from [rustup.rs](https://rustup.rs)
+- **Linux-PAM** for the lock screen: the `pam` package providing
+  `libpam.so` (Debian/Ubuntu also need `libpam0g-dev` to link). Nothing
+  else is required at build time: the PAM binding is a small local FFI
+  module, so no `libclang`/bindgen.
 - **A few common command-line tools**, depending on which sensors you
   enable: `df` and `date` (coreutils), a mixer tool for volume
   (`amixer`, `wpctl` or `pactl`) and `nvidia-smi` or AMD sysfs for the

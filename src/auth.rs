@@ -53,12 +53,7 @@ pub(crate) fn available() -> bool {
 pub(crate) fn verify(password: &str) -> Result<(), String> {
     let service = pam_service().ok_or("no PAM service in /etc/pam.d")?;
     let login = current_user().ok_or("cannot resolve the session user")?;
-    let mut client = pam::Client::with_password(service)
-        .map_err(|e| format!("PAM start: {e}"))?;
-    client.conversation_mut().set_credentials(login, password);
-    client
-        .authenticate()
-        .map_err(|e| format!("PAM: {e}"))
+    crate::pam_ffi::authenticate(service, &login, password)
 }
 
 #[cfg(test)]
