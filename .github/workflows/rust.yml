@@ -18,12 +18,12 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Install system dependencies
-      # The runner image has neither the PAM nor the xkbcommon development
-      # files: the first links the lock screen to the system libpam, the
-      # second is what smithay-client-toolkit builds against.
+      # The runner image lacks the PAM/xkbcommon development files (they
+      # link the lock screen to libpam and build smithay-client-toolkit)
+      # and the font the layout tests shape against.
       run: |
         sudo apt-get update
-        sudo apt-get install -y libpam0g-dev libxkbcommon-dev
+        sudo apt-get install -y libpam0g-dev libxkbcommon-dev fonts-dejavu-core
     # Caches the registry and the compiled dependencies between runs: the
     # build only recompiles what changed.
     - uses: Swatinem/rust-cache@v2
