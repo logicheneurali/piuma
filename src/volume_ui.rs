@@ -23,7 +23,7 @@ const LABEL_W: f32 = 30.0;
 pub(crate) fn level(value: &str) -> f32 {
     sensors::leading_number(value)
         .unwrap_or(0.0)
-        .clamp(0.0, 100.0) as f32
+        .clamp(0.0, 100.0)
 }
 
 /// The percentage shown on hover; an unparsable value stays honest.

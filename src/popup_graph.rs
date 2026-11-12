@@ -64,9 +64,9 @@ pub(crate) fn popup_missed_tick(gp: &mut GraphPopup, sensor_under_cursor: bool) 
 /// see `popup_missed_tick`), `None` while it lives.
 pub(crate) fn reap_abandoned_popup(panel: &mut Panel) -> Option<GraphPopup> {
     let sensor_under_cursor = panel.hovered.is_some();
-    let expired = match panel.graph_popup.as_mut() {
-        Some(gp) => popup_missed_tick(gp, sensor_under_cursor),
-        None => return None,
+    let expired = {
+        let gp = panel.graph_popup.as_mut()?;
+        popup_missed_tick(gp, sensor_under_cursor)
     };
     if !expired {
         return None;
@@ -257,7 +257,7 @@ pub(crate) fn graph_popup_view<'a>(panel: &'a Panel, gp: &GraphPopup) -> Element
                 text(name)
                     .size(st.font_size)
                     .color(st.text)
-                    .font(font.clone())
+                    .font(font)
                     .wrapping(iced::widget::text::Wrapping::None)
                     .width(Length::Fill),
             )

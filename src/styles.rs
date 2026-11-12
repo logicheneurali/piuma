@@ -9,7 +9,7 @@ use crate::{
 };
 use iced::Color;
 
-pub(crate) fn resolve_color<'a>(cfg: Option<Color>, default: Color) -> Color {
+pub(crate) fn resolve_color(cfg: Option<Color>, default: Color) -> Color {
     cfg.unwrap_or(default)
 }
 

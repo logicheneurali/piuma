@@ -375,6 +375,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn tooltip_placement_sits_off_the_bar_and_inside_the_output() {
         // Top bar: below the surface (bar 30 + gap 8), centred on x.
         let (a, m) = tooltip_placement(Anchor::Top, (100, 15), 80, 20, 30, 1920, 1080);

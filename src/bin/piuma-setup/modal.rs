@@ -101,7 +101,7 @@ pub(crate) fn modal_card(state: &PiumaSetup) -> Element<'_, Message> {
             if *exists {
                 body = body.push(
                     text("File exists: it will be overwritten").size(10)
-                        .style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(1.0, 0.6, 0.2)), ..TextStyle::default() }),
+                        .style(|_t: &Theme| TextStyle { color: Some(Color::from_rgb(1.0, 0.6, 0.2)) }),
                 );
             }
             dialog_frame(
@@ -312,7 +312,7 @@ pub(crate) fn modal_card(state: &PiumaSetup) -> Element<'_, Message> {
                     cells = Row::new().spacing(8);
                 }
             }
-            if hits.len() % ICONS_PER_ROW != 0 {
+            if !hits.len().is_multiple_of(ICONS_PER_ROW) {
                 grid = grid.push(cells);
             }
             let results: Element<Message> = if hits.is_empty() {

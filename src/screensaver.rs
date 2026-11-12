@@ -134,11 +134,10 @@ pub(crate) fn on_shell(panel: &mut Panel, event: shell::ShellEvent) -> Command<M
     use shell::ShellEvent as E;
     match event {
         E::NewShell(info) => {
-            if info.shell == shell::ShellType::SessionLock {
-                if !panel.screensaver.iter().any(|(_, id)| *id == info.window) {
+            if info.shell == shell::ShellType::SessionLock
+                && !panel.screensaver.iter().any(|(_, id)| *id == info.window) {
                     panel.screensaver.push((String::new(), info.window));
                 }
-            }
             Command::none()
         }
         E::Closed(window) => {

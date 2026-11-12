@@ -222,7 +222,7 @@ pub fn tick(state: &mut LayoutState, rows: &[WinRow]) -> String {
 /// client means a menu/layer holds it — both cases skip. `None` (the query
 /// failed) keeps the old restore.
 fn focus_is_needed(address: &str, current: Option<&[WinRow]>) -> bool {
-    current.map_or(true, |rows| {
+    current.is_none_or(|rows| {
         rows.iter()
             .find(|row| row.focused)
             .is_some_and(|row| row.address != address)
@@ -331,13 +331,16 @@ fn match_score(rows: &[WinRow], entries: &[LayoutEntry]) -> f32 {
 /// title that follows a directory or a tab), then the saved title's
 /// words still present, then the closest saved position. This is what
 /// makes same-class apps usable: a changed title never blocks the
+/// Ordering key of a candidate pairing: (state, x, y, w, h).
+type PairKey = (i32, i32, i32, i32, i32);
+
 /// layout, it only reorders the pairing.
 fn assign(rows: &[WinRow], entries: &[LayoutEntry]) -> Option<Vec<(usize, usize)>> {
     let layout_ws: HashSet<&str> = entries.iter().map(|e| e.workspace.as_str()).collect();
     let mut used = vec![false; rows.len()];
     let mut pairs = Vec::with_capacity(entries.len());
     for (ei, entry) in entries.iter().enumerate() {
-        let mut best: Option<((i32, i32, i32, i32, i32), usize)> = None;
+        let mut best: Option<(PairKey, usize)> = None;
         for (ri, row) in rows.iter().enumerate() {
             if used[ri] || row.class != entry.class {
                 continue;
@@ -352,7 +355,7 @@ fn assign(rows: &[WinRow], entries: &[LayoutEntry]) -> Option<Vec<(usize, usize)
                 (title_resemble(&entry.title, &row.title) * 1000.0) as i32,
                 -((row.x - entry.x).abs() + (row.y - entry.y).abs()),
             );
-            if best.map_or(true, |(b, _)| key > b) {
+            if best.is_none_or(|(b, _)| key > b) {
                 best = Some((key, ri));
             }
         }
@@ -630,7 +633,7 @@ fn measured_resize(address: &str, target: i32, sx: i32, sy: i32) {
         };
         let now = after.iter().find(|r| r.address == address);
         let bad = newly_strangled(&before, &after)
-            || now.map_or(true, |m| (target - axis(m)).abs() >= leftover.abs());
+            || now.is_none_or(|m| (target - axis(m)).abs() >= leftover.abs());
         if bad {
             // Back to this round's start with the learned sign: the ask
             // chain is relative, so one opposite move of the same
@@ -789,14 +792,14 @@ mod tests {
         let mut state = LayoutState::default();
         let a = row("0xA", "kitty", "shell", "1", false);
         assert_eq!(
-            arrangement_trigger(&mut state, &[a.clone()]),
+            arrangement_trigger(&mut state, std::slice::from_ref(&a)),
             Some(Trigger::CreatedOrClosed),
             "the first set is a change"
         );
-        assert_eq!(arrangement_trigger(&mut state, &[a.clone()]), None, "same windows: no check");
+        assert_eq!(arrangement_trigger(&mut state, std::slice::from_ref(&a)), None, "same windows: no check");
         let moved = row("0xA", "kitty", "shell", "2", false);
         assert_eq!(
-            arrangement_trigger(&mut state, &[moved.clone()]),
+            arrangement_trigger(&mut state, std::slice::from_ref(&moved)),
             Some(Trigger::WorkspaceOnly),
             "a workspace move re-runs the check"
         );
@@ -808,7 +811,7 @@ mod tests {
             "a new window is an event"
         );
         assert_eq!(
-            arrangement_trigger(&mut state, &[b.clone()]),
+            arrangement_trigger(&mut state, std::slice::from_ref(&b)),
             Some(Trigger::CreatedOrClosed),
             "a closed window is an event"
         );
@@ -832,9 +835,11 @@ mod tests {
     /// outranks it (both flashes use the same window).
     #[test]
     fn status_shows_the_applied_flash_then_the_match_sign() {
-        let mut state = LayoutState::default();
-        state.file = Some(BTreeMap::new());
-        state.matched = true;
+        let mut state = LayoutState {
+            file: Some(BTreeMap::new()),
+            matched: true,
+            ..LayoutState::default()
+        };
         state.applied_flash = Some(Instant::now());
         assert_eq!(status_text(&state), "✓ applied", "fresh apply");
         state.applied_flash = Some(Instant::now() - FLASH);

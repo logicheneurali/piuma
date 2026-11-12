@@ -18,8 +18,7 @@ use std::path::PathBuf;
 pub fn parse_color(value: &str) -> Result<Color, String> {
     let value = value.trim();
     // Hex format: #RGB, #RRGGBB or #RRGGBBAA
-    if value.starts_with('#') {
-        let hex = &value[1..];
+    if let Some(hex) = value.strip_prefix('#') {
         // Slices below are byte based: reject non-ASCII instead of panicking
         // on a multi-byte boundary (same guard as piuma-setup's hex_color).
         if !hex.is_ascii() {
@@ -99,7 +98,6 @@ pub struct PanelLayout {
 }
 
 #[derive(Deserialize, serde::Serialize, Clone)]
-#[allow(clippy::upper_variable_names)]
 pub struct Config {
     pub panel: PanelConfig,
     /// Extra panels; the legacy `panel` is always the first one. Absent =
@@ -159,7 +157,6 @@ pub fn panel_layouts(cfg: &Config) -> Vec<PanelLayout> {
 }
 
 #[derive(Deserialize, serde::Serialize, Clone)]
-#[allow(clippy::upper_variable_names)]
 pub struct PanelConfig {
     pub font: Option<String>,
     pub font_size: Option<u32>,
@@ -583,7 +580,6 @@ pub struct SensorDefaults {
 /// the style fields of `SectionConfig` (bg, text, border) — layout/weight are
 /// structure and stay per-section only. Same group rule as `sensor_defaults`.
 #[derive(Debug, Default, Deserialize, serde::Serialize, Clone)]
-#[allow(clippy::upper_variable_names)]
 pub struct SectionDefaults {
     pub bg_color: Option<String>,
     pub text_color: Option<String>,
@@ -597,7 +593,7 @@ pub struct SectionDefaults {
 }
 
 #[derive(Deserialize, serde::Serialize, Clone)]
-#[allow(clippy::upper_variable_names, clippy::struct_field_names)]
+#[allow(clippy::struct_field_names)]
 pub struct SectionConfig {
     /// Empty/omitted name renders as an empty title (setup saves it as absent).
     #[serde(default)]
@@ -632,7 +628,7 @@ pub struct ColorRule {
 }
 
 #[derive(Deserialize, serde::Serialize, Clone)]
-#[allow(clippy::upper_variable_names, clippy::struct_field_names)]
+#[allow(clippy::struct_field_names)]
 pub struct SensorConfig {
     /// Empty/omitted name renders as an empty label (setup saves it as absent).
     #[serde(default)]
@@ -686,7 +682,6 @@ pub struct SensorConfig {
 /// loadable forever.
 #[derive(Deserialize, serde::Serialize, Clone)]
 #[serde(tag = "type")]
-#[allow(clippy::upper_variable_names)]
 pub enum SensorSource {
     #[serde(rename = "command", alias = "Command")]
     Command {
@@ -938,14 +933,13 @@ fn shipped_config() -> Config {
 // ── loading ─────────────────────────────────────────────────────────
 
 fn default_config_path() -> PathBuf {
-    let default_path = if let Some(config_home) = crate::xdg::config() {
+    if let Some(config_home) = crate::xdg::config() {
         config_home.join("piuma").join("piuma.json")
     } else if let Some(home) = crate::xdg::home() {
         home.join(".config").join("piuma").join("piuma.json")
     } else {
         PathBuf::from("piuma.json")
-    };
-    default_path
+    }
 }
 
 // ── value validation ────────────────────────────────────────────────
@@ -976,7 +970,6 @@ pub const BORDER_TYPES: [&str; 8] = [
 /// The `err_*` helpers below each append one `ConfigError` (path +
 /// reason) when a present value does not parse or is out of range;
 /// absent fields (`None`) are always fine.
-
 fn err_color(errors: &mut Vec<ConfigError>, path: &str, value: Option<&str>) {
     if let Some(v) = value {
         if let Err(message) = parse_color(v) {

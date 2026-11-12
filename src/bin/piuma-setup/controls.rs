@@ -132,8 +132,7 @@ pub(crate) fn icon_preview<'a>(cfg: &PiumaConfig, size: u16, name: Option<&str>)
             None => text("✕")
                 .size(BODY)
                 .style(|_t: &Theme| TextStyle {
-                    color: Some(Color::from_rgb(1.0, 0.35, 0.35)),
-                    ..TextStyle::default()
+                    color: Some(Color::from_rgb(1.0, 0.35, 0.35))
                 })
                 .into(),
         },
@@ -546,8 +545,7 @@ pub(crate) fn color_control_over<'a>(
     }
     if value.trim().is_empty() {
         row = row.push(text("inherited").size(10).style(|_t: &Theme| TextStyle {
-            color: Some(Color::from_rgb(0.55, 0.55, 0.58)),
-            ..TextStyle::default()
+            color: Some(Color::from_rgb(0.55, 0.55, 0.58))
         }));
     } else if let Some(reset) = on_reset {
         row = row.push(
@@ -597,8 +595,7 @@ pub(crate) fn slider_control_over<'a>(
         .size(BODY)
         .width(56)
         .style(move |_t: &Theme| TextStyle {
-            color: invalid.map(|_| ERROR_RED),
-            ..TextStyle::default()
+            color: invalid.map(|_| ERROR_RED)
         });
     let mut row = Row::new()
         .push(Slider::new(range, value, on_input).width(Length::Fill))

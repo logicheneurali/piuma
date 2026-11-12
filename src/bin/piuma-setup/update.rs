@@ -1027,8 +1027,10 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                         sensor.source_type = kind;
                     }
                 } else if section_index < state.config.sections.len() {
-                    let mut sensor = Sensor::default();
-                    sensor.source_type = kind;
+                    let mut sensor = Sensor {
+                        source_type: kind,
+                        ..Sensor::default()
+                    };
                     let trimmed = name.trim();
                     // No name = absent key: the bar renders the value alone.
                     sensor.name = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };

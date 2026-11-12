@@ -325,7 +325,7 @@ pub(crate) fn popup_view(panel: &Panel) -> Element<'_, Message> {
                     text(if up { "▲" } else { "▼" })
                         .size(st.font_size.saturating_sub(2))
                         .color(fg)
-                        .font(font.clone()),
+                        .font(font),
                 )
                 .width(Length::Fill)
                 .height(Length::Fixed(arrow_h))

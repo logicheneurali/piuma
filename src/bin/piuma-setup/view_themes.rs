@@ -103,7 +103,6 @@ fn cell<'a>(
             .style(move |t, s| btn_secondary(pal, t, s))
             .into()
     };
-    let swatch = swatch;
     let bar = container(
         Row::new()
             .push(

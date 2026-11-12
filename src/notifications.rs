@@ -586,6 +586,7 @@ struct Notifications {
 impl Notifications {
     /// Spec `Notify`: record the notification (in place when
     /// `replaces_id` is honoured) and return the id to report.
+    #[allow(clippy::too_many_arguments)]
     async fn notify(
         &mut self,
         app_name: String,

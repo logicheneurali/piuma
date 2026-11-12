@@ -124,6 +124,7 @@ pub(crate) fn panel_size(
 /// * horizontal, bottom -> `Bottom`
 /// * vertical,   left   -> `Left`
 /// * vertical,   right  -> `Right`
+///
 /// Whether the panel runs vertically: `left`/`right` edges make it a
 /// side bar (thickness = width, full height), `top`/`bottom` a
 /// horizontal one. Only an absent (or legacy corner) anchor falls back

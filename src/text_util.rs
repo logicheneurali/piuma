@@ -12,7 +12,7 @@ pub(crate) fn family_name_static(name: &str) -> &'static str {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some((leaked, _)) = names.iter().find(|(_, original)| original == name) {
-        return *leaked;
+        return leaked;
     }
     let leaked = Box::leak(name.to_string().into_boxed_str());
     names.push((leaked, name.to_string()));

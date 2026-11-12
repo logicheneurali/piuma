@@ -230,8 +230,7 @@ fn footer(state: &PiumaSetup) -> Element<'_, Message> {
             Color::from_rgb(1.0, 0.65, 0.25)
         } else {
             Color::from_rgb(0.45, 0.75, 0.5)
-        }),
-        ..TextStyle::default()
+        })
     });
     let info = column![
         text(format!("editing: {}", state.current_file))
@@ -336,7 +335,7 @@ fn status_bar(state: &PiumaSetup) -> Element<'_, Message> {
     match &state.status_message {
         Some(msg) => {
             let is_error = state.status_is_error;
-            text(msg).size(10).style(move |_t: &Theme| TextStyle { color: Some(if is_error { ERROR_RED } else { Color::from_rgb(0.3, 0.8, 0.4) }), ..TextStyle::default() }).into()
+            text(msg).size(10).style(move |_t: &Theme| TextStyle { color: Some(if is_error { ERROR_RED } else { Color::from_rgb(0.3, 0.8, 0.4) }) }).into()
         }
         None => text("").into(),
     }

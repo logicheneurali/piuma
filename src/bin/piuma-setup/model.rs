@@ -94,7 +94,7 @@ impl Default for GlassCfg {
 pub(crate) fn glass_mut(config: &mut PiumaConfig) -> &mut GlassCfg {
     config
         .tweaks
-        .get_or_insert_with(|| TweaksCfg {
+        .get_or_insert(TweaksCfg {
             dynamic_gaps: None,
             window_menu: None,
             shadows: None,
@@ -110,20 +110,16 @@ pub(crate) fn glass_mut(config: &mut PiumaConfig) -> &mut GlassCfg {
 /// `panel.tweaks.auto_hide`: the bar slides out while a fullscreen
 /// window has focus.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub struct AutoHideCfg {
     pub enabled: bool,
 }
 
-impl Default for AutoHideCfg {
-    fn default() -> Self {
-        Self { enabled: false }
-    }
-}
 
 pub(crate) fn auto_hide_mut(config: &mut PiumaConfig) -> &mut AutoHideCfg {
     config
         .tweaks
-        .get_or_insert_with(|| TweaksCfg {
+        .get_or_insert(TweaksCfg {
             dynamic_gaps: None,
             window_menu: None,
             shadows: None,
@@ -157,7 +153,7 @@ impl Default for ScreensaverCfg {
 pub(crate) fn screensaver_mut(config: &mut PiumaConfig) -> &mut ScreensaverCfg {
     config
         .tweaks
-        .get_or_insert_with(|| TweaksCfg {
+        .get_or_insert(TweaksCfg {
             dynamic_gaps: None,
             window_menu: None,
             shadows: None,
@@ -200,7 +196,7 @@ impl Default for BordersCfg {
 pub(crate) fn borders_mut(config: &mut PiumaConfig) -> &mut BordersCfg {
     config
         .tweaks
-        .get_or_insert_with(|| TweaksCfg {
+        .get_or_insert(TweaksCfg {
             dynamic_gaps: None,
             window_menu: None,
             shadows: None,
@@ -252,7 +248,7 @@ impl Default for ShadowsCfg {
 pub(crate) fn shadows_mut(config: &mut PiumaConfig) -> &mut ShadowsCfg {
     config
         .tweaks
-        .get_or_insert_with(|| TweaksCfg {
+        .get_or_insert(TweaksCfg {
             dynamic_gaps: None,
             window_menu: None,
             shadows: None,
@@ -321,7 +317,7 @@ impl Default for DynamicGapsCfg {
 pub(crate) fn dynamic_gaps_mut(config: &mut PiumaConfig) -> &mut DynamicGapsCfg {
     config
         .tweaks
-        .get_or_insert_with(|| TweaksCfg {
+        .get_or_insert(TweaksCfg {
             dynamic_gaps: None,
             window_menu: None,
             shadows: None,
@@ -339,7 +335,7 @@ pub(crate) fn dynamic_gaps_mut(config: &mut PiumaConfig) -> &mut DynamicGapsCfg 
 pub(crate) fn window_menu_mut(config: &mut PiumaConfig) -> &mut WindowMenuCfg {
     config
         .tweaks
-        .get_or_insert_with(|| TweaksCfg {
+        .get_or_insert(TweaksCfg {
             dynamic_gaps: None,
             window_menu: None,
             shadows: None,
@@ -563,6 +559,7 @@ pub struct Sensor {
 }
 
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct SourceConfig {
     pub command: Option<String>,
     pub env_var: Option<String>,
@@ -661,21 +658,6 @@ impl Default for Sensor {
     }
 }
 
-impl Default for SourceConfig {
-    fn default() -> Self {
-        SourceConfig {
-            command: None,
-            env_var: None,
-            static_text: None,
-            interface: None,
-            device: None,
-            format: None,
-            count: None,
-            interval: None,
-            interval_text: String::new(),
-        }
-    }
-}
 
 
 impl PiumaSetup {
@@ -1594,8 +1576,10 @@ impl PiumaSetup {
     /// name "CPU" is only for sensors created in the UI).
     fn load_sensor(&self, json: &JsonValue) -> Option<Sensor> {
         let obj = json.as_object()?;
-        let mut sensor = Sensor::default();
-        sensor.name = None;
+        let mut sensor = Sensor {
+            name: None,
+            ..Sensor::default()
+        };
 
         if let Some(name) = obj.get("name").and_then(|v| v.as_str()) {
             sensor.name = Some(name.to_string());
@@ -1739,7 +1723,7 @@ pub(crate) fn set_notif_number(n: &mut NotificationsCfg, key: &str, value: i32) 
 /// Maps a legacy type name to the canonical round-9 name; anything else
 /// (already canonical) passes through. Applied when loading, so the whole
 /// editor — picklist, param inputs, save — only ever sees canonical names.
-pub(crate) fn canonical_type<'a>(source_type: &'a str) -> &'a str {
+pub(crate) fn canonical_type(source_type: &str) -> &str {
     match source_type {
         "ProcCpu" => "perc_cpu",
         "NvidiaGpu" => "perc_gpu",

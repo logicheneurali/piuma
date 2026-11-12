@@ -263,7 +263,7 @@ pub fn y_bounds(scale: Scale, window: &[f32]) -> (f32, f32) {
             if !min.is_finite() || !max.is_finite() {
                 return (0.0, 1.0);
             }
-            if max - min < f32::EPSILON {
+            if (max - min).abs() < f32::EPSILON {
                 return (min - 1.0, max + 1.0);
             }
             let pad = (max - min) * 0.05;

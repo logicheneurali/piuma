@@ -1024,6 +1024,7 @@ pub(crate) fn border_bar(color: Color, width: Length, height: Length) -> Element
 ///
 /// The border is drawn only when both a color and a positive width are set,
 /// which is the rule the native border always applied.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn styled_box<'a>(
     content: Element<'a, Message>,
     bg_color: Option<Color>,
@@ -3391,7 +3392,7 @@ fn bar_view<'a>(
                     windows::slot_width(),
                     u32::from(windows::ROW_GAP),
                 );
-                windows::row(slots, panel.taskbar_hover.as_deref(), &row_style, per_line).into()
+                windows::row(slots, panel.taskbar_hover.as_deref(), &row_style, per_line)
             } else if is_volume_meter {
                 // Graphical volume meter: speaker, optional name and the
                 // click/drag bar. The percentage is added only while the
@@ -3851,23 +3852,6 @@ fn refresh_tray_and_notif(panel: &mut Panel) {
     }
 }
 
-
-
-
-
-
-
-
-
-
-
-// ── popup window (F3) ───────────────────────────────────────────────
-
-/// Keep the popup window in step with the active notifications: no
-/// notifications block or nothing active closes it, the first card
-/// opens it (Overlay layer, opposite the bar's edge, exclusive zone 0)
-/// and a count change resizes the surface to the stack's exact height.
-/// `reposition` forces the resize/anchor message (bar geometry changed).
 // ── popup style ─────────────────────────────────────────────────────
 
 /// Resolved popup card style: `panel.notifications` values, with the
@@ -4307,7 +4291,7 @@ fn main() -> Result<(), iced_exwlshell::Error> {
     let _ = CONFIG.set(config.clone());
     let _ = CONFIG_PATH.set(resolved_config_path.to_string_lossy().into_owned());
 
-    let panel_config = CONFIG.get().cloned().unwrap_or_else(|| config::default_config());
+    let panel_config = CONFIG.get().cloned().unwrap_or_else(config::default_config);
 
     // Run the iced app on a dedicated thread so the close action can be
     // observed from the main thread without blocking the event loop.
@@ -4328,7 +4312,7 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                     let cfg = CONFIG
                         .get()
                         .cloned()
-                        .unwrap_or_else(|| config::default_config());
+                        .unwrap_or_else(config::default_config);
                     let layouts = boot_layouts.clone();
                     let screens = boot_screens.clone();
                     // Initial geometry (size, anchor, exclusive zone) must
@@ -4596,11 +4580,10 @@ fn parse_config_arg() -> Option<String> {
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
-        if arg == "-c" || arg == "--config" {
-            if i + 1 < args.len() {
+        if (arg == "-c" || arg == "--config")
+            && i + 1 < args.len() {
                 return Some(args[i + 1].clone());
             }
-        }
         i += 1;
     }
     None

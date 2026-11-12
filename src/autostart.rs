@@ -344,7 +344,7 @@ fn shell_c_arg(exec: &str) -> Option<String> {
 /// The last `&&`/`;`/`||` segment of a `-c` command line: the part that
 /// persists (the earlier ones are setup steps).
 fn chain_last(cmd: &str) -> &str {
-    cmd.rsplit(|c| c == '&' || c == ';' || c == '|')
+    cmd.rsplit(['&', ';', '|'])
         .map(str::trim)
         .find(|s| !s.is_empty())
         .unwrap_or(cmd)

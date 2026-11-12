@@ -142,9 +142,7 @@ pub(crate) fn calendar_page(panel: &mut Panel, delta: i32) -> Command<Message> {
 /// only real absences, including after the cursor rests for good on
 /// another application's window where no event ever arrives again.
 pub(crate) fn reap_abandoned_calendar(panel: &mut Panel) -> Option<CalendarPopup> {
-    let Some(cp) = panel.calendar.as_mut() else {
-        return None;
-    };
+    let cp = panel.calendar.as_mut()?;
     if panel.hovered == Some((cp.section, cp.sensor)) || cp.pointer_on_popup {
         cp.missed = 0;
         return None;
@@ -211,7 +209,7 @@ pub(crate) fn calendar_popup_view<'a>(
     // A paging arrow: a hit target as tall as the header row.
     let arrow = |label: &'static str, msg: Message| -> Element<'a, Message> {
         MouseArea::new(
-            container(text(label).size(fs).color(st.text).font(font.clone()))
+            container(text(label).size(fs).color(st.text).font(font))
                 .width(Length::Fixed(fs as f32 * 1.6))
                 .height(Length::Fill)
                 .align_x(Alignment::Center)
@@ -227,7 +225,7 @@ pub(crate) fn calendar_popup_view<'a>(
             text(cp.month_label.clone())
                 .size(fs)
                 .color(st.text)
-                .font(font.clone())
+                .font(font)
                 .width(Length::Fill)
                 .align_x(Alignment::Center)
                 .wrapping(iced::widget::text::Wrapping::None),
@@ -241,7 +239,7 @@ pub(crate) fn calendar_popup_view<'a>(
             text(label.clone())
                 .size(fs)
                 .color(st.text)
-                .font(font.clone())
+                .font(font)
                 .into(),
         ));
     }
@@ -256,10 +254,10 @@ pub(crate) fn calendar_popup_view<'a>(
             let day_font = if is_today {
                 iced::Font {
                     weight: iced::font::Weight::Bold,
-                    ..font.clone()
+                    ..font
                 }
             } else {
-                font.clone()
+                font
             };
             let body: Element<'_, Message> = match day {
                 Some(d) => text(d.to_string())
@@ -276,10 +274,14 @@ pub(crate) fn calendar_popup_view<'a>(
                 .align_y(Alignment::Center);
             let day_cell: Element<'_, Message> = if is_today {
                 c.style(move |_theme: &iced::Theme| {
-                    let mut style = ContainerStyle::default();
-                    style.background = Some(Background::Color(accent));
-                    style.border.radius = corner_radius([false; 4], 4.0);
-                    style
+                    ContainerStyle {
+                        background: Some(Background::Color(accent)),
+                        border: iced::Border {
+                            radius: corner_radius([false; 4], 4.0),
+                            ..iced::Border::default()
+                        },
+                        ..ContainerStyle::default()
+                    }
                 })
                 .into()
             } else {

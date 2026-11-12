@@ -1667,7 +1667,7 @@ fn validation_follows_every_edit() {
 fn invalid_under_keeps_the_widget_shape() {
     let build = |reason: Option<&'static str>| {
         let field: iced::Element<'_, Message> =
-            input("#rgb", "#ffffff", |v| Message::FontChanged(v)).into();
+            input("#rgb", "#ffffff", Message::FontChanged).into();
         invalid_under(field, reason)
     };
     assert_eq!(

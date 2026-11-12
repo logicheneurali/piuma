@@ -290,7 +290,7 @@ pub(crate) fn placed(
         | WindowMenuPosition::BottomCenter
         | WindowMenuPosition::BottomRight => pill.1 >= y + h,
     };
-    let bridge = outside.then(|| match pos {
+    let bridge = outside.then_some(match pos {
         WindowMenuPosition::TopLeft
         | WindowMenuPosition::TopCenter
         | WindowMenuPosition::TopRight => Bridge::Bottom,
@@ -506,7 +506,7 @@ pub(crate) fn view<'a>(panel: &'a Panel, menu: &'a WindowMenu) -> Element<'a, Me
             .align_y(Alignment::Center)
             .style(move |_theme| container::Style {
                 background: (menu.hover == Some(action))
-                    .then(|| Background::Color(hover_bg)),
+                    .then_some(Background::Color(hover_bg)),
                 border: Border {
                     radius: radius.into(),
                     ..Default::default()

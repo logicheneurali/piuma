@@ -272,16 +272,14 @@ fn contrast(a: Color, b: Color) -> f32 {
 /// `.style` calls of the editor).
 pub(crate) fn fg_text(pal: Palette) -> impl Fn(&Theme) -> TextStyle {
     move |_t: &Theme| TextStyle {
-        color: Some(pal.fg),
-        ..TextStyle::default()
+        color: Some(pal.fg)
     }
 }
 
 /// Text style in the palette's secondary colour.
 pub(crate) fn muted_text(pal: Palette) -> impl Fn(&Theme) -> TextStyle {
     move |_t: &Theme| TextStyle {
-        color: Some(pal.muted),
-        ..TextStyle::default()
+        color: Some(pal.muted)
     }
 }
 
@@ -353,8 +351,7 @@ pub(crate) fn hex_color(value: &str) -> Color {
 /// highlighted field, reason line, badge and refusal list.
 pub(crate) fn error_text_style(_t: &Theme) -> TextStyle {
     TextStyle {
-        color: Some(ERROR_RED),
-        ..TextStyle::default()
+        color: Some(ERROR_RED)
     }
 }
 
@@ -402,8 +399,10 @@ mod tests {
     /// configured colours.
     #[test]
     fn light_mode_produces_a_light_editor() {
-        let mut cfg = PiumaConfig::default();
-        cfg.theme_mode = Some("light".to_string());
+        let mut cfg = PiumaConfig {
+            theme_mode: Some("light".to_string()),
+            ..PiumaConfig::default()
+        };
         let light = palette(&cfg);
         assert!(light.bg.r > 0.8 && light.bg.g > 0.8 && light.bg.b > 0.8);
         assert!(light.fg.r < 0.3 && light.fg.g < 0.3 && light.fg.b < 0.3);

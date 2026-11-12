@@ -253,6 +253,7 @@ pub(crate) fn sensor_summary(sensor: &Sensor) -> String {
 /// and remove controls; the form (name, description, source, graph, style)
 /// is the body, expanded on demand. `section_labels` feeds the cross-
 /// section "Move to" picklist (its number prefix is the 1-based index).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn sensor_view<'a>(
     pal: Palette,
     state: &'a PiumaSetup,
@@ -519,8 +520,7 @@ pub(crate) fn sensor_view<'a>(
     let preview_line = text(hint.clone().unwrap_or_default())
         .size(10)
         .style(move |_t: &Theme| TextStyle {
-            color: hint.as_ref().map(|_| Color::from_rgb(1.0, 0.6, 0.2)),
-            ..TextStyle::default()
+            color: hint.as_ref().map(|_| Color::from_rgb(1.0, 0.6, 0.2))
         });
     let preview_block: Element<Message> = form_cell(
         "Preview",

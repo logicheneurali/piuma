@@ -5,7 +5,11 @@
 use log::{LevelFilter, Log, Metadata, Record};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const DEFAULT_LEVEL: LevelFilter = LevelFilter::Trace;
+/// `Info` by default: the bar's own lines are useful, the per-frame
+/// `calloop`/`zbus`/`wgpu` trace is not (it can write tens of thousands
+/// of lines in minutes). Trace-level debugging is opt-in with
+/// `RUST_LOG=trace`.
+const DEFAULT_LEVEL: LevelFilter = LevelFilter::Info;
 
 struct Logger {
     level: LevelFilter,
@@ -42,7 +46,7 @@ pub(crate) fn init() {
 }
 
 /// `RUST_LOG` as a plain level (`error`, `warn`, `info`, `debug`,
-/// `trace`, `off`); anything else keeps the old default.
+/// `trace`, `off`); anything else keeps the `Info` default.
 fn level_from_spec(spec: Option<&str>) -> LevelFilter {
     spec.and_then(|value| value.trim().parse().ok())
         .unwrap_or(DEFAULT_LEVEL)
@@ -88,12 +92,12 @@ mod tests {
     use super::*;
 
     /// The level filter mirrors the old `.env()` behaviour: a plain
-    /// level is honoured, an absent or malformed value is Trace.
+    /// level is honoured, an absent or malformed value is `Info`.
     #[test]
     fn level_comes_from_rust_log() {
-        assert_eq!(level_from_spec(None), LevelFilter::Trace);
-        assert_eq!(level_from_spec(Some("")), LevelFilter::Trace);
-        assert_eq!(level_from_spec(Some("wat")), LevelFilter::Trace);
+        assert_eq!(level_from_spec(None), LevelFilter::Info);
+        assert_eq!(level_from_spec(Some("")), LevelFilter::Info);
+        assert_eq!(level_from_spec(Some("wat")), LevelFilter::Info);
         assert_eq!(level_from_spec(Some("info")), LevelFilter::Info);
         assert_eq!(level_from_spec(Some("DEBUG")), LevelFilter::Debug);
         assert_eq!(level_from_spec(Some(" off ")), LevelFilter::Off);

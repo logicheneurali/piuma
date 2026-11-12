@@ -717,11 +717,8 @@ pub fn backlight_perc() -> Option<(String, f64)> {
         let base = entry.path();
         if let (Some(cur), Some(max)) = (read_num(base.join("brightness")), read_num(base.join("max_brightness")))
         {
-            if max > 0 {
-                return Some((
-                    format!("{}", cur * 100 / max),
-                    cur as f64 * 100.0 / max as f64,
-                ));
+            if let Some(perc) = (cur * 100).checked_div(max) {
+                return Some((format!("{perc}"), cur as f64 * 100.0 / max as f64));
             }
         }
     }

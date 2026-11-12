@@ -538,6 +538,7 @@ fn right_column<'a>(
 }
 
 /// One system tile: name and value on top, the sparkline under them.
+#[allow(clippy::too_many_arguments)]
 fn system_tile<'a>(
     panel: &'a Panel,
     section: usize,

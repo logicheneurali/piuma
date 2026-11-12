@@ -86,7 +86,7 @@ pub(crate) fn panel_settings(state: &PiumaSetup) -> Element<'_, Message> {
             state.field_err("panel.value_effect"),
         )),
         ("Theme", invalid_under(
-            theme_control(pal, state.config.theme_mode.as_deref().unwrap_or("dark")).into(),
+            theme_control(pal, state.config.theme_mode.as_deref().unwrap_or("dark")),
             state.field_err("panel.theme_mode"),
         )),
         ("Default BG", color_control_over(
@@ -104,11 +104,11 @@ pub(crate) fn panel_settings(state: &PiumaSetup) -> Element<'_, Message> {
             Some(Message::DefaultTextColorChanged(String::new())),
         )),
         ("Anchor", invalid_under(
-            anchor_grid(pal, &anchor).into(),
+            anchor_grid(pal, &anchor),
             state.field_err("panel.anchor"),
         )),
         ("Align", invalid_under(
-            align_row(pal, &align).into(),
+            align_row(pal, &align),
             state.field_err("panel.align"),
         )),
         ("Monitor", monitor_control(state)),
@@ -122,7 +122,7 @@ pub(crate) fn panel_settings(state: &PiumaSetup) -> Element<'_, Message> {
         // Rounded screen corners (roadmap angoli-schermo): an absent
         // block reads as "off" with the bar's own fallback values.
         ("Screen Corners", toggler(
-            state.config.screen_corners.as_ref().map_or(false, |c| c.enable))
+            state.config.screen_corners.as_ref().is_some_and(|c| c.enable))
             .label("Round the screen corners")
             .on_toggle(Message::CornersEnabled)
             .into()),
@@ -424,7 +424,7 @@ pub(crate) fn notifications_settings<'a>(state: &'a PiumaSetup) -> Element<'a, M
                     .style(muted_text(pal)),
             )
             .push(form_grid(vec![
-                ("Position", notif_position_grid(pal, &n.popup_position).into()),
+                ("Position", notif_position_grid(pal, &n.popup_position)),
                 ("Margin H", slider_control(0..=100, n.popup_margin_h, state.field_err("panel.notifications.popup_margin_h"), |value| Message::NotifNumberChanged("popup_margin_h".to_string(), value))),
                 ("Margin V", slider_control(0..=100, n.popup_margin_v, state.field_err("panel.notifications.popup_margin_v"), |value| Message::NotifNumberChanged("popup_margin_v".to_string(), value))),
             ]));

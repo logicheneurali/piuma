@@ -37,6 +37,7 @@ pub(crate) fn acquire_instance_lock() -> Option<std::fs::File> {
     let path = PathBuf::from(runtime).join("piuma.lock");
     let file = match std::fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&path)
@@ -150,6 +151,7 @@ mod tests {
         let open = || {
             std::fs::OpenOptions::new()
                 .create(true)
+                .truncate(false)
                 .read(true)
                 .write(true)
                 .open(&path)

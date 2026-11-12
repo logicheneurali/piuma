@@ -252,7 +252,7 @@ fn notify(sender: &Sender<Message>) {
 
 /// ARGB32 in network byte order (the spec's wire format) → RGBA bytes.
 pub fn argb_to_rgba(data: &[u8]) -> Vec<u8> {
-    data.chunks_exact(4)
+    data.as_chunks::<4>().0.iter()
         .flat_map(|px| [px[1], px[2], px[3], px[0]])
         .collect()
 }
@@ -298,6 +298,11 @@ fn best_pixmap(pixmaps: &[(i32, i32, Vec<u8>)]) -> Option<&(i32, i32, Vec<u8>)> 
 /// through `icons::resolve` — the sensors' own resolver — so both share
 /// one lookup policy and its cache (misses included: an unknown name is
 /// not re-searched on every property change).
+/// One SNI icon bitmap: width, height, ARGB rows.
+type Pixmap = (i32, i32, Vec<u8>);
+/// SNI tooltip payload: icon name, icon pixmaps, title, text.
+type Tooltip = (String, Vec<Pixmap>, String, String);
+
 fn resolve_image(name: &str, pixmaps: &[(i32, i32, Vec<u8>)]) -> Option<TrayImage> {
     if !name.is_empty() {
         if let Some(path) = crate::icons::resolve(crate::icons::icon_theme(), name, icon_target()) {
@@ -350,17 +355,12 @@ async fn refresh_item(conn: &Connection, bus: &str, path: &str) -> Option<()> {
         .await
         .unwrap_or_else(|_| "Active".to_string());
     let icon_name = proxy.get_property::<String>("IconName").await.unwrap_or_default();
-    let icon_pixmaps: Vec<(i32, i32, Vec<u8>)> =
-        proxy.get_property("IconPixmap").await.unwrap_or_default();
+    let icon_pixmaps: Vec<Pixmap> = proxy.get_property("IconPixmap").await.unwrap_or_default();
     let att_name = proxy.get_property::<String>("AttentionIconName").await.unwrap_or_default();
-    let att_pixmaps: Vec<(i32, i32, Vec<u8>)> =
+    let att_pixmaps: Vec<Pixmap> =
         proxy.get_property("AttentionIconPixmap").await.unwrap_or_default();
-    let (tip_name, tip_pixmaps, tip_title, tip_text): (
-        String,
-        Vec<(i32, i32, Vec<u8>)>,
-        String,
-        String,
-    ) = proxy.get_property("ToolTip").await.unwrap_or_default();
+    let (tip_name, tip_pixmaps, tip_title, tip_text): Tooltip =
+        proxy.get_property("ToolTip").await.unwrap_or_default();
 
     // NeedsAttention swaps in the attention icon when the item provides one.
     let (main_name, main_pixmaps) = if status == "NeedsAttention"
@@ -819,12 +819,7 @@ async fn serve_observer(conn: &Connection, sender: &Sender<Message>) -> zbus::Re
     // = another tray received the name (stay the observer), `Some(None)` =
     // the name left the bus; a stream end falls back to the old behavior
     // (attempt the takeover — the name request decides).
-    loop {
-        match owner.next().await {
-            Some(Some(_)) => continue,
-            Some(None) | None => break,
-        }
-    }
+    while let Some(Some(_)) = owner.next().await {}
     eprintln!("[piuma] tray: the other watcher left — taking over");
     Ok(())
 }
@@ -928,11 +923,13 @@ async fn drive(sender: &Sender<Message>) -> zbus::Result<()> {
     }
 }
 
-/// Pending delays with their wakeups: one sleeping thread serves the
-/// whole queue. The previous implementation spawned — and destroyed —
+/// Pending delays with their wakeups.
+type TimerQueue = Vec<(Instant, oneshot::Sender<()>)>;
+
+/// One sleeping thread serves the whole timer queue. The previous implementation spawned — and destroyed —
 /// a fresh OS thread per sleep, which meant one thread every second for
 /// as long as the notification expiry loop ran.
-static TIMERS: std::sync::LazyLock<std::sync::Mutex<Vec<(Instant, oneshot::Sender<()>)>>> =
+static TIMERS: std::sync::LazyLock<std::sync::Mutex<TimerQueue>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
 
 /// The shared timer thread, started on the first delay asked for.

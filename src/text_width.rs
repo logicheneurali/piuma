@@ -280,7 +280,7 @@ fn shape(
         );
         buffer.set_size(font_system, Some(UNBOUNDED), Some(UNBOUNDED));
         buffer.set_wrap(font_system, cosmic_text::Wrap::None);
-        let _ = buffer.set_text(font_system, text, attrs, shaping, None);
+        buffer.set_text(font_system, text, attrs, shaping, None);
         widest = widest.max(
             buffer
                 .layout_runs()

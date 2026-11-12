@@ -196,7 +196,7 @@ pub(crate) fn tray_menu_view(panel: &Panel) -> Element<'_, Message> {
                 text(if up { "▲" } else { "▼" })
                     .size(font_size.saturating_sub(2))
                     .color(st.text)
-                    .font(font.clone()),
+                    .font(font),
             )
             .width(Length::Fill)
             .height(Length::Fixed(arrow_h))
@@ -272,7 +272,7 @@ pub(crate) fn tray_menu_view(panel: &Panel) -> Element<'_, Message> {
                         .push(
                             container(Space::new().width(Length::Fill).height(Length::Fixed(2.0)))
                                 .style(move |_theme| ContainerStyle {
-                                    background: hovered.then(|| Background::Color(fg)),
+                                    background: hovered.then_some(Background::Color(fg)),
                                     ..ContainerStyle::default()
                                 }),
                         )
@@ -405,7 +405,7 @@ pub(crate) fn taskbar_menu_view(panel: &Panel) -> Element<'_, Message> {
             .align_y(Alignment::Center)
             .style(move |_theme| ContainerStyle {
                 background: (panel.taskbar_menu_hover == Some(row))
-                    .then(|| Background::Color(st.bg_hover)),
+                    .then_some(Background::Color(st.bg_hover)),
                 border: iced::Border {
                     radius: corner_radius(touch, radius),
                     ..Default::default()
