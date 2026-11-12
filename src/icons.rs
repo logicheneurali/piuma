@@ -61,6 +61,12 @@ fn cache() -> std::sync::MutexGuard<'static, Cache> {
 /// buckets mean the config changed and the next tick re-resolves
 /// everything anyway.
 pub fn resolve(theme: &str, name: &str, size: u16) -> Option<PathBuf> {
+    // Bitmaps are looked up at twice the logical size: the widget still
+    // draws at `size`, so a 16 px icon stays sharp at 2x and downsamples
+    // cleanly at 1.25/1.5; SVGs ignore the hint. The cache stays keyed by
+    // the logical size.
+    let asset = asset_size(size);
+
     {
         let cache = cache();
         if let Some(hit) = cache
@@ -72,7 +78,7 @@ pub fn resolve(theme: &str, name: &str, size: u16) -> Option<PathBuf> {
         }
     }
     let found = freedesktop_icons::lookup(name)
-        .with_size(size)
+        .with_size(asset)
         .with_theme(theme)
         // The crate does not walk the theme's `Inherits=` chain: hicolor
         // is the spec's global fallback (and where app-specific icons
@@ -82,7 +88,7 @@ pub fn resolve(theme: &str, name: &str, size: u16) -> Option<PathBuf> {
             (theme != "hicolor")
                 .then(|| {
                     freedesktop_icons::lookup(name)
-                        .with_size(size)
+                        .with_size(asset)
                         .with_theme("hicolor")
                         .find()
                 })
@@ -96,6 +102,11 @@ pub fn resolve(theme: &str, name: &str, size: u16) -> Option<PathBuf> {
         .or_default()
         .insert(name.to_string(), found.clone());
     found
+}
+
+/// The bitmap size to ask the theme for: twice the logical one.
+fn asset_size(size: u16) -> u16 {
+    size.saturating_mul(2)
 }
 
 /// The widget for a resolved file: SVGs go to the svg widget, bitmaps to
@@ -218,6 +229,13 @@ mod tests {
     /// second one is a pure map hit (same `None`, same cache size), and a
     /// hit agrees with itself across calls. One test only, so the global
     /// cache is never asserted from two threads at once.
+    #[test]
+    fn bitmaps_are_looked_up_at_twice_the_logical_size() {
+        assert_eq!(asset_size(16), 32);
+        assert_eq!(asset_size(20), 40);
+        assert_eq!(asset_size(u16::MAX), u16::MAX, "no overflow");
+    }
+
     #[test]
     fn resolve_is_stable_and_remembers_misses() {
         let name = "piuma-definitely-missing-icon";

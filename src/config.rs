@@ -424,6 +424,18 @@ pub struct WindowMenuConfig {
     /// it, its left/right edge aligned with the window's.
     #[serde(default)]
     pub position: WindowMenuPosition,
+    /// Hide the menu after the user has been idle for `hide_after`
+    /// seconds: it fades out 10% per second and fades back in on input.
+    #[serde(default)]
+    pub hide_idle: bool,
+    /// Idle seconds before the fade starts (10..=120); only used while
+    /// `hide_idle` is on.
+    #[serde(default = "default_hide_after")]
+    pub hide_after: u32,
+}
+
+fn default_hide_after() -> u32 {
+    30
 }
 
 /// The six places a window edge can host the menu: above or below the
@@ -1128,6 +1140,16 @@ pub fn validate_config(cfg: &Config) -> Vec<ConfigError> {
                 message: "the minimum gap cannot exceed the maximum".to_string(),
             });
         }
+    }
+
+    if let Some(w) = p.tweaks.as_ref().and_then(|t| t.window_menu.as_ref()) {
+        err_range_u32(
+            &mut errors,
+            "panel.tweaks.window_menu.hide_after",
+            Some(w.hide_after),
+            10,
+            120,
+        );
     }
 
     if let Some(b) = p.tweaks.as_ref().and_then(|t| t.borders.as_ref()) {
@@ -2211,6 +2233,8 @@ mod tests {
             .expect("window menu");
         assert!(menu.enabled);
         assert_eq!(menu.position, WindowMenuPosition::TopCenter, "default");
+        assert!(!menu.hide_idle, "hide when idle is off by default");
+        assert_eq!(menu.hide_after, 30, "default idle timeout");
         assert!(validate_config(&cfg).is_empty());
 
         let corners: Config = serde_json::from_str(
@@ -2229,6 +2253,14 @@ mod tests {
             .is_err(),
             "an unknown position must not load"
         );
+
+        let bad: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[],"tweaks":{"window_menu":{"enabled":true,"hide_idle":true,"hide_after":5}}}}"#,
+        )
+        .unwrap();
+        assert!(validate_config(&bad).iter().any(|e| {
+            e.path == "panel.tweaks.window_menu.hide_after"
+        }));
     }
 
     /// A wrapped dynamic-gaps range must not be inverted.

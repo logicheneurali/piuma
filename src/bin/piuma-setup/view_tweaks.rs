@@ -69,6 +69,7 @@ pub(crate) fn tweaks_settings(state: &PiumaSetup) -> Element<'_, Message> {
         borders_card(state, pal),
         screensaver_card(state, pal),
         glass_card(state, pal),
+        screen_corners_card(state, pal),
         auto_hide_card(state, pal),
     ]
     .spacing(12)
@@ -158,13 +159,41 @@ fn window_menu_card(state: &PiumaSetup, pal: Palette) -> Element<'_, Message> {
                 )]),
                 state.field_err("panel.tweaks.window_menu"),
             ),
+            toggler(menu.is_some_and(|m| m.hide_idle))
+                .label("Hide when idle")
+                .on_toggle(Message::WindowMenuHideIdle),
+            if menu.is_some_and(|m| m.hide_idle) {
+                let seconds = menu.map_or(30, |m| m.hide_after).clamp(10, 120) as i32;
+                invalid_under(
+                    Row::new()
+                        .push(
+                            Slider::new(10..=120, seconds, |value| {
+                                Message::WindowMenuHideAfter(value as u32)
+                            })
+                            .width(Length::Fill),
+                        )
+                        .push(text(format!("{seconds}s")).size(BODY).width(48))
+                        .spacing(8)
+                        .align_y(Alignment::Center)
+                        .width(Length::Fill)
+                        .into(),
+                    state.field_err("panel.tweaks.window_menu.hide_after"),
+                )
+            } else {
+                text("Hide after: turn the toggle on to set the timeout.")
+                    .size(BODY)
+                    .style(muted_text(pal))
+                    .into()
+            },
             text(
                 "The menu follows the focused window: one small pill, 4 px above or below it \
                  and flush with its left or right edge (inside the window when it sits against \
                  the screen edge), with close, float and sticky buttons. Sticky floats a tiled window before pinning it, as \
                  Hyprland only pins floating windows. The menu never takes focus, so clicking \
                  it leaves the window active. Changing the toggle or the position applies at \
-                 the next second, without restarting."
+                 the next second, without restarting. With 'Hide when idle' on, after the \
+                 timeout without input the menu fades out 10% per second and fades back in \
+                 over two seconds at the first input."
             )
             .size(BODY)
             .style(muted_text(pal)),
@@ -455,6 +484,59 @@ fn glass_card(state: &PiumaSetup, pal: Palette) -> Element<'_, Message> {
             text("Uses the compositor's own blur; the bar's background keeps its colour at the chosen opacity.")
                 .size(BODY)
                 .style(muted_text(pal)),
+        ]
+        .spacing(10)
+        .width(Length::Fill),
+    )
+    .into()
+}
+
+/// `panel.screen_corners`: square masks that round the output corners (the
+/// JSON block stays under `panel`, where the bar reads it).
+fn screen_corners_card(state: &PiumaSetup, pal: Palette) -> Element<'_, Message> {
+    let corners = state.config.screen_corners.as_ref();
+    let enabled = corners.is_some_and(|c| c.enable);
+    // Absent block = the bar's own fallback radius (config.rs).
+    let radius = corners.map_or(32, |c| c.radius);
+    card(
+        pal,
+        column![
+            text("Screen corners").size(16).style(fg_text(pal)),
+            toggler(enabled)
+                .label("Round the screen corners")
+                .on_toggle(Message::CornersEnabled),
+            invalid_under(
+                form_grid(vec![
+                    (
+                        "Corner Color",
+                        color_control(
+                            corners.map_or("", |c| c.color.as_str()),
+                            state.field_err("panel.screen_corners.color"),
+                            Message::CornersColorChanged,
+                        ),
+                    ),
+                    (
+                        "Corner Radius",
+                        Row::new()
+                            .push(
+                                Slider::new(1..=256, radius, Message::CornersRadiusChanged)
+                                    .width(Length::Fill)
+                            )
+                            .push(text(format!("{radius}px")).size(BODY).width(48))
+                            .spacing(8)
+                            .width(Length::Fill)
+                            .into(),
+                    ),
+                ]),
+                state.field_err("panel.screen_corners.radius"),
+            ),
+            text(
+                "Paints one mask per output corner in the configured colour, rounding the \
+                 screen itself. The block keeps its place under `panel.screen_corners` in the \
+                 JSON, so existing configurations keep working."
+            )
+            .size(BODY)
+            .style(muted_text(pal)),
         ]
         .spacing(10)
         .width(Length::Fill),

@@ -163,7 +163,8 @@ save writes the new names into `piuma.json`.
   masks each display corner with a solid-colour square minus the inner
   quarter disk, so the screen itself reads as rounded like the panel —
   drawn on layer-shell overlay surfaces, so it needs a layer-shell
-  compositor (Hyprland: works)
+  compositor (Hyprland: works). The controls live in piuma-setup's
+  *Tweaks* tab; the JSON block stays under `panel.screen_corners`.
 
 ### Panel Positioning
 
@@ -783,7 +784,10 @@ dispatch).
 ```json
 "tweaks": {
   "dynamic_gaps": { "enabled": true, "min": 4, "max": 16 },
-  "window_menu": { "enabled": true, "position": "top-center" },
+  "window_menu": {
+    "enabled": true, "position": "top-center",
+    "hide_idle": true, "hide_after": 30
+  },
   "shadows": {
     "enabled": true, "range": 10, "render_power": 1, "sharp": false,
     "color": "#00000099", "color_inactive": "#ffffffff",
@@ -863,8 +867,11 @@ surface reaches the window edge with a transparent 4 px strip (the pill
 keeps that gap): the pointer leaves the window straight onto the menu,
 so `input:follow_mouse` cannot focus an overlapping window on the way
 and the menu no longer moves away before the click. A
-hidden fullscreen window has no menu. The toggle and the position apply
-on the bar's next 1 Hz tick; while the tweak is off the bar opens no
+hidden fullscreen window has no menu. With `hide_idle` on (off by
+default), after `hide_after` seconds (10–120, default 30) without input
+the pill fades out at 10% per second and fades back in over two seconds
+at the first input. The toggle, the position and the timeout apply on
+the bar's next 1 Hz tick; while the tweak is off the bar opens no
 socket and no surface.
 
 The bar reads the focused window from Hyprland's event socket

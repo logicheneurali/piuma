@@ -55,6 +55,7 @@ mod palette;
 mod pam_ffi;
 mod playback;
 mod power_menu;
+mod popup_anim;
 mod popup_calendar;
 mod popup_graph;
 mod popup_notifications;
@@ -682,6 +683,8 @@ pub(crate) enum Message {
     /// One animation frame while a value effect is alive: only prunes
     /// expired effects; the view computes their progress.
     EffectFrame,
+    /// One frame of a popup's open slide (see `popup_anim`).
+    PopupFrame,
     /// The tick's data pass finished on a worker thread: the config
     /// generation it read against (a reply from an older config is
     /// dropped, see `spawn_read`) and every sensor's reading.
@@ -798,6 +801,9 @@ pub(crate) enum Message {
     WindowMenuLeft(window_menu::Action),
     /// One glide frame of the floating menu.
     WindowMenuFrame,
+    /// The window menu's idle threshold crossed (`true`) or input resumed
+    /// (`false`): fade it out or back in.
+    WindowMenuIdle(bool),
     /// Taskbar icon under the cursor: the hover fill plus its title
     /// tooltip (empty title → no tooltip window).
     TaskbarIconEnter {
@@ -2092,12 +2098,13 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             // their row budget (single line + ellipsis in the view).
             fit_menu_labels(&mut entries, w, &font, font_size);
             let (anchor, margin) = menu_placement(at.0, at.1, w, h, sw, sh);
+            let opening = popup_anim::opening_margin(anchor, margin);
             let (id, open) = Message::layershell_open(NewLayerShellSettings {
                 size: LayerSize::px(w, h),
                 layer: Layer::Overlay,
                 anchor,
                 exclusive_zone: None,
-                margin: Some(margin),
+                margin: Some(opening),
                 keyboard_interactivity: KeyboardInteractivity::None,
                 // The bar's own output: `LastOutput` landed the popup
                 // on a second monitor once one joined the session.
@@ -2105,6 +2112,7 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
                 namespace: Some("piuma-tray-menu".to_string()),
                 ..Default::default()
             });
+            popup_anim::start(id, anchor, margin);
             panel.tray_menu = Some((
                 id,
                 TrayMenu {
@@ -2480,17 +2488,19 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             let (w, h) = taskbar_menu_size(&font, font_size);
             let (sw, sh) = crate::focused_screen_size();
             let (anchor, margin) = menu_placement(at.0, at.1, w, h, sw, sh);
+            let opening = popup_anim::opening_margin(anchor, margin);
             let (id, open) = Message::layershell_open(NewLayerShellSettings {
                 size: LayerSize::px(w, h),
                 layer: Layer::Overlay,
                 anchor,
                 exclusive_zone: None,
-                margin: Some(margin),
+                margin: Some(opening),
                 keyboard_interactivity: KeyboardInteractivity::None,
                 output_option: popup_output_option(),
                 namespace: Some("piuma-taskbar-menu".to_string()),
                 ..Default::default()
             });
+            popup_anim::start(id, anchor, margin);
             let (floating, pinned) = panel
                 .hypr
                 .as_ref()
@@ -2531,6 +2541,12 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
         }
         Message::WindowMenuSync(target) => window_menu::apply(panel, target),
         Message::WindowMenuAction(action) => {
+            // A fully faded menu is invisible: its surface stays mounted
+            // for the fade-in, the buttons must not act from under the
+            // pointer until it is visible again.
+            if panel.window_menu.as_ref().is_some_and(|menu| menu.alpha() <= 0.01) {
+                return Command::none();
+            }
             if let Some(target) = panel.window_menu.as_ref().and_then(|menu| menu.target.as_ref()) {
                 window_menu::run(action, &target.address, target.floating, target.pinned);
             }
@@ -2552,6 +2568,8 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             Command::none()
         }
         Message::WindowMenuFrame => window_menu::frame(panel),
+        Message::PopupFrame => popup_anim::frame(),
+        Message::WindowMenuIdle(idled) => window_menu::idle(panel, idled),
         Message::TaskbarMenuHover(row) => {
             panel.taskbar_menu_hover = row;
             Command::none()
@@ -2936,11 +2954,17 @@ fn subscription(app: &App) -> Subscription<Message> {
     // The floating window menu's event thread runs only while the tweak
     // is on; its glide frames only while a move is in progress.
     let menu_sub = window_menu::enabled(&panel.config).then(window_menu::subscription);
+    // The idle notification exists only while "Hide when idle" is on:
+    // its timeout is the configured threshold.
+    let menu_idle = window_menu::idle_timeout(&panel.config).map(idle::menu_subscription);
     let menu_frames = panel
         .window_menu
         .as_ref()
-        .is_some_and(|menu| menu.from.is_some())
+        .is_some_and(window_menu::WindowMenu::animating)
         .then(|| time::every(window_menu::FRAME).map(|_| Message::WindowMenuFrame));
+    // The cursor popups' opening slide: frames only while one is alive.
+    let popup_frames = popup_anim::active()
+        .then(|| time::every(popup_anim::FRAME).map(|_| Message::PopupFrame));
     // The screensaver: its idle notification exists only while the
     // tweak is on (disabled = no thread, no wake), its frames only while
     // the overlay is up, its SIGUSR1 trigger only when it can be shown.
@@ -2966,7 +2990,9 @@ fn subscription(app: &App) -> Subscription<Message> {
         .chain(notif_sub)
         .chain(effect_sub)
         .chain(menu_sub)
+        .chain(menu_idle)
         .chain(menu_frames)
+        .chain(popup_frames)
         .chain(saver_idle)
         .chain(saver_signal)
         .chain(saver_shell)

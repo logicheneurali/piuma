@@ -151,6 +151,12 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                 .unwrap_or("top-center");
             window_menu_mut(&mut state.config).position = key.to_string();
         }
+        Message::WindowMenuHideIdle(value) => {
+            window_menu_mut(&mut state.config).hide_idle = value;
+        }
+        Message::WindowMenuHideAfter(value) => {
+            window_menu_mut(&mut state.config).hide_after = value.clamp(10, 120);
+        }
         Message::ShadowsEnabled(value) => {
             // The switch only arms the block: the values survive both ways,
             // and the bar writes nothing while it is off.

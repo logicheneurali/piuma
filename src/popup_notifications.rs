@@ -63,12 +63,13 @@ pub(crate) fn sync_popup(panel: &mut Panel, reposition: bool) -> Option<Command<
         }
         (None, n) => {
             let (anchor, margin) = popup_placement(&panel.config);
+            let opening = crate::popup_anim::opening_margin(anchor, margin);
             let (id, open) = Message::layershell_open(NewLayerShellSettings {
                 size: popup_size(panel, n),
                 layer: Layer::Overlay,
                 anchor,
                 exclusive_zone: None,
-                margin: Some(margin),
+                margin: Some(opening),
                 keyboard_interactivity: KeyboardInteractivity::None,
                 // The focused output, like every other popup (margins
                 // are pure offsets — safe on any output).
@@ -76,6 +77,7 @@ pub(crate) fn sync_popup(panel: &mut Panel, reposition: bool) -> Option<Command<
                 namespace: Some("piuma-notifications".to_string()),
                 ..Default::default()
             });
+            crate::popup_anim::start(id, anchor, margin);
             panel.popup = Some(id);
             panel.popup_cards = n;
             Some(open)
@@ -458,17 +460,19 @@ pub(crate) fn toggle_notif_list(panel: &mut Panel) -> Command<Message> {
     let (w, h) = notif_list_size(&rows, &font, font_size);
     // The cards' own corner: the list belongs to the same notifications.
     let (anchor, margin) = popup_placement(&panel.config);
+    let opening = crate::popup_anim::opening_margin(anchor, margin);
     let (id, open) = Message::layershell_open(NewLayerShellSettings {
         size: LayerSize::px(w, h),
         layer: Layer::Overlay,
         anchor,
         exclusive_zone: None,
-        margin: Some(margin),
+        margin: Some(opening),
         keyboard_interactivity: KeyboardInteractivity::None,
         output_option: popup_output_option(),
         namespace: Some("piuma-notif-list".to_string()),
         ..Default::default()
     });
+    crate::popup_anim::start(id, anchor, margin);
     panel.notif_list = Some((id, NotifList { offset: 0 }));
     open
 }

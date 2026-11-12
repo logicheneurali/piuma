@@ -267,6 +267,8 @@ pub(crate) fn shadows_mut(config: &mut PiumaConfig) -> &mut ShadowsCfg {
 pub struct WindowMenuCfg {
     pub enabled: bool,
     pub position: String,
+    pub hide_idle: bool,
+    pub hide_after: u32,
 }
 
 impl Default for WindowMenuCfg {
@@ -274,6 +276,8 @@ impl Default for WindowMenuCfg {
         Self {
             enabled: false,
             position: "top-center".to_string(),
+            hide_idle: false,
+            hide_after: 30,
         }
     }
 }
@@ -742,6 +746,8 @@ impl PiumaSetup {
                 let mut wm = Map::new();
                 wm.insert("enabled".to_string(), JsonValue::Bool(w.enabled));
                 wm.insert("position".to_string(), JsonValue::String(w.position.clone()));
+                wm.insert("hide_idle".to_string(), JsonValue::Bool(w.hide_idle));
+                wm.insert("hide_after".to_string(), JsonValue::Number(w.hide_after.into()));
                 tw.insert("window_menu".to_string(), JsonValue::Object(wm));
             }
             if let Some(s) = &t.shadows {
@@ -1262,6 +1268,14 @@ impl PiumaSetup {
                             .and_then(JsonValue::as_str)
                             .map(str::to_string)
                             .unwrap_or_else(|| WindowMenuCfg::default().position),
+                        hide_idle: w
+                            .get("hide_idle")
+                            .and_then(JsonValue::as_bool)
+                            .unwrap_or(false),
+                        hide_after: w
+                            .get("hide_after")
+                            .and_then(JsonValue::as_i64)
+                            .unwrap_or(30) as u32,
                     })
                 }),
                 shadows: o.get("shadows").and_then(|v| {

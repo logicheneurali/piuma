@@ -858,6 +858,8 @@ fn window_menu_tweaks_roundtrip() {
         &mut s,
         Message::WindowMenuPositionChanged("Bottom right".to_string()),
     );
+    let _ = update(&mut s, Message::WindowMenuHideIdle(true));
+    let _ = update(&mut s, Message::WindowMenuHideAfter(45));
     let parsed: config::Config = serde_json::from_str(&s.serialize().unwrap()).unwrap();
     let menu = parsed
         .panel
@@ -867,6 +869,8 @@ fn window_menu_tweaks_roundtrip() {
         .expect("the block must reach the bar");
     assert!(menu.enabled);
     assert_eq!(menu.position, config::WindowMenuPosition::BottomRight);
+    assert!(menu.hide_idle, "the idle hide reaches the bar");
+    assert_eq!(menu.hide_after, 45);
     assert!(config::validate_config(&parsed).is_empty());
 
     let _ = update(
@@ -878,6 +882,14 @@ fn window_menu_tweaks_roundtrip() {
         parsed.panel.tweaks.unwrap().window_menu.unwrap().position,
         config::WindowMenuPosition::TopCenter,
         "an unknown label keeps the default"
+    );
+
+    let _ = update(&mut s, Message::WindowMenuHideAfter(2));
+    let parsed: config::Config = serde_json::from_str(&s.serialize().unwrap()).unwrap();
+    assert_eq!(
+        parsed.panel.tweaks.unwrap().window_menu.unwrap().hide_after,
+        10,
+        "the slider's minimum is enforced"
     );
 }
 

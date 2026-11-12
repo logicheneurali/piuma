@@ -138,13 +138,14 @@ pub(crate) fn graph_hover_sync(
     };
     let (sw, sh) = crate::focused_screen_size();
     let (anchor, margin) = menu_placement(x, y, GRAPH_POPUP_W, GRAPH_POPUP_H, sw, sh);
+    let opening = crate::popup_anim::opening_margin(anchor, margin);
     let rect = placement_rect(anchor, &margin, GRAPH_POPUP_W, GRAPH_POPUP_H, sw, sh);
     let (id, open) = Message::layershell_open(NewLayerShellSettings {
         size: LayerSize::px(GRAPH_POPUP_W, GRAPH_POPUP_H),
         layer: Layer::Overlay,
         anchor,
         exclusive_zone: None,
-        margin: Some(margin),
+        margin: Some(opening),
         keyboard_interactivity: KeyboardInteractivity::None,
         // The bar's own output: `LastOutput` landed the popup on a
         // second monitor once one joined the session.
@@ -152,6 +153,7 @@ pub(crate) fn graph_hover_sync(
         namespace: Some("piuma-graph".to_string()),
         ..Default::default()
     });
+    crate::popup_anim::start(id, anchor, margin);
     panel.graph_popup = Some(GraphPopup {
         id,
         section,

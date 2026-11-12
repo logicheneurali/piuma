@@ -77,6 +77,7 @@ pub(crate) fn calendar_hover_sync(
     let (w, h) = calendar_size(&panel.config, &weekdays);
     let (sw, sh) = crate::focused_screen_size();
     let (anchor, margin) = menu_placement(x, y, w, h, sw, sh);
+    let opening = crate::popup_anim::opening_margin(anchor, margin);
     let rect = placement_rect(anchor, &margin, w, h, sw, sh);
     // Where the surface really lands: the bar's reservation on the
     // shared edge pushes it, so the pointer tests below must not use
@@ -90,7 +91,7 @@ pub(crate) fn calendar_hover_sync(
         layer: Layer::Overlay,
         anchor,
         exclusive_zone: None,
-        margin: Some(margin),
+        margin: Some(opening),
         keyboard_interactivity: KeyboardInteractivity::None,
         // The bar's own output (the graph popup's `LastOutput` landed
         // on the wrong monitor once a second one joined the session).
@@ -98,6 +99,7 @@ pub(crate) fn calendar_hover_sync(
         namespace: Some("piuma-calendar".to_string()),
         ..Default::default()
     });
+    crate::popup_anim::start(id, anchor, margin);
     panel.calendar = Some(CalendarPopup {
         id,
         section,

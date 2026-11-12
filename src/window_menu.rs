@@ -35,8 +35,12 @@ const GAP: u32 = 4;
 const MARGIN: i32 = 4;
 /// Glide time of a focus change: fast enough to feel like a move.
 const ANIM: Duration = Duration::from_millis(120);
-/// One animation frame (60 fps, only while a glide is alive).
+/// One animation frame (60 fps, only while a glide or a fade is alive).
 pub(crate) const FRAME: Duration = Duration::from_millis(16);
+/// Idle fade-out pace: 10% of the opacity per second.
+const FADE_OUT: Duration = Duration::from_secs(10);
+/// Input fade-in: back to full opacity in two seconds.
+const FADE_IN: Duration = Duration::from_secs(2);
 
 /// The three window actions.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -92,6 +96,28 @@ pub(crate) struct Target {
     pub(crate) fullscreen: bool,
 }
 
+/// A linear opacity run: the idle fade-out or the input fade-in.
+#[derive(Clone, Copy)]
+struct Fade {
+    from: f32,
+    to: f32,
+    started: Instant,
+    duration: Duration,
+}
+
+impl Fade {
+    fn alpha(&self, now: Instant) -> f32 {
+        let t = (now.saturating_duration_since(self.started).as_secs_f32()
+            / self.duration.as_secs_f32())
+        .clamp(0.0, 1.0);
+        self.from + (self.to - self.from) * t
+    }
+
+    fn done(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.started) >= self.duration
+    }
+}
+
 /// The live menu surface and what it currently shows.
 pub(crate) struct WindowMenu {
     pub(crate) id: iced::window::Id,
@@ -100,6 +126,10 @@ pub(crate) struct WindowMenu {
     pub(crate) hover: Option<Action>,
     /// A glide in progress: where it started and when.
     pub(crate) from: Option<((i32, i32), Instant)>,
+    /// Resting opacity (`1` = fully visible): the fade's endpoint.
+    alpha: f32,
+    /// The idle/input fade in progress, if any.
+    fade: Option<Fade>,
     /// The surface's output: a different one needs a new surface.
     pub(crate) output: Option<String>,
     /// Last applied surface top-left, so a still window sends nothing.
@@ -109,6 +139,19 @@ pub(crate) struct WindowMenu {
     /// Strip side; changing it changes the surface height, so it needs a
     /// new surface.
     pub(crate) bridge: Option<Bridge>,
+}
+
+impl WindowMenu {
+    /// Whether a glide or a fade still needs animation frames.
+    pub(crate) fn animating(&self) -> bool {
+        self.from.is_some() || self.fade.is_some()
+    }
+
+    /// The opacity to render at: the running fade's value, else the
+    /// resting one.
+    pub(crate) fn alpha(&self) -> f32 {
+        self.fade.as_ref().map_or(self.alpha, |f| f.alpha(Instant::now()))
+    }
 }
 
 /// The pill's size in px: three icon buttons in a row.
@@ -190,6 +233,18 @@ pub(crate) fn enabled(config: &config::Config) -> bool {
         .as_ref()
         .and_then(|t| t.window_menu.as_ref())
         .is_some_and(|w| w.enabled)
+}
+
+/// The idle seconds that hide the menu, `None` while the tweak or its
+/// toggle is off.
+pub(crate) fn idle_timeout(config: &config::Config) -> Option<u32> {
+    config
+        .panel
+        .tweaks
+        .as_ref()
+        .and_then(|t| t.window_menu.as_ref())
+        .filter(|w| w.enabled && w.hide_idle)
+        .map(|w| w.hide_after)
 }
 
 /// The menu's top-left in output-local px: just above or below the
@@ -331,6 +386,12 @@ pub(crate) fn sync(panel: &mut Panel) -> Task<Message> {
             None => Task::none(),
         };
     }
+    if idle_timeout(&panel.config).is_none() {
+        if let Some(menu) = panel.window_menu.as_mut() {
+            menu.fade = None;
+            menu.alpha = 1.0;
+        }
+    }
     // A glide in flight lands on its own; a tick must not snap it.
     if panel.window_menu.as_ref().is_some_and(|menu| menu.from.is_some()) {
         return Task::none();
@@ -338,6 +399,30 @@ pub(crate) fn sync(panel: &mut Panel) -> Task<Message> {
     // Re-read every second: events keep this prompt, the tick makes it
     // self-healing (a re-tile that emits no event still re-places it).
     apply(panel, active_target())
+}
+
+/// The compositor's idle threshold for the menu: fade out after the
+/// configured silence, fade back in on the next input.
+pub(crate) fn idle(panel: &mut Panel, idled: bool) -> Task<Message> {
+    let Some(menu) = panel.window_menu.as_mut() else {
+        return Task::none();
+    };
+    let now = Instant::now();
+    let from = menu.alpha();
+    let to = if idled { 0.0 } else { 1.0 };
+    menu.alpha = from;
+    if (from - to).abs() < 0.001 {
+        menu.fade = None;
+        menu.alpha = to;
+        return Task::none();
+    }
+    menu.fade = Some(Fade {
+        from,
+        to,
+        started: now,
+        duration: if idled { FADE_OUT } else { FADE_IN },
+    });
+    Task::none()
 }
 
 /// Apply one window state change from the socket thread.
@@ -401,9 +486,16 @@ pub(crate) fn apply(panel: &mut Panel, target: Option<Target>) -> Task<Message> 
 
 /// One animation frame: interpolate towards the current target.
 pub(crate) fn frame(panel: &mut Panel) -> Task<Message> {
+    let now = Instant::now();
     let Some(menu) = panel.window_menu.as_mut() else {
         return Task::none();
     };
+    if let Some(fade) = menu.fade {
+        if fade.done(now) {
+            menu.alpha = fade.to;
+            menu.fade = None;
+        }
+    }
     let Some(glide) = menu.from else {
         return Task::none();
     };
@@ -455,6 +547,8 @@ fn open(panel: &mut Panel, target: Target, size: (u32, u32)) -> Task<Message> {
         target: Some(target),
         hover: None,
         from: None,
+        alpha: 1.0,
+        fade: None,
         output: Some(output),
         at: spot.at,
         size,
@@ -486,6 +580,12 @@ pub(crate) fn run(action: Action, address: &str, floating: bool, pinned: bool) {
 /// The menu row: three icon buttons in the sensor's own box.
 pub(crate) fn view<'a>(panel: &'a Panel, menu: &'a WindowMenu) -> Element<'a, Message> {
     let st = style(&panel.config, panel.palette.as_ref());
+    // The idle fade dims the whole pill, icons included.
+    let alpha = menu.alpha();
+    let faded = |color: Color| Color {
+        a: color.a * alpha,
+        ..color
+    };
     let pinned = menu.target.as_ref().is_some_and(|t| t.pinned);
     let theme = panel
         .config
@@ -494,12 +594,12 @@ pub(crate) fn view<'a>(panel: &'a Panel, menu: &'a WindowMenu) -> Element<'a, Me
         .as_deref()
         .unwrap_or_else(|| icons::icon_theme());
     let radius = (st.border_radius as f32).min(ICON as f32 / 2.0);
-    let hover_bg = st.bg_hover;
+    let hover_bg = faded(st.bg_hover);
     let mut row = Row::new().spacing(GAP as f32).align_y(Alignment::Center);
     for action in Action::ALL {
         // `center_*` also sets the axis to Fill, which a shrink row would
         // measure as zero: align instead, the box keeps its fixed edge.
-        let cell = container(icon_widget(theme, action, pinned, st.text))
+        let cell = container(icon_widget(theme, action, pinned, faded(st.text), alpha))
             .width(Length::Fixed(ICON as f32))
             .height(Length::Fixed(ICON as f32))
             .align_x(Alignment::Center)
@@ -525,8 +625,8 @@ pub(crate) fn view<'a>(panel: &'a Panel, menu: &'a WindowMenu) -> Element<'a, Me
     }
     let pill = crate::styled_box(
         row.into(),
-        Some(st.bg),
-        Some(st.border),
+        Some(faded(st.bg)),
+        Some(faded(st.border)),
         st.border_width,
         st.border_radius,
         &st.border_type,
@@ -569,18 +669,21 @@ fn icon_widget(
     action: Action,
     pinned: bool,
     color: Color,
+    opacity: f32,
 ) -> Element<'static, Message> {
     match icons::resolve(theme, action.icon(pinned), ICON as u16) {
         Some(path) if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg")) => {
             svg(svg::Handle::from_path(path))
                 .width(Length::Fixed(ICON as f32))
                 .height(Length::Fixed(ICON as f32))
+                .opacity(opacity)
                 .style(move |_theme, _status| svg::Style { color: Some(color) })
                 .into()
         }
         Some(path) => image(image::Handle::from_path(path))
             .width(Length::Fixed(ICON as f32))
             .height(Length::Fixed(ICON as f32))
+            .opacity(opacity)
             .into(),
         None => text(action.letter())
             .size(ICON as f32)
@@ -847,6 +950,32 @@ mod tests {
         assert_eq!(t.rect, (80, 100, 1000, 800));
         assert_eq!(t.screen, (2560, 1440));
         assert_eq!(t.output, "HDMI-A-2");
+    }
+
+    /// The fades are linear: ten seconds out and two back in, with the
+    /// endpoints exact.
+    #[test]
+    fn fades_reach_their_endpoints_linearly() {
+        let start = Instant::now();
+        let out = Fade {
+            from: 1.0,
+            to: 0.0,
+            started: start,
+            duration: FADE_OUT,
+        };
+        assert!((out.alpha(start) - 1.0).abs() < 1e-6);
+        assert!((out.alpha(start + Duration::from_secs(5)) - 0.5).abs() < 1e-6);
+        assert!((out.alpha(start + FADE_OUT) - 0.0).abs() < 1e-6);
+        assert!(out.done(start + FADE_OUT));
+
+        let back = Fade {
+            from: 0.2,
+            to: 1.0,
+            started: start,
+            duration: FADE_IN,
+        };
+        assert!((back.alpha(start + Duration::from_secs(1)) - 0.6).abs() < 1e-6);
+        assert!(!back.done(start + Duration::from_secs(1)));
     }
 
     #[test]

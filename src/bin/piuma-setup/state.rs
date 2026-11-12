@@ -71,6 +71,9 @@ pub enum Message {
     WindowMenuEnabled(bool),
     /// Its position relative to the window (one of the eight labels).
     WindowMenuPositionChanged(String),
+    /// Hide the menu after the idle timeout, and that timeout (seconds).
+    WindowMenuHideIdle(bool),
+    WindowMenuHideAfter(u32),
     /// The Hyprland shadow tweak's switch and fields.
     ShadowsEnabled(bool),
     ShadowRangeChanged(i32),

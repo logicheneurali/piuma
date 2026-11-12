@@ -23,17 +23,37 @@ use wayland_protocols::ext::idle_notify::v1::client::ext_idle_notifier_v1::ExtId
 
 use crate::Message;
 
+/// Which component a notification feeds: the screensaver (minutes) or
+/// the window menu's idle hide (seconds).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Kind {
+    Screensaver,
+    WindowMenu,
+}
+
 /// One idle subscription, keyed on the timeout: a reload that changes
 /// `minutes` drops the old stream (its thread sees the closed channel
 /// within a second) and starts a new notification.
 pub(crate) fn subscription(minutes: u32) -> Subscription<Message> {
-    Subscription::run_with(minutes, |&minutes| {
-        iced::stream::channel(4, move |sender| run(sender, minutes))
+    let timeout = minutes.clamp(1, 120) * 60_000;
+    subscribe(timeout, Kind::Screensaver)
+}
+
+/// The window menu's threshold: `seconds` after the last input it
+/// reports `WindowMenuIdle(true)`, and `false` on the next input.
+pub(crate) fn menu_subscription(seconds: u32) -> Subscription<Message> {
+    let timeout = seconds.clamp(10, 120) * 1000;
+    subscribe(timeout, Kind::WindowMenu)
+}
+
+fn subscribe(timeout: u32, kind: Kind) -> Subscription<Message> {
+    Subscription::run_with((timeout, kind), |&(timeout, kind)| {
+        iced::stream::channel(4, move |sender| run(sender, timeout, kind))
     })
 }
 
-async fn run(sender: Sender<Message>, minutes: u32) {
-    smol::unblock(move || listen(sender, minutes)).await;
+async fn run(sender: Sender<Message>, timeout: u32, kind: Kind) {
+    smol::unblock(move || listen(sender, timeout, kind)).await;
 }
 
 /// The dispatch state: the notification's last event, forwarded by the
@@ -105,7 +125,7 @@ impl Dispatch<ExtIdleNotificationV1, ()> for Idle {
 /// one-second cadence, enough to notice the closed channel (the app
 /// stopping or disabling the feature) without a wake storm. A
 /// compositor without the protocol leaves the feature off.
-fn listen(mut sender: Sender<Message>, minutes: u32) {
+fn listen(mut sender: Sender<Message>, timeout: u32, kind: Kind) {
     let Ok(conn) = Connection::connect_to_env() else {
         return;
     };
@@ -120,7 +140,6 @@ fn listen(mut sender: Sender<Message>, minutes: u32) {
     let Ok(seat) = globals.bind::<WlSeat, _, _>(&qh, 1..=9, ()) else {
         return;
     };
-    let timeout = minutes.clamp(1, 120) * 60_000;
     // v2 adds the input-only variant; on v1 there is only the
     // inhibitor-aware one (see the module comment).
     let _notification = if notifier.version() >= 2 {
@@ -151,7 +170,11 @@ fn listen(mut sender: Sender<Message>, minutes: u32) {
         }
         if state.dirty {
             state.dirty = false;
-            if sender.try_send(Message::Idle(state.idled)).is_err() {
+            let message = match kind {
+                Kind::Screensaver => Message::Idle(state.idled),
+                Kind::WindowMenu => Message::WindowMenuIdle(state.idled),
+            };
+            if sender.try_send(message).is_err() {
                 return;
             }
         }
