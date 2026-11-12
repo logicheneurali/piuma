@@ -55,6 +55,7 @@ mod palette;
 mod pam_ffi;
 mod playback;
 mod power_menu;
+mod process;
 mod popup_anim;
 mod popup_calendar;
 mod popup_graph;
@@ -131,6 +132,14 @@ const SENSOR_SPACING: f32 = 8.0;
 /// popup): an enter only takes effect once the pointer has rested
 /// this long, so an involuntary sweep across the bar triggers nothing.
 const SENSOR_HOVER_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+/// A sensor pass that has not answered after this long is considered
+/// stuck (the built-in commands have no timeout).
+const PASS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+/// Retry delay after a stuck pass or a stuck auto-hide check.
+const STUCK_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+/// The auto-hide check is a single `hyprctl activewindow`: if it hangs,
+/// the bar stays visible rather than stuck out of the output.
+const AUTO_HIDE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
 pub(crate) const DEFAULT_BG_COLOR: Color = Color::from_rgba(0.06, 0.06, 0.08, 0.85);
 pub(crate) const DEFAULT_TEXT_COLOR: Color = Color::from_rgb(0.88, 0.88, 0.94);
 
@@ -362,6 +371,18 @@ pub(crate) struct Panel {
     /// True while the tick's data pass runs on a worker thread: one
     /// read at a time, so replies can never arrive out of order.
     pub(crate) read_pending: bool,
+    /// When the running pass started and the token it answers with: a
+    /// pass abandoned by the watchdog is dropped by token.
+    pub(crate) read_started: Option<Instant>,
+    pub(crate) read_pass: u64,
+    /// No new pass before this instant (after a stuck one).
+    pub(crate) read_backoff: Option<Instant>,
+    /// Last async answer of "the focused window is fullscreen" and the
+    /// check's own state: auto-hide must not trust a stalled snapshot.
+    pub(crate) auto_hide_fullscreen: Option<bool>,
+    pub(crate) auto_hide_pending: bool,
+    pub(crate) auto_hide_started: Option<Instant>,
+    pub(crate) auto_hide_retry: Option<Instant>,
     /// Bumped on every config reload: a reply built against an older
     /// config no longer lines up with the sensor list and is dropped.
     pub(crate) cfg_gen: u64,
@@ -688,7 +709,7 @@ pub(crate) enum Message {
     /// The tick's data pass finished on a worker thread: the config
     /// generation it read against (a reply from an older config is
     /// dropped, see `spawn_read`) and every sensor's reading.
-    SensorsReady(u64, sensor_runner::Reads),
+    SensorsReady(u64, u64, sensor_runner::Reads),
     /// The wallpaper palette finished extracting: the tones (or `None`
     /// on a failed decode) and the file key they came from.
     PaletteReady(Option<palette::Palette>, (String, SystemTime)),
@@ -741,6 +762,9 @@ pub(crate) enum Message {
     /// The cover decode finished: the art URL and its handle (`None` on
     /// an unreadable file).
     DashboardCover(String, Option<iced::widget::image::Handle>),
+    /// Answer of the async auto-hide check (`None` = compositor
+    /// unreachable).
+    AutoHideFullscreen(Option<bool>),
     /// The dot handle of a collapsible section: collapse or expand it.
     SectionToggled(usize),
     /// A sensor was clicked: (section_index, sensor_index, action).
@@ -1252,6 +1276,9 @@ fn maybe_reload(panel: &mut Panel) -> Option<(config::Config, String)> {
 /// dropped instead of misaligned.
 fn spawn_read(panel: &mut Panel) -> Command<Message> {
     panel.read_pending = true;
+    panel.read_started = Some(Instant::now());
+    panel.read_pass += 1;
+    let pass = panel.read_pass;
     let cfg_gen = panel.cfg_gen;
     let sources: Vec<config::SensorSource> = panel
         .config
@@ -1273,7 +1300,7 @@ fn spawn_read(panel: &mut Panel) -> Command<Message> {
     let want_dashboard = panel.dashboard.is_some();
     Command::perform(
         smol::unblock(move || sensor_runner::read_all(&sources, dynamic_gaps, want_dashboard)),
-        move |reads| Message::SensorsReady(cfg_gen, reads),
+        move |reads| Message::SensorsReady(cfg_gen, pass, reads),
     )
 }
 
@@ -1581,6 +1608,37 @@ fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<Command<Mess
     cmds
 }
 
+/// Slide every bar in or out for the auto-hide tweak. The answer comes
+/// from the async check (or its last value), never from the sensor pass.
+fn apply_auto_hide(
+    panel: &mut Panel,
+    bar_id: iced::window::Id,
+    hide: bool,
+    cmds: &mut Vec<Command<Message>>,
+) {
+    if hide == panel.bars_hidden {
+        return;
+    }
+    panel.bars_hidden = hide;
+    let thickness = panel_thickness(&panel.config) as i32;
+    let mut bars: Vec<(iced::window::Id, Option<String>)> =
+        vec![(bar_id, panel.first_anchor.clone())];
+    bars.extend(panel.bar_windows.iter().cloned());
+    for (id, anchor) in bars {
+        let edge = panel_anchor_for(&panel.config, anchor.as_deref());
+        let margin = if hide {
+            hidden_margin(edge, thickness)
+        } else {
+            Margin::default()
+        };
+        cmds.push(Command::done(Message::MarginChange { id, margin }));
+        cmds.push(Command::done(Message::ExclusiveZoneChange {
+            id,
+            zone_size: if hide { 0 } else { thickness },
+        }));
+    }
+}
+
 /// Top-level update: every panel window shares one `Panel` state (one set
 /// of readings, tray items and notifications), so the messages need no
 /// panel index; the layouts only change rendering and window placement.
@@ -1602,6 +1660,7 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             Command::none()
         }
         Message::Tick => {
+            let now = Instant::now();
             // Hot reload: pick up config file changes (content and, when
             // layout/align differ from what is applied, surface geometry).
             let mut geometry_changed = false;
@@ -1695,29 +1754,36 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
                         zone_size: panel.last_exclusive_zone,
                     }));
                 }
-                // Auto-hide: slide every bar out of the output while the
-                // focused window is fullscreen, and give its strip back.
-                let hide = panel.config.auto_hide()
-                    && hypr::focused_is_fullscreen(panel.hypr.as_ref());
-                if hide != panel.bars_hidden {
-                    panel.bars_hidden = hide;
-                    let thickness = panel_thickness(&panel.config) as i32;
-                    let mut bars: Vec<(iced::window::Id, Option<String>)> =
-                        vec![(bar_id, panel.first_anchor.clone())];
-                    bars.extend(panel.bar_windows.iter().cloned());
-                    for (id, anchor) in bars {
-                        let edge = panel_anchor_for(&panel.config, anchor.as_deref());
-                        let margin = if hide {
-                            hidden_margin(edge, thickness)
-                        } else {
-                            Margin::default()
-                        };
-                        cmds.push(Command::done(Message::MarginChange { id, margin }));
-                        cmds.push(Command::done(Message::ExclusiveZoneChange {
-                            id,
-                            zone_size: if hide { 0 } else { thickness },
-                        }));
+                // Auto-hide: one async `hyprctl activewindow` per second,
+                // independent of the sensor pass. A stalled pass must not
+                // freeze the bar out of the output.
+                if panel.config.auto_hide() {
+                    if panel.auto_hide_pending
+                        && panel
+                            .auto_hide_started
+                            .is_some_and(|start| now.duration_since(start) >= AUTO_HIDE_DEADLINE)
+                    {
+                        eprintln!(
+                            "[piuma] auto-hide check stuck — keeping the bar visible"
+                        );
+                        panel.auto_hide_pending = false;
+                        panel.auto_hide_started = None;
+                        panel.auto_hide_fullscreen = Some(false);
+                        panel.auto_hide_retry = Some(now + STUCK_RETRY);
                     }
+                    let ready = panel.auto_hide_retry.is_none_or(|at| now >= at);
+                    if !panel.auto_hide_pending && ready {
+                        panel.auto_hide_pending = true;
+                        panel.auto_hide_started = Some(now);
+                        cmds.push(Command::perform(
+                            smol::unblock(hypr::active_is_fullscreen),
+                            Message::AutoHideFullscreen,
+                        ));
+                    }
+                    let hide = panel.auto_hide_fullscreen.unwrap_or(false);
+                    apply_auto_hide(panel, bar_id, hide, &mut cmds);
+                } else if panel.bars_hidden {
+                    apply_auto_hide(panel, bar_id, false, &mut cmds);
                 }
                 // Glass: the surfaces were created with the right blur at
                 // startup; a reload that flips the tweak updates them.
@@ -1778,24 +1844,66 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             // off-thread only when the wallpaper file changes, dropped
             // when the option turns off.
             cmds.push(sync_palette(panel));
+            // A pass that has not answered by now is stuck in a built-in
+            // command: abandon it (its late reply is dropped by token) and
+            // retry after a pause.
+            if panel.read_pending
+                && panel
+                    .read_started
+                    .is_some_and(|start| now.duration_since(start) >= PASS_DEADLINE)
+            {
+                let waited = panel
+                    .read_started
+                    .map(|start| start.elapsed().as_secs())
+                    .unwrap_or_default();
+                eprintln!(
+                    "[piuma] sensor pass stuck for {waited}s — retrying in {}s",
+                    STUCK_RETRY.as_secs()
+                );
+                panel.read_pending = false;
+                panel.read_started = None;
+                panel.read_pass += 1;
+                panel.read_backoff = Some(now + STUCK_RETRY);
+            }
             // The data pass (compositor snapshot + every reading) runs
             // on a worker; its reply rebuilds the sections. A pass
             // already in flight covers this second — one at a time
             // keeps replies ordered.
-            if !panel.read_pending && !panel.screensaver_on {
+            let retry_ready = panel.read_backoff.is_none_or(|at| now >= at);
+            if !panel.read_pending && !panel.screensaver_on && retry_ready {
                 cmds.push(spawn_read(panel));
             }
             Command::batch(cmds)
         }
-        Message::SensorsReady(cfg_gen, data) => {
+        Message::SensorsReady(cfg_gen, pass, data) => {
+            if pass != panel.read_pass {
+                // A pass abandoned by the watchdog answered late: its
+                // readings are stale and a newer pass owns the state.
+                return Command::none();
+            }
             panel.read_pending = false;
+            panel.read_started = None;
             if cfg_gen != panel.cfg_gen {
                 // The config moved while this read ran: its readings
                 // no longer line up with the sensor list. Drop them
                 // and read again at once.
                 return spawn_read(panel);
             }
+            panel.read_backoff = None;
             Command::batch(apply_read(panel, data))
+        }
+        Message::AutoHideFullscreen(fullscreen) => {
+            panel.auto_hide_pending = false;
+            panel.auto_hide_started = None;
+            panel.auto_hide_retry = None;
+            panel.auto_hide_fullscreen = fullscreen;
+            let Some(bar_id) = BAR_ID.get().copied() else {
+                return Command::none();
+            };
+            let hide = panel.config.auto_hide() && fullscreen.unwrap_or(false);
+            let mut cmds = Vec::new();
+            apply_auto_hide(panel, bar_id, hide, &mut cmds);
+            Command::batch(cmds)
         }
         Message::PaletteReady(pal, key) => {
             // The next view applies the tones — or resolves the user's
@@ -2257,7 +2365,7 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
                     std::thread::spawn(move || {
                         let _ = std::process::Command::new("sh")
                             .args(["-c", &cmd])
-                            .spawn();
+                            .status();
                     });
                 }
                 None => {
@@ -3798,9 +3906,7 @@ fn open_setup() {
         return;
     };
     let path = setup_binary_path(&exe);
-    if let Err(e) = std::process::Command::new(&path).spawn() {
-        eprintln!("[piuma] cannot start {}: {e}", path.display());
-    }
+    crate::process::reaping(std::process::Command::new(&path));
 }
 
 // ── positioning helpers ─────────────────────────────────────────────
@@ -4361,6 +4467,13 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         sections: Vec::new(),
                         styles,
                         read_pending: false,
+                        read_started: None,
+                        read_pass: 0,
+                        read_backoff: None,
+                        auto_hide_fullscreen: None,
+                        auto_hide_pending: false,
+                        auto_hide_started: None,
+                        auto_hide_retry: None,
                         cfg_gen: 0,
                         popup_resync: false,
                         hovered: None,

@@ -66,7 +66,9 @@ pub fn focus(name: &str) {
     let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
     let dispatch = format!("hl.dsp.focus({{ workspace = \"{escaped}\" }})");
     std::thread::spawn(move || {
-        let _ = std::process::Command::new("hyprctl").args(["dispatch", &dispatch]).spawn();
+        let mut command = std::process::Command::new("hyprctl");
+        command.args(["dispatch", &dispatch]);
+        crate::process::reaping(command);
     });
 }
 

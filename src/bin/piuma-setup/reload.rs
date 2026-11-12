@@ -64,7 +64,7 @@ pub(crate) fn reload(config: PathBuf) -> Result<(), String> {
         return Err("piuma did not stop — reload it manually".to_string());
     }
     // `setsid -f` detaches the bar from the setup's session/terminal.
-    Command::new("setsid")
+    let mut child = Command::new("setsid")
         .arg("-f")
         .arg(&bar)
         .arg("--config")
@@ -74,5 +74,8 @@ pub(crate) fn reload(config: PathBuf) -> Result<(), String> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| format!("cannot start piuma: {e}"))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
     Ok(())
 }

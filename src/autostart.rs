@@ -411,7 +411,12 @@ fn launch(entry: &Entry, program: &str) {
         cmd.current_dir(dir);
     }
     match cmd.spawn() {
-        Ok(_) => eprintln!("[piuma] autostart: started {program}"),
+        Ok(mut child) => {
+            eprintln!("[piuma] autostart: started {program}");
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
         Err(err) => eprintln!("[piuma] autostart: failed to start {program}: {err}"),
     }
 }

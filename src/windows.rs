@@ -350,15 +350,15 @@ fn run_batch(calls: &[String]) {
         .map(|call| format!("dispatch {call}"))
         .collect::<Vec<_>>()
         .join(";");
-    let _ = std::process::Command::new("hyprctl")
-        .args(["--batch", &batch])
-        .spawn();
+    let mut command = std::process::Command::new("hyprctl");
+    command.args(["--batch", &batch]);
+    crate::process::reaping(command);
 }
 
 fn run(call: String) {
-    let _ = std::process::Command::new("hyprctl")
-        .args(["dispatch", &call])
-        .spawn();
+    let mut command = std::process::Command::new("hyprctl");
+    command.args(["dispatch", &call]);
+    crate::process::reaping(command);
 }
 
 /// Like the clicks' fire-and-forget dispatch, but waits for the
