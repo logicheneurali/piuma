@@ -3,6 +3,8 @@ name: Release
 # A tag `v<version>` builds the binaries, packages the release tarball with
 # its license material and opens a draft GitHub release. Running the
 # workflow by hand is a dry run: it builds and uploads the artifact only.
+# The AUR job is separate: a failure there never prevents the GitHub
+# release from being created.
 on:
   push:
     tags: ["v*"]
@@ -83,16 +85,67 @@ jobs:
             exit 1
           }
 
+      - name: Upload the release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: piuma-release
+          path: |
+            piuma-*.tar.gz
+            piuma-*.tar.gz.sha256
+
+      - name: Create the draft release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: |
+            piuma-*.tar.gz
+            piuma-*.tar.gz.sha256
+
+  # Pushes the generated PKGBUILD to the AUR. Inert until the three
+  # secrets exist (Settings → Secrets): AUR_USERNAME, AUR_EMAIL and
+  # AUR_SSH_PRIVATE_KEY, with the key registered on the AUR account and
+  # write access to the `piuma` package. Secrets cannot be read from a
+  # job-level `if`, so a first step decides whether to publish.
+  #
+  # The PKGBUILD is generated here, not in the release job: the GitHub
+  # release is already done by the time this job starts, so a failure in
+  # any AUR step (checksum, packaging, upload) leaves it untouched.
+  aur:
+    needs: release
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check the AUR credentials
+        id: creds
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          AUR_USERNAME: ${{ secrets.AUR_USERNAME }}
+          AUR_EMAIL: ${{ secrets.AUR_EMAIL }}
+        run: |
+          if [ -n "$AUR_SSH_PRIVATE_KEY" ] && [ -n "$AUR_USERNAME" ] && [ -n "$AUR_EMAIL" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "AUR secrets missing: skipping the AUR publish"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.creds.outputs.ready == 'true'
+        with:
+          fetch-depth: 0
+
       # Source PKGBUILD for the AUR: the tag archive, built with the
       # distribution's toolchain (no prebuilt binary ABI concerns).
-      - name: AUR packaging files
-        if: github.ref_type == 'tag'
+      - name: Build the AUR packaging files
+        if: steps.creds.outputs.ready == 'true'
         run: |
           set -eu
+          version=$(cat VERSION)
           maintainer=$(git log -1 --format='%an <%ae>')
           archive="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
           sum=$(curl -fsSL --retry 3 "$archive" | sha256sum | cut -d' ' -f1)
-          mkdir -p aur
           {
             printf '%s\n' "# Maintainer: ${maintainer}"
             printf '%s\n' "pkgname=piuma"
@@ -120,79 +173,23 @@ jobs:
             printf '\t%s\n' 'install -Dm644 THIRD_PARTY_LICENSES.md "$pkgdir/usr/share/licenses/$pkgname/THIRD_PARTY_LICENSES.md"'
             printf '\t%s\n' 'cp -R LICENSES "$pkgdir/usr/share/licenses/$pkgname/LICENSES"'
             printf '%s\n' "}"
-          } > aur/PKGBUILD
-          printf 'pkgbase = piuma\n' > aur/SRCINFO
-          printf '\tpkgdesc = Status bar and setup application for the Hyprland compositor\n' >> aur/SRCINFO
-          printf '\tpkgver = %s\n' "$version" >> aur/SRCINFO
-          printf '\tpkgrel = 1\n' >> aur/SRCINFO
-          printf '\turl = https://github.com/%s\n' "$GITHUB_REPOSITORY" >> aur/SRCINFO
-          printf '\tarch = x86_64\n' >> aur/SRCINFO
-          printf '\tlicense = Apache-2.0\n' >> aur/SRCINFO
-          printf '\tdepends = pam\n' >> aur/SRCINFO
-          printf '\tdepends = libxkbcommon\n' >> aur/SRCINFO
-          printf '\tmakedepends = cargo\n' >> aur/SRCINFO
-          printf '\tmakedepends = pkgconf\n' >> aur/SRCINFO
-          printf '\toptdepends = hyprland: the supported compositor\n' >> aur/SRCINFO
-          printf '\tsource = %s\n' "$archive" >> aur/SRCINFO
-          printf '\tsha256sums = %s\n\n' "$sum" >> aur/SRCINFO
-          printf 'pkgname = piuma\n' >> aur/SRCINFO
+          } > PKGBUILD
+          printf 'pkgbase = piuma\n' > .SRCINFO
+          printf '\tpkgdesc = Status bar and setup application for the Hyprland compositor\n' >> .SRCINFO
+          printf '\tpkgver = %s\n' "$version" >> .SRCINFO
+          printf '\tpkgrel = 1\n' >> .SRCINFO
+          printf '\turl = https://github.com/%s\n' "$GITHUB_REPOSITORY" >> .SRCINFO
+          printf '\tarch = x86_64\n' >> .SRCINFO
+          printf '\tlicense = Apache-2.0\n' >> .SRCINFO
+          printf '\tdepends = pam\n' >> .SRCINFO
+          printf '\tdepends = libxkbcommon\n' >> .SRCINFO
+          printf '\tmakedepends = cargo\n' >> .SRCINFO
+          printf '\tmakedepends = pkgconf\n' >> .SRCINFO
+          printf '\toptdepends = hyprland: the supported compositor\n' >> .SRCINFO
+          printf '\tsource = %s\n' "$archive" >> .SRCINFO
+          printf '\tsha256sums = %s\n\n' "$sum" >> .SRCINFO
+          printf 'pkgname = piuma\n' >> .SRCINFO
 
-      - name: Upload the release artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: piuma-release
-          path: |
-            piuma-*.tar.gz
-            piuma-*.tar.gz.sha256
-      - name: Upload the AUR files
-        if: github.ref_type == 'tag'
-        uses: actions/upload-artifact@v4
-        with:
-          name: piuma-aur
-          path: aur/
-
-      - name: Create the draft release
-        if: github.ref_type == 'tag'
-        uses: softprops/action-gh-release@v2
-        with:
-          draft: true
-          generate_release_notes: true
-          files: |
-            piuma-*.tar.gz
-            piuma-*.tar.gz.sha256
-            aur/PKGBUILD
-            aur/SRCINFO
-
-  # Pushes the generated PKGBUILD to the AUR. Inert until the three
-  # secrets exist (Settings → Secrets): AUR_USERNAME, AUR_EMAIL and
-  # AUR_SSH_PRIVATE_KEY, with the key registered on the AUR account and
-  # write access to the `piuma` package. Secrets cannot be read from a
-  # job-level `if`, so a first step decides whether to publish.
-  aur:
-    needs: release
-    if: github.ref_type == 'tag'
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Check the AUR credentials
-        id: creds
-        env:
-          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
-          AUR_USERNAME: ${{ secrets.AUR_USERNAME }}
-          AUR_EMAIL: ${{ secrets.AUR_EMAIL }}
-        run: |
-          if [ -n "$AUR_SSH_PRIVATE_KEY" ] && [ -n "$AUR_USERNAME" ] && [ -n "$AUR_EMAIL" ]; then
-            echo "ready=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-            echo "AUR secrets missing: skipping the AUR publish"
-          fi
-      - uses: actions/download-artifact@v4
-        if: steps.creds.outputs.ready == 'true'
-        with:
-          name: piuma-aur
-      - name: Name the AUR metadata as the AUR expects it
-        if: steps.creds.outputs.ready == 'true'
-        run: mv SRCINFO .SRCINFO
       - name: Publish to the AUR
         if: steps.creds.outputs.ready == 'true'
         uses: KSXGitHub/github-actions-deploy-aur@v4.2.0
