@@ -27,7 +27,7 @@
 //! (same pattern as the tray).
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
@@ -136,6 +136,39 @@ static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 /// n-th newest received entry (closed ones included). Every arrival
 /// resets it to 0, so the sensor follows what is new by default.
 static SELECTED: AtomicU32 = AtomicU32::new(0);
+/// Do not disturb: deliveries keep landing in the history and moving
+/// the sensor, but no popup card opens while it is on. Runtime-only
+/// (the bar starts quiet); the list popup's header toggles it.
+static DND: AtomicBool = AtomicBool::new(false);
+
+/// Whether new notifications are kept out of the popup cards.
+pub fn dnd() -> bool {
+    DND.load(Ordering::Relaxed)
+}
+
+pub fn set_dnd(on: bool) {
+    DND.store(on, Ordering::Relaxed);
+}
+
+/// Empty the history (a user "Clear" in the list): active entries are
+/// reported so the caller can emit their `NotificationClosed`, the
+/// pictures go with them.
+pub fn clear_history() -> Vec<u32> {
+    let Ok(mut hist) = HISTORY.write() else {
+        return Vec::new();
+    };
+    let ids = hist
+        .iter()
+        .filter(|n| n.closed.is_none())
+        .map(|n| n.id)
+        .collect();
+    hist.clear();
+    SELECTED.store(0, Ordering::Relaxed);
+    if let Ok(mut icons) = ICONS.write() {
+        icons.clear();
+    }
+    ids
+}
 
 /// Copy the `panel.notifications` block into the live settings; called
 /// from the subscription gate every time the block is present (cheap and

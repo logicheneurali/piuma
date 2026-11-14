@@ -4,6 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use crate::autostart;
 use crate::config;
@@ -98,8 +99,6 @@ pub enum Message {
     GlassEnabled(bool),
     /// 5..=100, stored as 0.05..=1.0.
     GlassOpacityChanged(i32),
-    /// Auto-hide while a fullscreen window has focus.
-    AutoHideEnabled(bool),
     /// Sidebar category switch (roadmap N4).
     TabSelected(Tab),
     ThicknessChanged(u32),
@@ -176,6 +175,10 @@ pub enum Message {
     RemoveSensorPressed(usize, usize),
     /// Clones a sensor right after itself (same section).
     SensorDuplicated(usize, usize),
+    /// Clones a whole section (and its sensors) right after itself.
+    SectionDuplicated(usize),
+    /// Sections-tab filter text.
+    SectionFilterChanged(String),
     /// Moves a sensor to the end of another section (or of its own).
     SensorMoveTo(usize, usize, usize),
     /// Moves a sensor one position up/down inside its section.
@@ -247,13 +250,33 @@ pub enum Message {
     ModalTextChanged(String),
     /// Sensor type picked in the "new sensor" modal.
     ModalTypeChanged(String),
+    /// Query typed in the "new sensor" modal's type filter.
+    SensorQueryChanged(String),
     /// Confirms the primary action of the active modal.
     ModalConfirm,
     /// Closes the active modal discarding its action.
     ModalCancel,
+    /// Enter pressed: confirms the active modal only when that is safe.
+    ModalEnter,
+    /// The window manager asked to close the editor.
+    WindowCloseRequested(iced::window::Id),
+    /// "Discard" on the unsaved-changes close dialog: close anyway.
+    CloseDiscard,
+    /// Revert the last edit (Ctrl+Z).
+    Undo,
+    /// Reapply the undone edit (Ctrl+Shift+Z / Ctrl+Y).
+    Redo,
+    /// Footer summary: jump to the first invalid field.
+    JumpToFirstError,
     ResetConfig,
     Status(String),
 }
+
+/// How many config snapshots the undo history keeps.
+const UNDO_DEPTH: usize = 50;
+/// Edits closer than this coalesce into one undo step: a burst of
+/// keystrokes in one field is a single change to a human.
+const UNDO_BURST: Duration = Duration::from_millis(700);
 
 
 /// Default config file: the one the running piuma reads.
@@ -419,6 +442,21 @@ pub struct PiumaSetup {
     /// The active theme's slug from `theme.json`, `None` = custom. Kept
     /// out of `piuma.json`: the Themes tab only writes that file.
     pub(crate) active_theme: Option<&'static str>,
+    /// Window the window manager asked to close, while the unsaved-
+    /// changes dialog is up.
+    pub(crate) pending_close: Option<iced::window::Id>,
+    /// Sections-tab filter: empty = every card, otherwise sections and
+    /// sensors matching by name/description/source.
+    pub(crate) section_filter: String,
+    /// A load replaced the whole document: the wrapper must not record
+    /// the previous file's state as an undo step.
+    pub(crate) document_loaded: bool,
+    /// Serialized configs before each edit, and after each undo.
+    pub(crate) undo: Vec<String>,
+    pub(crate) redo: Vec<String>,
+    /// Last recorded edit: a burst of keystrokes inside `UNDO_BURST`
+    /// shares the snapshot taken before the burst.
+    pub(crate) undo_at: Option<Instant>,
 }
 
 impl PiumaSetup {
@@ -446,6 +484,12 @@ impl PiumaSetup {
             autostart_apps: Vec::new(),
             layouts: Vec::new(),
             active_theme: themes::active(),
+            pending_close: None,
+            section_filter: String::new(),
+            document_loaded: false,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            undo_at: None,
         };
         match fs::read_to_string(file_path(&state.current_file)) {
             Ok(content) => match state.load_from_json(&content) {
@@ -501,6 +545,99 @@ impl PiumaSetup {
     pub(crate) fn set_status(&mut self, msg: String, is_error: bool) {
         self.status_message = Some(msg);
         self.status_is_error = is_error;
+    }
+
+    /// Whether the model, serialized now, differs from the last
+    /// load/save: the same check the Save button and the footer use.
+    pub(crate) fn is_dirty(&self) -> bool {
+        self.serialize()
+            .map(|current| current != self.snapshot)
+            .unwrap_or(true)
+    }
+
+    /// Record the pre-edit snapshot `before` (the wrapper takes it on
+    /// every mutating message): pushes one step per burst, drops the redo
+    /// branch on a new edit and caps the history.
+    pub(crate) fn record_undo(&mut self, before: String) {
+        let Ok(after) = self.serialize() else { return };
+        if before == after {
+            return;
+        }
+        let now = Instant::now();
+        if self.undo_at.is_some_and(|at| now.duration_since(at) < UNDO_BURST) {
+            self.undo_at = Some(now);
+            self.redo.clear();
+            return;
+        }
+        self.undo.push(before);
+        if self.undo.len() > UNDO_DEPTH {
+            self.undo.remove(0);
+        }
+        self.undo_at = Some(now);
+        self.redo.clear();
+    }
+
+    /// Revert the last edit; returns whether something changed.
+    pub(crate) fn undo(&mut self) -> bool {
+        let Some(previous) = self.undo.pop() else {
+            return false;
+        };
+        if let Ok(current) = self.serialize() {
+            self.redo.push(current);
+            if self.redo.len() > UNDO_DEPTH {
+                self.redo.remove(0);
+            }
+        }
+        if let Err(err) = self.load_from_json(&previous) {
+            self.set_status(format!("Undo failed: {err}"), true);
+            return false;
+        }
+        self.undo_at = None;
+        true
+    }
+
+    /// Reapply the edit the last undo reverted.
+    pub(crate) fn redo(&mut self) -> bool {
+        let Some(next) = self.redo.pop() else {
+            return false;
+        };
+        if let Ok(current) = self.serialize() {
+            self.undo.push(current);
+            if self.undo.len() > UNDO_DEPTH {
+                self.undo.remove(0);
+            }
+        }
+        if let Err(err) = self.load_from_json(&next) {
+            self.set_status(format!("Redo failed: {err}"), true);
+            return false;
+        }
+        self.undo_at = None;
+        true
+    }
+
+    /// Back to the shipped default config (the Reset button).
+    pub(crate) fn reset_defaults(&mut self) {
+        self.config = PiumaConfig::default();
+        let _ = self.load_from_json(SHIPPED_DEFAULT);
+        self.set_status("Configuration reset to defaults".to_string(), false);
+    }
+
+    /// Clone one section (and its sensors) right after itself.
+    pub(crate) fn duplicate_section(&mut self, index: usize) -> Option<usize> {
+        let mut copy = self.config.sections.get(index)?.clone();
+        // A " (copy)" name makes the clone recognizable in the list.
+        copy.name = copy.name.map(|name| format!("{name} (copy)"));
+        let new_index = index + 1;
+        // Everything after the insertion point moves one slot down.
+        self.remap_sensor_keys(|s, i| Some((if s >= new_index { s + 1 } else { s }, i)));
+        self.sections_collapsed = self
+            .sections_collapsed
+            .drain()
+            .map(|s| if s >= new_index { s + 1 } else { s })
+            .collect();
+        self.config.sections.insert(new_index, copy);
+        self.sections_collapsed.remove(&new_index);
+        Some(new_index)
     }
 
     /// Recomputes the invalid-value list from the config as edited right
@@ -754,6 +891,13 @@ impl PiumaSetup {
         let outcome = self.load_config(name);
         match &outcome {
             Ok(()) => {
+                // A different document: the previous file's edits are
+                // not an undo away (the wrapper sees the flag and skips
+                // the pre-load snapshot).
+                self.document_loaded = true;
+                self.undo.clear();
+                self.redo.clear();
+                self.undo_at = None;
                 self.set_status(format!("Loaded {}", name), false);
                 // Loaded values piuma would ignore: named here, red in the
                 // editor, blocking the save until fixed (see new()).

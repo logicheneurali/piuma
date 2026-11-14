@@ -71,7 +71,6 @@ pub struct TweaksCfg {
     pub borders: Option<BordersCfg>,
     pub screensaver: Option<ScreensaverCfg>,
     pub glass: Option<GlassCfg>,
-    pub auto_hide: Option<AutoHideCfg>,
 }
 
 /// `panel.tweaks.glass`: compositor blur behind piuma's surfaces and the
@@ -101,35 +100,9 @@ pub(crate) fn glass_mut(config: &mut PiumaConfig) -> &mut GlassCfg {
             borders: None,
             screensaver: None,
             glass: None,
-            auto_hide: None,
         })
         .glass
         .get_or_insert_with(GlassCfg::default)
-}
-
-/// `panel.tweaks.auto_hide`: the bar slides out while a fullscreen
-/// window has focus.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[derive(Default)]
-pub struct AutoHideCfg {
-    pub enabled: bool,
-}
-
-
-pub(crate) fn auto_hide_mut(config: &mut PiumaConfig) -> &mut AutoHideCfg {
-    config
-        .tweaks
-        .get_or_insert(TweaksCfg {
-            dynamic_gaps: None,
-            window_menu: None,
-            shadows: None,
-            borders: None,
-            screensaver: None,
-            glass: None,
-            auto_hide: None,
-        })
-        .auto_hide
-        .get_or_insert_with(AutoHideCfg::default)
 }
 
 /// `panel.tweaks.screensaver`: the idle overlay. Defaults mirror the
@@ -160,7 +133,6 @@ pub(crate) fn screensaver_mut(config: &mut PiumaConfig) -> &mut ScreensaverCfg {
             borders: None,
             screensaver: None,
             glass: None,
-            auto_hide: None,
         })
         .screensaver
         .get_or_insert_with(ScreensaverCfg::default)
@@ -203,7 +175,6 @@ pub(crate) fn borders_mut(config: &mut PiumaConfig) -> &mut BordersCfg {
             borders: None,
             screensaver: None,
             glass: None,
-            auto_hide: None,
         })
         .borders
         .get_or_insert_with(BordersCfg::default)
@@ -255,7 +226,6 @@ pub(crate) fn shadows_mut(config: &mut PiumaConfig) -> &mut ShadowsCfg {
             borders: None,
             screensaver: None,
             glass: None,
-            auto_hide: None,
         })
         .shadows
         .get_or_insert_with(ShadowsCfg::default)
@@ -328,7 +298,6 @@ pub(crate) fn dynamic_gaps_mut(config: &mut PiumaConfig) -> &mut DynamicGapsCfg 
             borders: None,
             screensaver: None,
             glass: None,
-            auto_hide: None,
         })
         .dynamic_gaps
         .get_or_insert_with(DynamicGapsCfg::default)
@@ -346,7 +315,6 @@ pub(crate) fn window_menu_mut(config: &mut PiumaConfig) -> &mut WindowMenuCfg {
             borders: None,
             screensaver: None,
             glass: None,
-            auto_hide: None,
         })
         .window_menu
         .get_or_insert_with(WindowMenuCfg::default)
@@ -778,11 +746,6 @@ impl PiumaSetup {
                 gc.insert("enabled".to_string(), JsonValue::Bool(g.enabled));
                 gc.insert("opacity".to_string(), JsonValue::from(g.opacity as f64));
                 tw.insert("glass".to_string(), JsonValue::Object(gc));
-            }
-            if let Some(ah) = &t.auto_hide {
-                let mut ac = Map::new();
-                ac.insert("enabled".to_string(), JsonValue::Bool(ah.enabled));
-                tw.insert("auto_hide".to_string(), JsonValue::Object(ac));
             }
             if let Some(sv) = &t.screensaver {
                 let mut sc = Map::new();
@@ -1324,11 +1287,6 @@ impl PiumaSetup {
                                 .and_then(JsonValue::as_f64)
                                 .unwrap_or(d.opacity as f64) as f32,
                         }
-                    })
-                }),
-                auto_hide: o.get("auto_hide").and_then(|v| {
-                    v.as_object().map(|v| AutoHideCfg {
-                        enabled: v.get("enabled").and_then(JsonValue::as_bool).unwrap_or(false),
                     })
                 }),
                 screensaver: o.get("screensaver").and_then(|v| {

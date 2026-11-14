@@ -2,8 +2,15 @@
 //! and the two fonts the bar draws with.
 
 use crate::config;
-use crate::{DEFAULT_FONT, FONT_NAMES};
+use crate::DEFAULT_FONT;
 use iced::font::Font;
+
+/// Configured family names kept alive for [`Font::Name`]'s `'static`
+/// bound: a name is leaked the first time it is used and the same
+/// pointer is reused after, so reloads — even alternating between two
+/// fonts — never leak a fresh copy per change.
+pub(crate) static FONT_NAMES: std::sync::Mutex<Vec<(&'static str, String)>> =
+    std::sync::Mutex::new(Vec::new());
 
 /// The `'static` family name of `name` (roadmap M2): one leak per
 /// distinct family, so `Font::with_name` can take it repeatedly.

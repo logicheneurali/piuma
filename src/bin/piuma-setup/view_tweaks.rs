@@ -8,7 +8,7 @@ use iced::{Alignment, Element, Length};
 
 use crate::controls::{color_control, form_grid, invalid_under, slider_control};
 use crate::model::{
-    window_menu_label, AutoHideCfg, BordersCfg, GlassCfg, ScreensaverCfg, ShadowsCfg,
+    window_menu_label, BordersCfg, GlassCfg, ScreensaverCfg, ShadowsCfg,
     BORDER_ACTIVE, BORDER_INACTIVE, SHADOW_COLOR, SHADOW_COLOR_INACTIVE, WINDOW_MENU_POSITIONS,
 };
 use crate::state::{Message, PiumaSetup};
@@ -70,7 +70,6 @@ pub(crate) fn tweaks_settings(state: &PiumaSetup) -> Element<'_, Message> {
         screensaver_card(state, pal),
         glass_card(state, pal),
         screen_corners_card(state, pal),
-        auto_hide_card(state, pal),
     ]
     .spacing(12)
     .width(Length::Fill)
@@ -266,7 +265,7 @@ fn shadows_card(state: &PiumaSetup, pal: Palette) -> Element<'_, Message> {
                     ),
                     (
                         "Color",
-                        color_control(
+                        color_control(pal,
                             color,
                             err("panel.tweaks.shadows.color"),
                             Message::ShadowColorChanged,
@@ -274,7 +273,7 @@ fn shadows_card(state: &PiumaSetup, pal: Palette) -> Element<'_, Message> {
                     ),
                     (
                         "Inactive color",
-                        color_control(
+                        color_control(pal,
                             inactive,
                             err("panel.tweaks.shadows.color_inactive"),
                             Message::ShadowInactiveColorChanged,
@@ -372,7 +371,7 @@ fn borders_card(state: &PiumaSetup, pal: Palette) -> Element<'_, Message> {
                     ),
                     (
                         "Active color",
-                        color_control(
+                        color_control(pal,
                             active,
                             err("panel.tweaks.borders.active"),
                             Message::BorderActiveChanged,
@@ -380,7 +379,7 @@ fn borders_card(state: &PiumaSetup, pal: Palette) -> Element<'_, Message> {
                     ),
                     (
                         "Inactive color",
-                        color_control(
+                        color_control(pal,
                             inactive,
                             err("panel.tweaks.borders.inactive"),
                             Message::BorderInactiveChanged,
@@ -509,7 +508,7 @@ fn screen_corners_card(state: &PiumaSetup, pal: Palette) -> Element<'_, Message>
                 form_grid(vec![
                     (
                         "Corner Color",
-                        color_control(
+                        color_control(pal,
                             corners.map_or("", |c| c.color.as_str()),
                             state.field_err("panel.screen_corners.color"),
                             Message::CornersColorChanged,
@@ -537,33 +536,6 @@ fn screen_corners_card(state: &PiumaSetup, pal: Palette) -> Element<'_, Message>
             )
             .size(BODY)
             .style(muted_text(pal)),
-        ]
-        .spacing(10)
-        .width(Length::Fill),
-    )
-    .into()
-}
-
-/// `panel.tweaks.auto_hide`: the bar leaves the screen while a
-/// fullscreen window has focus.
-fn auto_hide_card(state: &PiumaSetup, pal: Palette) -> Element<'_, Message> {
-    let enabled = state
-        .config
-        .tweaks
-        .as_ref()
-        .and_then(|t| t.auto_hide.as_ref())
-        .is_some_and(|a| a.enabled);
-    let _ = AutoHideCfg::default();
-    card(
-        pal,
-        column![
-            text("Auto-hide").size(16).style(fg_text(pal)),
-            toggler(enabled)
-                .label("Hide the bar while a fullscreen window has focus")
-                .on_toggle(Message::AutoHideEnabled),
-            text("The reserved strip is given back to the window; the bar returns when fullscreen ends.")
-                .size(BODY)
-                .style(muted_text(pal)),
         ]
         .spacing(10)
         .width(Length::Fill),

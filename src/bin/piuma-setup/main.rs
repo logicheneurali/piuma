@@ -101,20 +101,54 @@ fn app() -> iced::Result {
         .default_font(gui_font())
         .window_size((920, 680))
         .resizable(true)
-        // Ctrl+S saves like the footer button; every other key is ignored.
+        // The window manager's close request is the editor's to answer:
+        // unsaved edits open a dialog instead of disappearing.
+        .exit_on_close_request(false)
+        // Keyboard: the shortcuts the footer advertises, plus Esc/Enter
+        // for the modals. Every other key is ignored.
         .subscription(|_state: &PiumaSetup| {
-            iced::keyboard::listen().filter_map(|event| match event {
-                iced::keyboard::Event::KeyPressed { key, modifiers, .. }
-                    if modifiers.command()
-                        && matches!(
-                            key.as_ref(),
-                            iced::keyboard::Key::Character("s" | "S")
-                        ) =>
-                {
-                    Some(Message::SaveConfig)
-                }
-                _ => None,
-            })
+            iced::Subscription::batch([
+                iced::keyboard::listen().filter_map(|event| match event {
+                    iced::keyboard::Event::KeyPressed { key, modifiers, .. } => match key.as_ref() {
+                        iced::keyboard::Key::Character("s" | "S") if modifiers.command() => {
+                            Some(if modifiers.shift() {
+                                Message::SaveAs
+                            } else {
+                                Message::SaveConfig
+                            })
+                        }
+                        iced::keyboard::Key::Character("o" | "O") if modifiers.command() => {
+                            Some(Message::LoadConfig)
+                        }
+                        iced::keyboard::Key::Character("r" | "R") if modifiers.command() => {
+                            Some(Message::ReloadPiuma)
+                        }
+                        iced::keyboard::Key::Character("z" | "Z") if modifiers.command() => {
+                            Some(if modifiers.shift() {
+                                Message::Redo
+                            } else {
+                                Message::Undo
+                            })
+                        }
+                        iced::keyboard::Key::Character("y" | "Y") if modifiers.command() => {
+                            Some(Message::Redo)
+                        }
+                        iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape)
+                            if modifiers.is_empty() =>
+                        {
+                            Some(Message::ModalCancel)
+                        }
+                        iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter)
+                            if modifiers.is_empty() =>
+                        {
+                            Some(Message::ModalEnter)
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                }),
+                iced::window::close_requests().map(Message::WindowCloseRequested),
+            ])
         })
         .run()
 }

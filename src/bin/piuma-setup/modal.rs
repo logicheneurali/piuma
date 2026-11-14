@@ -28,6 +28,14 @@ pub enum Modal {
     SaveAs { name: String, exists: bool },
     /// Extra confirmation: the save-as target file already exists.
     ConfirmSaveAs(String),
+    /// Closing the editor with unsaved edits: save, discard or cancel.
+    ConfirmClose,
+    /// Restarting the bar with unsaved edits: save first and restart.
+    ConfirmReload,
+    /// Loading another config over unsaved edits (the file to load).
+    ConfirmLoad(String),
+    /// Resetting to defaults over unsaved edits.
+    ConfirmReset,
     /// Load picker: selected file among the *.json of the config directory.
     LoadFile { selected: String, files: Vec<String> },
     /// New-section form: optional name (an empty one keeps the default).
@@ -40,6 +48,8 @@ pub enum Modal {
         sensor_index: Option<usize>,
         kind: String,
         name: String,
+        /// Query filtering the type grid (label or raw type).
+        query: String,
     },
     /// Removal confirmation for one section (and its sensors).
     ConfirmRemoveSection(usize),
@@ -57,6 +67,18 @@ pub enum Modal {
     /// Save refused: one human-readable line per invalid value (the
     /// fields they belong to are highlighted in red behind the modal).
     InvalidFields { errors: Vec<String> },
+}
+
+impl Modal {
+    /// Enter confirms only forms whose primary action is not destructive:
+    /// overwrite, remove, close, reload, load and reset keep an explicit
+    /// click, so a stray key cannot drop or replace the user's work.
+    pub(crate) fn confirms_with_enter(&self) -> bool {
+        matches!(
+            self,
+            Modal::SaveAs { .. } | Modal::AddSection { .. } | Modal::ColorRules { .. }
+        )
+    }
 }
 
 /// Dimmed full-window layer with the active modal card centered on top.
@@ -119,6 +141,56 @@ pub(crate) fn modal_card(state: &PiumaSetup) -> Element<'_, Message> {
             error,
             dialog_actions(pal, Message::ModalConfirm, "Overwrite"),
         ),
+        Some(Modal::ConfirmClose) => dialog_frame(
+            pal,
+            "Unsaved changes",
+            text("Save the configuration before closing Piuma Setup?").size(BODY).into(),
+            error,
+            Row::new()
+                .push(
+                    button(text("Cancel").size(BODY))
+                        .on_press(Message::ModalCancel)
+                        .padding(8)
+                        .style(move |t, s| btn_secondary(pal, t, s)),
+                )
+                .push(
+                    button(text("Discard and close").size(BODY))
+                        .on_press(Message::CloseDiscard)
+                        .padding(8)
+                        .style(move |t, s| btn_secondary(pal, t, s)),
+                )
+                .push(
+                    button(text("Save and close").size(BODY))
+                        .on_press(Message::ModalConfirm)
+                        .padding(8)
+                        .style(move |t, s| btn_primary(pal, t, s)),
+                )
+                .spacing(10)
+                .align_y(Alignment::Center),
+        ),
+        Some(Modal::ConfirmReload) => dialog_frame(
+            pal,
+            "Unsaved changes",
+            text("Save the configuration before restarting Piuma?").size(BODY).into(),
+            error,
+            dialog_actions(pal, Message::ModalConfirm, "Save and restart"),
+        ),
+        Some(Modal::ConfirmLoad(name)) => dialog_frame(
+            pal,
+            "Unsaved changes",
+            text(format!("Discard the unsaved changes and load {name}?"))
+                .size(BODY)
+                .into(),
+            error,
+            dialog_actions(pal, Message::ModalConfirm, "Load"),
+        ),
+        Some(Modal::ConfirmReset) => dialog_frame(
+            pal,
+            "Unsaved changes",
+            text("Discard the unsaved changes and reset to defaults?").size(BODY).into(),
+            error,
+            dialog_actions(pal, Message::ModalConfirm, "Reset"),
+        ),
         Some(Modal::LoadFile { selected, files }) => {
             // Files as buttons (not a pick list): every choice stays visible
             // and no dropdown overlay can swallow clicks around the dialog.
@@ -161,13 +233,20 @@ pub(crate) fn modal_card(state: &PiumaSetup) -> Element<'_, Message> {
             error,
             dialog_actions(pal, Message::ModalConfirm, "Add"),
         ),
-        Some(Modal::AddSensor { sensor_index, kind, name, .. }) => {
+        Some(Modal::AddSensor { sensor_index, kind, name, query, .. }) => {
             // A grid of type cards, each with the type's real preview and
             // name: the choice is visual, not a list of JSON keys. When
             // retyping an existing sensor the pick applies on click; when
             // adding, the optional name and the Add button stay below.
+            // The query narrows the ~30 types by label or raw key.
             let mut body = column![
-                source_picker_grid(pal, &state.config, kind),
+                input(
+                    "filter types (label or key)…",
+                    query,
+                    Message::SensorQueryChanged,
+                )
+                .width(Length::Fill),
+                source_picker_grid(pal, &state.config, kind, query),
                 Row::new()
                     .push(
                         text(source_label(canonical_type(kind)))
@@ -367,7 +446,7 @@ pub(crate) fn modal_card(state: &PiumaSetup) -> Element<'_, Message> {
                     Row::new()
                         .push(input("min", &rule.min, move |value| Message::ColorRuleMinChanged(i, value))
                             .width(Length::Fixed(90.0)))
-                        .push(color_control(
+                        .push(color_control_plain(
                             &rule.color,
                             // Draft rows are not in the config yet: the same
                             // parser names the bad value live in the popup.
@@ -443,12 +522,20 @@ fn source_picker_grid<'a>(
     pal: Palette,
     cfg: &'a PiumaConfig,
     selected: &str,
+    query: &str,
 ) -> Element<'a, Message> {
     const COLUMNS: usize = 2;
+    let needle = query.trim().to_lowercase();
     let mut grid = column![].spacing(6).width(Length::Fill);
     let mut row = Row::new().spacing(6);
     let mut cells = 0;
-    for kind in available_source_types(selected) {
+    for kind in available_source_types(selected).into_iter().filter(|kind| {
+        needle.is_empty()
+            || kind.to_lowercase().contains(&needle)
+            || source_label(canonical_type(kind))
+                .to_lowercase()
+                .contains(&needle)
+    }) {
         let is_selected = kind == selected;
         row = row.push(
             button(
@@ -481,6 +568,11 @@ fn source_picker_grid<'a>(
     }
     if cells % COLUMNS != 0 {
         grid = grid.push(row);
+    }
+    if cells == 0 {
+        grid = grid.push(
+            text("no type matches").size(10).style(muted_text(pal)),
+        );
     }
     scrollable(grid)
         .height(Length::Fixed(200.0))

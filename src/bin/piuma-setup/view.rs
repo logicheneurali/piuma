@@ -215,10 +215,7 @@ fn footer(state: &PiumaSetup) -> Element<'_, Message> {
     let pal = palette(&state.config);
     // Same dirty check the Save button uses: serialized now vs the last
     // load/save, so the indicator cannot disagree with the action.
-    let dirty = state
-        .serialize()
-        .map(|current| current != state.snapshot)
-        .unwrap_or(true);
+    let dirty = state.is_dirty();
     let save_state = text(if dirty {
         "● Unsaved changes"
     } else {
@@ -232,14 +229,32 @@ fn footer(state: &PiumaSetup) -> Element<'_, Message> {
             Color::from_rgb(0.45, 0.75, 0.5)
         })
     });
-    let info = column![
+    let mut info = column![
         text(format!("editing: {}", state.current_file))
             .size(BODY)
             .style(muted_text(pal)),
         save_state,
-        status_bar(state),
     ]
     .spacing(2);
+    if !state.validation.is_empty() {
+        // The tab badges say where; this jumps to the first field so the
+        // red row is found without scanning every accordion.
+        let n = state.validation.len();
+        info = info.push(
+            button(
+                text(format!(
+                    "⚠ {n} invalid value{} — show the first",
+                    if n == 1 { "" } else { "s" }
+                ))
+                .size(10)
+                .style(error_text_style),
+            )
+            .on_press(Message::JumpToFirstError)
+            .padding(0)
+            .style(button::text),
+        );
+    }
+    info = info.push(status_bar(state));
 
     let bar = Row::new()
         .push(container(info).width(Length::Fill))
@@ -283,24 +298,15 @@ fn config_header(state: &PiumaSetup) -> Element<'_, Message> {
 
 
 /// Load / Save / Save As / Reset actions for the fixed bottom bar.
-fn action_buttons(pal: Palette) -> Element<'static, Message> {
-    // The bar creates its panel surfaces at boot: this is the one-click
-    // way to apply a saved panel set without leaving the editor.
-    let reload_btn = button(text("Reload Piuma").size(BODY))
-        .on_press(Message::ReloadPiuma)
-        .padding(10)
-        .style(move |t, s| btn_secondary(pal, t, s));
-    let load_btn = button(text("Load…").size(BODY))
-        .on_press(Message::LoadConfig)
-        .padding(10)
-        .style(move |t, s| btn_secondary(pal, t, s));
-    let save_btn = button(text("Save").size(BODY))
-        .on_press(Message::SaveConfig)
-        .padding(10)
-        .style(move |t, s| btn_primary(pal, t, s));
-    let save_btn = tooltip(
-        save_btn,
-        container(text("Ctrl+S").size(10)).padding(4).style(move |_t: &Theme| {
+/// A footer button with a one-line hint above it.
+fn hint<'a>(
+    pal: Palette,
+    content: Element<'a, Message>,
+    label: &'a str,
+) -> Element<'a, Message> {
+    tooltip(
+        content,
+        container(text(label).size(10)).padding(4).style(move |_t: &Theme| {
             container::Style {
                 background: Some(Background::Color(pal.inset)),
                 border: Border {
@@ -312,14 +318,54 @@ fn action_buttons(pal: Palette) -> Element<'static, Message> {
             }
         }),
         tooltip::Position::Top,
+    )
+    .into()
+}
+
+fn action_buttons(pal: Palette) -> Element<'static, Message> {
+    // The bar creates its panel surfaces at boot: this is the one-click
+    // way to apply a saved panel set without leaving the editor. The
+    // config edits themselves hot-reload on save.
+    let reload_btn = hint(
+        pal,
+        button(text("Restart Piuma").size(BODY))
+            .on_press(Message::ReloadPiuma)
+            .padding(10)
+            .style(move |t, s| btn_secondary(pal, t, s))
+            .into(),
+        "Ctrl+R — needed after adding or removing panels",
     );
-    let save_as_btn = button(text("Save As…").size(BODY))
-        .on_press(Message::SaveAs)
+    let load_btn = hint(
+        pal,
+        button(text("Load…").size(BODY))
+            .on_press(Message::LoadConfig)
+            .padding(10)
+            .style(move |t, s| btn_secondary(pal, t, s))
+            .into(),
+        "Ctrl+O",
+    );
+    let save_btn = button(text("Save").size(BODY))
+        .on_press(Message::SaveConfig)
         .padding(10)
-        .style(move |t, s| btn_secondary(pal, t, s));
-    let reset_btn = button(text("Reset").size(BODY))
-        .on_press(Message::ResetConfig)
-        .padding(10);
+        .style(move |t, s| btn_primary(pal, t, s));
+    let save_btn = hint(pal, save_btn.into(), "Ctrl+S");
+    let save_as_btn = hint(
+        pal,
+        button(text("Save As…").size(BODY))
+            .on_press(Message::SaveAs)
+            .padding(10)
+            .style(move |t, s| btn_secondary(pal, t, s))
+            .into(),
+        "Ctrl+Shift+S",
+    );
+    let reset_btn = hint(
+        pal,
+        button(text("Reset").size(BODY))
+            .on_press(Message::ResetConfig)
+            .padding(10)
+            .into(),
+        "Back to the shipped default (undoable)",
+    );
 
     Row::new()
         .push(reload_btn)

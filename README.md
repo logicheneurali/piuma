@@ -675,6 +675,13 @@ no popup); its keys are optional and fall back to the values above:
 { "name": "Notifiche", "source": { "type": "notifications" } }
 ```
 
+Clicking the sensor opens the history list: each row runs its
+notification's `default` action, the header holds a **Do not disturb**
+switch (deliveries keep landing in the history, no card opens while it
+is on) and a **Clear** that empties the history (active entries get
+their `NotificationClosed`). Both are runtime-only: a bar restart starts
+with do not disturb off.
+
 The `notifications` sensor shows the newest active summary plus
 `(selected/total)` while the wheel browses the history, and a left click
 runs the shown entry's `default` action. On the popup, clicking a card
@@ -798,8 +805,7 @@ dispatch).
     "active": "#ffffff99", "inactive": "#ffffff33"
   },
   "screensaver": { "enabled": true, "minutes": 10 },
-  "glass": { "enabled": true, "opacity": 0.35 },
-  "auto_hide": { "enabled": true }
+  "glass": { "enabled": true, "opacity": 0.35 }
 }
 ```
 
@@ -968,16 +974,28 @@ category's card is shown, so the growing configuration stays readable;
 unsaved edits live in memory, so switching tabs never loses work. The
 bottom bar offers:
 
+- **Restart Piuma** – restarts the bar (needed after adding or removing
+  panels; saved edits otherwise hot-reload on their own);
 - **Load…** – edit any `*.json` file from `~/.config/piuma/` (different styles
   can live side by side);
-- **Save** – writes the file being edited, asking for confirmation when there
-  are unsaved changes;
+- **Save** – writes the file being edited;
 - **Save As…** – saves under a new name, with an extra confirmation if the
   file already exists;
-- **Reset** – restores the default configuration.
+- **Reset** – restores the default configuration (undoable).
+
+Keyboard: `Ctrl+S` save, `Ctrl+Shift+S` save as, `Ctrl+O` load,
+`Ctrl+R` restart, `Ctrl+Z` / `Ctrl+Shift+Z` undo/redo, `Esc` closes a
+dialog, `Enter` confirms the non-destructive ones. Closing the window or
+loading another file with unsaved edits asks first (save / discard /
+cancel), so an accidental click never drops work.
 
 Each section and sensor header also shows **▲/▼** buttons that move it
-up/down in the panel order (the arrow is disabled on the first/last item).
+up/down in the panel order (the arrow is disabled on the first/last item),
+a **Duplicate** button clones a section (sensors included) right below it.
+The Sections tab has a filter over section titles and the sensors' name,
+description or source type. Every colour field carries the current
+palette's tones as one-click chips, so matching a colour never means
+retyping a hex value.
 
 ## License
 

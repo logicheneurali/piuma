@@ -9,7 +9,8 @@ use crate::controls::*;
 use crate::model::*;
 use crate::modal::Modal;
 use crate::state::Tab;
-use crate::update::update;
+use crate::update::{sensor_error_path, tab_for_error_path, update};
+use crate::view_sections::section_matches;
 use crate::view_wallpaper::{parse_user_dirs_pictures, scan_wallpaper_dirs};
 
 
@@ -122,6 +123,12 @@ fn fixture() -> PiumaSetup {
         autostart_apps: Vec::new(),
         layouts: Vec::new(),
         active_theme: None,
+        pending_close: None,
+        section_filter: String::new(),
+        document_loaded: false,
+        undo: Vec::new(),
+        redo: Vec::new(),
+        undo_at: None,
     }
 }
 
@@ -810,20 +817,18 @@ fn screensaver_tweaks_roundtrip() {
     assert!(config::validate_config(&parsed).is_empty());
 }
 
-/// Glass and auto-hide: first touch seeds the bar's defaults, the
-/// opacity round-trips as 0.05..1.0, and both parse back into the bar.
+/// Glass: first touch seeds the bar's defaults, the opacity round-trips
+/// as 0.05..1.0 and parses back into the bar.
 #[test]
-fn glass_and_auto_hide_roundtrip() {
+fn glass_roundtrip() {
     let mut s = test_state();
     let _ = update(&mut s, Message::GlassEnabled(true));
     let _ = update(&mut s, Message::GlassOpacityChanged(60));
-    let _ = update(&mut s, Message::AutoHideEnabled(true));
     let parsed: config::Config = serde_json::from_str(&s.serialize().unwrap()).unwrap();
     let tweaks = parsed.panel.tweaks.as_ref().expect("tweaks");
     let glass = tweaks.glass.as_ref().expect("glass");
     assert!(glass.enabled);
     assert!((glass.opacity - 0.60).abs() < 1e-6);
-    assert!(tweaks.auto_hide.as_ref().expect("auto_hide").enabled);
     assert!(config::validate_config(&parsed).is_empty());
 
     let _ = update(&mut s, Message::GlassOpacityChanged(1000));
@@ -1966,4 +1971,142 @@ fn panels_roundtrip_and_edit() {
     assert_eq!(s.config.panels.len(), 1);
     let _ = update(&mut s, Message::RootSectionsChanged("Stats".to_string()));
     assert_eq!(s.config.visible_sections, Some(vec!["Stats".to_string()]));
+}
+
+/// The close request opens the unsaved-changes dialog only when there is
+/// something to lose; Escape leaves the editor open.
+#[test]
+fn close_request_asks_before_dropping_unsaved_edits() {
+    let mut state = fixture();
+    state
+        .load_from_json(r#"{"panel":{"sections":[]}}"#)
+        .expect("parse");
+    state.snapshot = state.serialize().expect("serialize");
+    state.undo.clear();
+    state.redo.clear();
+    state.undo_at = None;
+    let id = iced::window::Id::unique();
+    let _ = update(&mut state, Message::WindowCloseRequested(id));
+    assert!(state.modal.is_none(), "a clean config closes without a dialog");
+    assert!(state.pending_close.is_none());
+    state.config.font_size = state.config.font_size.saturating_add(1);
+    let _ = update(&mut state, Message::WindowCloseRequested(id));
+    assert!(
+        matches!(state.modal, Some(Modal::ConfirmClose)),
+        "unsaved edits ask first"
+    );
+    let _ = update(&mut state, Message::ModalCancel);
+    assert!(state.modal.is_none() && state.pending_close.is_none());
+}
+
+/// Undo walks the edits back and forward; a quick burst in one field is a
+/// single step, so Ctrl+Z does not erase one keystroke at a time.
+#[test]
+fn undo_redo_and_burst_coalescing() {
+    let mut state = fixture();
+    state
+        .load_from_json(r#"{"panel":{"sections":[]}}"#)
+        .expect("parse");
+    state.snapshot = state.serialize().expect("serialize");
+    state.undo.clear();
+    state.redo.clear();
+    state.undo_at = None;
+    let original = state.config.font_size;
+    for size in [original + 1, original + 2, original + 3] {
+        let _ = update(&mut state, Message::FontSizeChanged(size));
+    }
+    assert_eq!(state.config.font_size, original + 3);
+    assert_eq!(state.undo.len(), 1, "one burst is one undo step");
+    let _ = update(&mut state, Message::Undo);
+    assert_eq!(state.config.font_size, original);
+    let _ = update(&mut state, Message::Redo);
+    assert_eq!(state.config.font_size, original + 3);
+    let _ = update(&mut state, Message::Undo);
+    let _ = update(&mut state, Message::Undo);
+    assert_eq!(state.config.font_size, original, "an empty history is a no-op");
+}
+
+/// A duplicated section lands right after the original, with its sensors,
+/// a recognizable name and the open flags moved with it.
+#[test]
+fn a_duplicated_section_follows_the_original() {
+    let mut state = fixture();
+    state
+        .load_from_json(
+            r#"{"panel":{"sections":[{"name":"one","sensors":[{"name":"A","source":{"type":"static_text","text":"x"}}]},{"name":"two","sensors":[]}]}}"#,
+        )
+        .expect("parse");
+    state.sensors_open.insert((1, 0));
+    let new_index = state.duplicate_section(0).expect("in bounds");
+    assert_eq!(new_index, 1);
+    assert_eq!(state.config.sections.len(), 3);
+    assert_eq!(state.config.sections[1].sensors.len(), 1);
+    assert_eq!(
+        state.config.sections[1].name.as_deref(),
+        Some("one (copy)")
+    );
+    assert!(
+        state.sensors_open.contains(&(2, 0)),
+        "the old second section moved down with its flags"
+    );
+    assert_eq!(state.duplicate_section(9), None);
+}
+
+/// The filter matches section titles, sensor names/descriptions and source
+/// types (raw or displayed).
+#[test]
+fn the_section_filter_matches_titles_and_sensors() {
+    let mut state = fixture();
+    state
+        .load_from_json(
+            r#"{"panel":{"sections":[{"name":"system","sensors":[{"name":"CPU","description":"load","source":{"type":"perc_cpu"}}]},{"name":"media","sensors":[]}]}}"#,
+        )
+        .expect("parse");
+    let system = &state.config.sections[0];
+    let media = &state.config.sections[1];
+    assert!(section_matches(0, system, "system"));
+    assert!(section_matches(0, system, "cpu"));
+    assert!(section_matches(0, system, "load"));
+    assert!(section_matches(0, system, "perc_cpu"));
+    assert!(!section_matches(1, media, "cpu"));
+}
+
+/// The footer's error jump points at the sensor when the path is one, and
+/// otherwise at the owning tab.
+#[test]
+fn error_paths_jump_to_the_sensor_or_its_tab() {
+    assert_eq!(
+        sensor_error_path("panel.sections[2].sensors[7].source.interval"),
+        Some((2, 7))
+    );
+    assert_eq!(sensor_error_path("panel.default_bg_color"), None);
+    assert_eq!(
+        tab_for_error_path("panel.notifications.bg_color"),
+        Tab::Notifications
+    );
+    assert_eq!(tab_for_error_path("panel.tweaks.glass.opacity"), Tab::Tweaks);
+    assert_eq!(tab_for_error_path("panel.thickness"), Tab::Panel);
+    assert_eq!(
+        tab_for_error_path("panel.sections[1].border_type"),
+        Tab::Sections
+    );
+}
+
+/// A load clears the undo history and its pre-load snapshot is not
+/// recorded: Ctrl+Z cannot swap another file's content in.
+#[test]
+fn a_loaded_document_starts_without_undo() {
+    let mut state = fixture();
+    state
+        .load_from_json(r#"{"panel":{"sections":[]}}"#)
+        .expect("parse");
+    state.snapshot = state.serialize().expect("serialize");
+    state.undo.clear();
+    state.redo.clear();
+    state.undo_at = None;
+    state.document_loaded = true;
+    let size = state.config.font_size + 1;
+    let _ = update(&mut state, Message::FontSizeChanged(size));
+    assert!(state.undo.is_empty(), "the pre-load config is not undoable");
+    assert!(!state.document_loaded, "the barrier is consumed");
 }

@@ -17,22 +17,87 @@ use crate::state::{Message, PiumaSetup};
 /// The "Sections" block: one card per section, plus the add button.
 pub(crate) fn sections_list(state: &PiumaSetup) -> Element<'_, Message> {
     let pal = palette(&state.config);
+    let needle = state.section_filter.trim().to_lowercase();
+    let filtering = !needle.is_empty();
     let mut section_list = Column::new().spacing(15);
+    let mut shown = 0usize;
     for (i, section) in state.config.sections.iter().enumerate() {
+        if filtering && !section_matches(i, section, &needle) {
+            continue;
+        }
+        shown += 1;
         section_list = section_list.push(section_view(state, i, section));
     }
+
+    // The filter matches section titles and the sensors' name,
+    // description or source type; a matching section opens so the hit is
+    // visible without another click.
+    let filter_row = Row::new()
+        .push(
+            input(
+                "filter sections and sensors…",
+                &state.section_filter,
+                Message::SectionFilterChanged,
+            )
+            .width(Length::Fill),
+        )
+        .push(
+            button(text("×").size(BODY))
+                .on_press(Message::SectionFilterChanged(String::new()))
+                .padding(5)
+                .style(move |t, s| btn_secondary(pal, t, s)),
+        )
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .width(Length::Fill);
 
     let add_section = button(text("+ Add Section").size(BODY))
         .on_press(Message::AddSectionPressed)
         .padding(10);
 
-    column![
+    let mut list = column![
         text("Sections").size(16).style(fg_text(pal)),
-        section_list,
-        add_section,
+        filter_row,
     ]
-    .spacing(10)
-    .into()
+    .spacing(10);
+    if filtering && shown == 0 {
+        list = list.push(
+            text("no section or sensor matches").size(10).style(muted_text(pal)),
+        );
+    } else if filtering {
+        list = list.push(
+            text(format!("{shown} section{} matches", if shown == 1 { "" } else { "s" }))
+                .size(10)
+                .style(muted_text(pal)),
+        );
+    }
+    list.push(section_list).push(add_section).into()
+}
+
+/// Whether a section (or one of its sensors) matches the filter: by
+/// title, sensor name/description, raw source type or its display label.
+pub(crate) fn section_matches(index: usize, section: &Section, needle: &str) -> bool {
+    let title = section
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("Section {}", index + 1));
+    if title.to_lowercase().contains(needle) {
+        return true;
+    }
+    section.sensors.iter().any(|sensor| {
+        sensor
+            .name
+            .as_deref()
+            .is_some_and(|name| name.to_lowercase().contains(needle))
+            || sensor
+                .description
+                .as_deref()
+                .is_some_and(|text| text.to_lowercase().contains(needle))
+            || sensor.source_type.to_lowercase().contains(needle)
+            || source_label(canonical_type(&sensor.source_type))
+                .to_lowercase()
+                .contains(needle)
+    })
 }
 
 /// Section card (accordion): a compact header — toggle with the section
@@ -44,7 +109,10 @@ pub(crate) fn section_view<'a>(
     section: &'a Section,
 ) -> Element<'a, Message> {
     let pal = palette(&state.config);
-    let collapsed = state.sections_collapsed.contains(&index);
+    // A filtered list shows its hits: the open/closed state is for the
+    // unfiltered accordion.
+    let collapsed =
+        state.section_filter.trim().is_empty() && state.sections_collapsed.contains(&index);
     let title = section.name.clone().unwrap_or_else(|| format!("Section {}", index + 1));
     let layout = section.layout.as_deref().unwrap_or(&state.config.section_layout);
     let count = section.sensors.len();
@@ -75,6 +143,12 @@ pub(crate) fn section_view<'a>(
             index + 1 < state.config.sections.len(),
             Message::SectionMoveDown(index),
         ))
+        .push(
+            button(text("Duplicate").size(BODY))
+                .on_press(Message::SectionDuplicated(index))
+                .padding(5)
+                .style(move |t, s| btn_secondary(pal, t, s)),
+        )
         .push({
             // The last section keeps its button visible but inert.
             let b = button(text("Remove").size(BODY)).padding(5);
@@ -109,6 +183,7 @@ pub(crate) fn section_view<'a>(
             section.name.as_deref().unwrap_or(""),
             move |value| Message::SectionNameChanged(index, value),
         )
+        .id(section_name_id(index))
         .width(Length::Fill)
         .into(),
     );
@@ -127,21 +202,21 @@ pub(crate) fn section_view<'a>(
             .label("Dot handle in the bar")
             .on_toggle(move |value| Message::SectionCollapsibleChanged(index, value))
             .into()),
-        ("BG", color_control_over(
+        ("BG", color_control_over(pal,
             section.bg_color.as_deref().unwrap_or(""),
             state.field_err(&format!("panel.sections[{index}].bg_color")),
             state.config.section_defaults.bg_color.as_deref(),
             move |value| Message::SectionBgColorChanged(index, value),
             Some(Message::SectionBgColorChanged(index, String::new())),
         )),
-        ("Text", color_control_over(
+        ("Text", color_control_over(pal,
             section.text_color.as_deref().unwrap_or(""),
             state.field_err(&format!("panel.sections[{index}].text_color")),
             state.config.section_defaults.text_color.as_deref(),
             move |value| Message::SectionTextColorChanged(index, value),
             Some(Message::SectionTextColorChanged(index, String::new())),
         )),
-        ("Border", color_control_over(
+        ("Border", color_control_over(pal,
             section.border_color.as_deref().unwrap_or(""),
             state.field_err(&format!("panel.sections[{index}].border_color")),
             state.config.section_defaults.border_color.as_deref(),
@@ -635,7 +710,7 @@ pub(crate) fn sensor_view<'a>(
             // Text colour with the threshold-rules editor right after it:
             // the "…" opens the popup where colours and thresholds live.
             ("Text", Row::new()
-                .push(color_control_over(
+                .push(color_control_over(pal,
                     sensor.text_color.as_deref().unwrap_or(""),
                     state.field_err(&spath("text_color")),
                     d.text_color.as_deref(),
@@ -652,35 +727,35 @@ pub(crate) fn sensor_view<'a>(
                 .align_y(Alignment::Center)
                 .width(Length::Fill)
                 .into()),
-            ("Hover Text", color_control_over(
+            ("Hover Text", color_control_over(pal,
                 sensor.text_color_hover.as_deref().unwrap_or(""),
                 state.field_err(&spath("text_color_hover")),
                 d.text_color_hover.as_deref(),
                 move |value| Message::SensorTextColorHoverChanged(section_index, sensor_index, value),
                 reset(Message::SensorTextColorHoverChanged(section_index, sensor_index, String::new())),
             )),
-            ("BG", color_control_over(
+            ("BG", color_control_over(pal,
                 sensor.bg_color.as_deref().unwrap_or(""),
                 state.field_err(&spath("bg_color")),
                 d.bg_color.as_deref(),
                 move |value| Message::SensorBgColorChanged(section_index, sensor_index, value),
                 reset(Message::SensorBgColorChanged(section_index, sensor_index, String::new())),
             )),
-            ("Hover BG", color_control_over(
+            ("Hover BG", color_control_over(pal,
                 sensor.bg_color_hover.as_deref().unwrap_or(""),
                 state.field_err(&spath("bg_color_hover")),
                 d.bg_color_hover.as_deref(),
                 move |value| Message::SensorBgColorHoverChanged(section_index, sensor_index, value),
                 reset(Message::SensorBgColorHoverChanged(section_index, sensor_index, String::new())),
             )),
-            ("Border", color_control_over(
+            ("Border", color_control_over(pal,
                 sensor.border_color.as_deref().unwrap_or(""),
                 state.field_err(&spath("border_color")),
                 d.border_color.as_deref(),
                 move |value| Message::SensorBorderColorChanged(section_index, sensor_index, value),
                 reset(Message::SensorBorderColorChanged(section_index, sensor_index, String::new())),
             )),
-            ("Border Hover", color_control_over(
+            ("Border Hover", color_control_over(pal,
                 sensor.border_color_hover.as_deref().unwrap_or(""),
                 state.field_err(&spath("border_color_hover")),
                 d.border_color_hover.as_deref(),
@@ -770,12 +845,12 @@ pub(crate) fn sensor_defaults_view(state: &PiumaSetup) -> Element<'_, Message> {
 
         // Style numbers: -1 = disabled (the defaults apply), 0..=N = enabled.
         let fields = vec![
-            ("Text", color_control_over(d.text_color.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.text_color"), None, |value| Message::DefaultsStyleChanged("text_color".to_string(), value), Some(Message::DefaultsStyleChanged("text_color".to_string(), String::new())))),
-            ("Hover Text", color_control_over(d.text_color_hover.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.text_color_hover"), None, |value| Message::DefaultsStyleChanged("text_color_hover".to_string(), value), Some(Message::DefaultsStyleChanged("text_color_hover".to_string(), String::new())))),
-            ("BG", color_control_over(d.bg_color.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.bg_color"), None, |value| Message::DefaultsStyleChanged("bg_color".to_string(), value), Some(Message::DefaultsStyleChanged("bg_color".to_string(), String::new())))),
-            ("Hover BG", color_control_over(d.bg_color_hover.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.bg_color_hover"), None, |value| Message::DefaultsStyleChanged("bg_color_hover".to_string(), value), Some(Message::DefaultsStyleChanged("bg_color_hover".to_string(), String::new())))),
-            ("Border", color_control_over(d.border_color.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.border_color"), None, |value| Message::DefaultsStyleChanged("border_color".to_string(), value), Some(Message::DefaultsStyleChanged("border_color".to_string(), String::new())))),
-            ("Border Hover", color_control_over(d.border_color_hover.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.border_color_hover"), None, |value| Message::DefaultsStyleChanged("border_color_hover".to_string(), value), Some(Message::DefaultsStyleChanged("border_color_hover".to_string(), String::new())))),
+            ("Text", color_control_over(pal, d.text_color.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.text_color"), None, |value| Message::DefaultsStyleChanged("text_color".to_string(), value), Some(Message::DefaultsStyleChanged("text_color".to_string(), String::new())))),
+            ("Hover Text", color_control_over(pal, d.text_color_hover.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.text_color_hover"), None, |value| Message::DefaultsStyleChanged("text_color_hover".to_string(), value), Some(Message::DefaultsStyleChanged("text_color_hover".to_string(), String::new())))),
+            ("BG", color_control_over(pal, d.bg_color.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.bg_color"), None, |value| Message::DefaultsStyleChanged("bg_color".to_string(), value), Some(Message::DefaultsStyleChanged("bg_color".to_string(), String::new())))),
+            ("Hover BG", color_control_over(pal, d.bg_color_hover.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.bg_color_hover"), None, |value| Message::DefaultsStyleChanged("bg_color_hover".to_string(), value), Some(Message::DefaultsStyleChanged("bg_color_hover".to_string(), String::new())))),
+            ("Border", color_control_over(pal, d.border_color.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.border_color"), None, |value| Message::DefaultsStyleChanged("border_color".to_string(), value), Some(Message::DefaultsStyleChanged("border_color".to_string(), String::new())))),
+            ("Border Hover", color_control_over(pal, d.border_color_hover.as_deref().unwrap_or(""), state.field_err("panel.sensor_defaults.border_color_hover"), None, |value| Message::DefaultsStyleChanged("border_color_hover".to_string(), value), Some(Message::DefaultsStyleChanged("border_color_hover".to_string(), String::new())))),
             ("Border Width", slider_control_over(-1i32..=10, d.border_width.unwrap_or(-1), state.field_err("panel.sensor_defaults.border_width"), None, |value| Message::DefaultsNumberChanged("border_width".to_string(), value), Some(Message::DefaultsNumberChanged("border_width".to_string(), -1)))),
             ("Border Radius", slider_control_over(-1i32..=20, d.border_radius.unwrap_or(-1), state.field_err("panel.sensor_defaults.border_radius"), None, |value| Message::DefaultsNumberChanged("border_radius".to_string(), value), Some(Message::DefaultsNumberChanged("border_radius".to_string(), -1)))),
             ("Padding (h)", slider_control_over(-1i32..=20, d.padding.unwrap_or(-1), state.field_err("panel.sensor_defaults.padding"), None, |value| Message::DefaultsNumberChanged("padding".to_string(), value), Some(Message::DefaultsNumberChanged("padding".to_string(), -1)))),
@@ -828,9 +903,9 @@ pub(crate) fn section_defaults_view(state: &PiumaSetup) -> Element<'_, Message> 
 
         // Style numbers: -1 = disabled (built-in fallback), 0..=N = enabled.
         let fields = vec![
-            ("BG", color_control_over(d.bg_color.as_deref().unwrap_or(""), state.field_err("panel.section_defaults.bg_color"), None, |value| Message::SecDefaultsStyleChanged("bg_color".to_string(), value), Some(Message::SecDefaultsStyleChanged("bg_color".to_string(), String::new())))),
-            ("Text", color_control_over(d.text_color.as_deref().unwrap_or(""), state.field_err("panel.section_defaults.text_color"), None, |value| Message::SecDefaultsStyleChanged("text_color".to_string(), value), Some(Message::SecDefaultsStyleChanged("text_color".to_string(), String::new())))),
-            ("Border", color_control_over(d.border_color.as_deref().unwrap_or(""), state.field_err("panel.section_defaults.border_color"), None, |value| Message::SecDefaultsStyleChanged("border_color".to_string(), value), Some(Message::SecDefaultsStyleChanged("border_color".to_string(), String::new())))),
+            ("BG", color_control_over(pal, d.bg_color.as_deref().unwrap_or(""), state.field_err("panel.section_defaults.bg_color"), None, |value| Message::SecDefaultsStyleChanged("bg_color".to_string(), value), Some(Message::SecDefaultsStyleChanged("bg_color".to_string(), String::new())))),
+            ("Text", color_control_over(pal, d.text_color.as_deref().unwrap_or(""), state.field_err("panel.section_defaults.text_color"), None, |value| Message::SecDefaultsStyleChanged("text_color".to_string(), value), Some(Message::SecDefaultsStyleChanged("text_color".to_string(), String::new())))),
+            ("Border", color_control_over(pal, d.border_color.as_deref().unwrap_or(""), state.field_err("panel.section_defaults.border_color"), None, |value| Message::SecDefaultsStyleChanged("border_color".to_string(), value), Some(Message::SecDefaultsStyleChanged("border_color".to_string(), String::new())))),
             ("Border Width", slider_control_over(-1i32..=10, d.border_width.unwrap_or(-1), state.field_err("panel.section_defaults.border_width"), None, |value| Message::SecDefaultsNumberChanged("border_width".to_string(), value), Some(Message::SecDefaultsNumberChanged("border_width".to_string(), -1)))),
             ("Border Radius", slider_control_over(-1i32..=20, d.border_radius.unwrap_or(-1), state.field_err("panel.section_defaults.border_radius"), None, |value| Message::SecDefaultsNumberChanged("border_radius".to_string(), value), Some(Message::SecDefaultsNumberChanged("border_radius".to_string(), -1)))),
             ("Border Type", invalid_under(

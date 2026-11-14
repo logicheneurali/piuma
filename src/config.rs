@@ -257,9 +257,6 @@ pub struct TweaksConfig {
     /// background alpha lowered so the blur shows.
     #[serde(default)]
     pub glass: Option<GlassConfig>,
-    /// Hide the bar while the focused window is fullscreen.
-    #[serde(default)]
-    pub auto_hide: Option<AutoHideConfig>,
 }
 
 /// `panel.tweaks.glass`: compositor blur (`ext-background-effect-v1`)
@@ -275,14 +272,6 @@ pub struct GlassConfig {
 
 fn default_glass_opacity() -> f32 {
     0.35
-}
-
-/// `panel.tweaks.auto_hide`: the bar slides out of the output while the
-/// focused window is fullscreen, and the reserved strip goes with it.
-#[derive(Deserialize, serde::Serialize, Clone)]
-pub struct AutoHideConfig {
-    #[serde(default)]
-    pub enabled: bool,
 }
 
 /// `panel.tweaks.screensaver`: full-screen overlay after an idle period.
@@ -311,15 +300,6 @@ impl Config {
             .and_then(|t| t.glass.as_ref())
             .filter(|g| g.enabled)
             .map(|g| g.opacity.clamp(0.05, 1.0))
-    }
-
-    /// Whether the bar hides itself while a fullscreen window has focus.
-    pub fn auto_hide(&self) -> bool {
-        self.panel
-            .tweaks
-            .as_ref()
-            .and_then(|t| t.auto_hide.as_ref())
-            .is_some_and(|a| a.enabled)
     }
 
     /// The screensaver is on and has a usable delay.
@@ -1389,10 +1369,12 @@ pub fn validate_config(cfg: &Config) -> Vec<ConfigError> {
 /// back to the defaults silently, so the log — together with
 /// piuma-setup's highlighted fields — is where a hand-edited value
 /// gets named instead of vanishing.
-pub fn report_invalid(cfg: &Config) {
-    for error in validate_config(cfg) {
+pub fn report_invalid(cfg: &Config) -> Vec<ConfigError> {
+    let errors = validate_config(cfg);
+    for error in &errors {
         eprintln!("[piuma] config {}: {} — using the default", error.path, error.message);
     }
+    errors
 }
 
 /// Load configuration from an explicit path or the default location.
@@ -2162,7 +2144,6 @@ mod tests {
                 minutes: 0,
             }),
             glass: None,
-            auto_hide: None,
         });
         assert!(
             validate_config(&cfg)

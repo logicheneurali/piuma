@@ -318,7 +318,7 @@ pub(crate) fn wallpaper_settings(state: &PiumaSetup) -> Element<'_, Message> {
         content = content.push(
             Row::new()
                 .push(text("Background colour").size(BODY).width(Length::Fixed(160.0)))
-                .push(color_control(
+                .push(color_control(pal,
                     color_value,
                     state.field_err("panel.wallpaper.color"),
                     Message::WallpaperColorChanged,

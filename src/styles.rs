@@ -457,3 +457,138 @@ mod tests {
         );
     }
 }
+
+/// Resolved popup card style: `panel.notifications` values, with the
+/// popup defaults for absent/invalid keys — white text on black, grey
+/// border (the bar's own colors are not inherited here).
+#[derive(Debug, PartialEq)]
+pub(crate) struct PopupStyle {
+    /// Base text size (body); the summary is +3 bold, the ✕ +2.
+    pub(crate) font_size: u32,
+    pub(crate) text: Color,
+    pub(crate) text_hover: Color,
+    pub(crate) bg: Color,
+    pub(crate) bg_hover: Color,
+    pub(crate) border: Color,
+    pub(crate) border_hover: Color,
+    pub(crate) border_width: u32,
+    pub(crate) border_radius: u32,
+    pub(crate) border_type: String,
+    pub(crate) padding: u32,
+}
+
+impl Default for PopupStyle {
+    fn default() -> Self {
+        Self {
+            font_size: 12,
+            text: Color::WHITE,
+            text_hover: Color::WHITE,
+            bg: Color::BLACK,
+            bg_hover: Color::BLACK,
+            border: Color::from_rgb(0.5, 0.5, 0.5),
+            border_hover: Color::from_rgb(0.5, 0.5, 0.5),
+            border_width: 1,
+            border_radius: 10,
+            border_type: "full".to_string(),
+            padding: 12,
+        }
+    }
+}
+
+/// The popup style from `panel.notifications`: negative/absent numerics
+/// and unparsable colors fall back to `PopupStyle::default()`, an unknown
+/// `border_type` to `full` (the `styled_box` rule). An active wallpaper
+/// palette replaces the card's configured COLOURS (bg/hover from the
+/// tones, borders from the vibrant one, text from the text tone);
+/// sizes and the border type stay configured.
+pub(crate) fn popup_style(config: &config::Config, pal: Option<&palette::Palette>) -> PopupStyle {
+    let d = PopupStyle::default();
+    let Some(n) = config.panel.notifications.as_ref() else {
+        return d;
+    };
+    let color = |key: &Option<String>, tone: Option<&str>, fallback: Color| {
+        let configured = key.as_deref().and_then(|s| config::parse_color(s).ok());
+        tone.and_then(|t| config::parse_color(t).ok())
+            .map(|mut t| {
+                // The configured transparency survives the palette's hue.
+                if let Some(c) = configured {
+                    t.a = c.a;
+                }
+                t
+            })
+            .or(configured)
+            .unwrap_or(fallback)
+    };
+    let num = |key: Option<i32>, fallback: u32| {
+        key.filter(|v| *v >= 0).map(|v| v as u32).unwrap_or(fallback)
+    };
+    PopupStyle {
+        font_size: n
+            .font_size
+            .filter(|v| (8..=64).contains(v))
+            .unwrap_or(d.font_size),
+        text: color(&n.text_color, pal.map(|p| p.text.as_str()), d.text),
+        text_hover: color(
+            &n.text_color_hover,
+            pal.map(|p| p.text_hover.as_str()),
+            d.text,
+        ),
+        bg: color(&n.bg_color, pal.map(|p| p.card.as_str()), d.bg),
+        bg_hover: color(&n.bg_color_hover, pal.map(|p| p.card_hover.as_str()), d.bg),
+        border: color(
+            &n.border_color,
+            pal.map(|p| p.card_hover.as_str()),
+            d.border,
+        ),
+        border_hover: color(
+            &n.border_color_hover,
+            pal.map(|p| p.card_hover.as_str()),
+            d.border,
+        ),
+        border_width: num(n.border_width, d.border_width),
+        border_radius: num(n.border_radius, d.border_radius),
+        border_type: n
+            .border_type
+            .as_deref()
+            .filter(|t| {
+                matches!(
+                    *t,
+                    "full"
+                        | "corners"
+                        | "underline"
+                        | "upperline"
+                        | "left"
+                        | "right"
+                        | "leaf-right"
+                        | "leaf-left"
+                )
+            })
+            .unwrap_or(&d.border_type)
+            .to_string(),
+        padding: num(n.padding, d.padding),
+    }
+}
+
+/// Card height for the surface math: 2×padding + five lines of font —
+/// the default style gives exactly the F3 geometry (2×12 + 5×12 = 84),
+/// so the stack stays click-exact for every style.
+pub(crate) fn popup_card_h(style: &PopupStyle) -> u32 {
+    2 * style.padding + 8 * style.font_size
+}
+
+
+
+
+// ── tray menu window ────────────────────────────────────────────────
+
+
+
+
+
+
+
+// ── notification list popup ─────────────────────────────────────────
+
+
+
+// ── bar tooltip window ──────────────────────────────────────────────

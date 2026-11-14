@@ -34,12 +34,17 @@ pub(crate) const POPUP_MARGIN: i32 = 8;
 pub(crate) const NOTIF_LIST_MAX: usize = 30;
 
 pub(crate) const NOTIF_LIST_ROWS: usize = 8;
+/// Gap between two list children (header, rows, arrows).
+const LIST_GAP: u32 = 2;
 
 pub(crate) const NOTIF_LIST_W_MAX: u32 = 460;
 
 pub(crate) fn sync_popup(panel: &mut Panel, reposition: bool) -> Option<Command<Message>> {
     let enabled = panel.config.panel.notifications.is_some();
-    let cards = if enabled {
+    // Do not disturb: deliveries still land in the history and move the
+    // sensor, they just never open the cards. The detailed list replaces
+    // the cards too, so they do not pop over it.
+    let cards = if enabled && !notifications::dnd() && panel.notif_list.is_none() {
         // Count only, and reap the icon handles that lost their card:
         // the old path cloned every (possibly image-bearing) card each
         // tick just to read `.len()`.
@@ -430,19 +435,34 @@ pub(crate) fn notif_list_size(
         .iter()
         .flat_map(|r| [r.summary.clone(), r.body.clone()])
         .collect();
-    let text_w = u32::from(text_width::widest(font, font_size, &patterns));
-    let w = text_w
+    let body_w = u32::from(text_width::widest(font, font_size, &patterns));
+    // The header's two labels share a row: their widths add up, so it
+    // must fit even for a single short notification.
+    let header_w = u32::from(text_width::widest(
+        font,
+        font_size,
+        &["Do not disturb: off".to_string()],
+    ))
+        + u32::from(text_width::widest(
+            font,
+            font_size,
+            &["Clear".to_string()],
+        ))
+        + 16;
+    let w = body_w
+        .max(header_w)
         .saturating_add(2 * MENU_PAD)
         .min(NOTIF_LIST_W_MAX.saturating_add(2 * MENU_PAD));
     let shown = rows.len().min(NOTIF_LIST_ROWS) as u32;
-    let arrows_h = if rows.len() > NOTIF_LIST_ROWS {
-        2 * menu_arrow_h(font_size)
-    } else {
-        0
-    };
+    let arrows = if rows.len() > NOTIF_LIST_ROWS { 2 } else { 0 };
+    // Header + shown rows + both arrow bands, plus one gap between each
+    // child of the column (the view's `LIST_GAP`).
+    let children = shown + arrows + 1;
     let h = shown
         .saturating_mul(notif_list_row_h(font_size))
-        .saturating_add(arrows_h)
+        .saturating_add(arrows.saturating_mul(menu_arrow_h(font_size)))
+        .saturating_add(menu_arrow_h(font_size))
+        .saturating_add(children.saturating_sub(1).saturating_mul(LIST_GAP))
         .saturating_add(2 * MENU_PAD);
     (w, h)
 }
@@ -460,7 +480,9 @@ pub(crate) fn toggle_notif_list(panel: &mut Panel) -> Command<Message> {
         );
     }
     let rows = notifications::history_rows(NOTIF_LIST_MAX);
-    if rows.is_empty() {
+    // With the history empty the list has nothing to show — but with do
+    // not disturb on its header is the only way back, so it still opens.
+    if rows.is_empty() && !notifications::dnd() {
         return Command::none();
     }
     let font = panel_font(&panel.config);
@@ -539,7 +561,47 @@ pub(crate) fn notif_list_view_with<'a>(
         .interaction(iced::mouse::Interaction::Pointer)
         .into()
     };
-    let mut list: Column<'_, Message> = Column::new().spacing(2.0);
+    // Header: the do-not-disturb switch (the only way back when the
+    // history is empty) and a Clear that empties it.
+    let header_h = menu_arrow_h(font_size) as f32;
+    let dnd = notifications::dnd();
+    let header = Row::new()
+        .push(
+            MouseArea::new(
+                container(
+                    text(if dnd {
+                        "Do not disturb: on"
+                    } else {
+                        "Do not disturb: off"
+                    })
+                    .size(font_size.saturating_sub(1))
+                    .color(if dnd { st.text } else { dim })
+                    .font(font),
+                )
+                .height(Length::Fixed(header_h))
+                .align_y(Alignment::Center),
+            )
+            .on_press(Message::NotifDndToggled)
+            .interaction(iced::mouse::Interaction::Pointer),
+        )
+        .push(Space::new().width(Length::Fill))
+        .push(
+            MouseArea::new(
+                container(
+                    text("Clear")
+                        .size(font_size.saturating_sub(1))
+                        .color(st.text)
+                        .font(font),
+                )
+                .height(Length::Fixed(header_h))
+                .align_y(Alignment::Center),
+            )
+            .on_press(Message::NotifListClear)
+            .interaction(iced::mouse::Interaction::Pointer),
+        )
+        .width(Length::Fill)
+        .align_y(Alignment::Center);
+    let mut list: Column<'_, Message> = Column::new().spacing(LIST_GAP as f32).push(header);
     if scrollable {
         list = list.push(arrow(true, state.offset > 0));
     }
@@ -706,15 +768,22 @@ mod tests {
         let (w, h) = notif_list_size(&rows, &font, 14);
         assert_eq!(
             h,
-            8 * notif_list_row_h(14) + 2 * menu_arrow_h(14) + 2 * MENU_PAD,
-            "only NOTIF_LIST_ROWS rows are shown, plus both arrow bands"
+            8 * notif_list_row_h(14)
+                + 3 * menu_arrow_h(14)
+                + 10 * LIST_GAP
+                + 2 * MENU_PAD,
+            "only NOTIF_LIST_ROWS rows are shown, plus both arrow bands, the header and the column gaps"
         );
         assert!(
             w <= NOTIF_LIST_W_MAX + 2 * MENU_PAD,
             "the measured width stays capped, got {w}"
         );
         let (w_short, h_short) = notif_list_size(&[row(0)], &font, 14);
-        assert_eq!(h_short, notif_list_row_h(14) + 2 * MENU_PAD);
+        assert_eq!(
+            h_short,
+            notif_list_row_h(14) + menu_arrow_h(14) + LIST_GAP + 2 * MENU_PAD,
+            "one row, header, one gap, no arrows"
+        );
         assert!(w_short < w, "fewer rows measure narrower");
     }
 }

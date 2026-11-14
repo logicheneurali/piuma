@@ -1,7 +1,10 @@
 //! Form controls (inputs, sliders, pick lists, collapsible cards) and the
 //! icon-theme discovery feeding the sensor icon pickers.
 use iced::widget::text::Style as TextStyle;
-use iced::widget::{button, canvas, column, container, text, PickList, Row, Slider, TextInput, Button, Column};
+use iced::widget::{
+    button, canvas, column, container, text, Button, Column, PickList, Row, Slider, Space,
+    TextInput,
+};
 use iced::{Alignment, Background, Border, Color, Element, Length, Point, Size, Theme};
 use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
@@ -393,6 +396,11 @@ pub(crate) fn sensor_name_id(section: usize, sensor: usize) -> iced::widget::Id 
     iced::widget::Id::from(format!("sensor-name-{section}-{sensor}"))
 }
 
+/// Widget id of a section's name field: the clone's focus lands there.
+pub(crate) fn section_name_id(section: usize) -> iced::widget::Id {
+    iced::widget::Id::from(format!("section-name-{section}"))
+}
+
 /// Widget id of one sensor's card: the mini-bar scrolls to it.
 pub(crate) fn sensor_card_id(section: usize, sensor: usize) -> iced::widget::Id {
     iced::widget::Id::from(format!("sensor-card-{section}-{sensor}"))
@@ -500,25 +508,51 @@ pub(crate) fn swatch(color: Color, invalid: bool) -> Element<'static, Message> {
 }
 
 /// Colour input filling its cell, without override controls (see
-/// [`color_control_over`]).
+/// [`color_control_over`]): the palette chips are included.
 pub(crate) fn color_control<'a>(
+    pal: Palette,
     value: &'a str,
     invalid: Option<&'a str>,
-    on_input: impl Fn(String) -> Message + 'a,
+    on_input: impl Fn(String) -> Message + Clone + 'a,
 ) -> Element<'a, Message> {
-    color_control_over(value, invalid, None, on_input, None)
+    color_control_inner(Some(pal), value, invalid, None, on_input, None)
+}
+
+/// Colour input without the palette chips: the colour-rules dialog packs
+/// several fields per card, where a chip strip would double the height.
+pub(crate) fn color_control_plain<'a>(
+    value: &'a str,
+    invalid: Option<&'a str>,
+    on_input: impl Fn(String) -> Message + Clone + 'a,
+) -> Element<'a, Message> {
+    color_control_inner(None, value, invalid, None, on_input, None)
 }
 
 /// Colour input filling its cell: text field, a large alpha-aware swatch
 /// and the colour's alpha percentage. `inherited` fills the placeholder
 /// when the field is empty (the value the bar would use) and `on_reset`
 /// adds the × that drops the override, so the inheritance is visible
-/// instead of being an invisible "empty means default".
+/// instead of being an invisible "empty means default". With a palette
+/// the tones of the bar's own scheme sit below the field as one-click
+/// chips, so matching a colour never means copying a hex value by hand.
 pub(crate) fn color_control_over<'a>(
+    pal: Palette,
     value: &'a str,
     invalid: Option<&'a str>,
     inherited: Option<&'a str>,
-    on_input: impl Fn(String) -> Message + 'a,
+    on_input: impl Fn(String) -> Message + Clone + 'a,
+    on_reset: Option<Message>,
+) -> Element<'a, Message> {
+    color_control_inner(Some(pal), value, invalid, inherited, on_input, on_reset)
+}
+
+/// The colour field itself; `pal` adds the chip strip.
+fn color_control_inner<'a>(
+    pal: Option<Palette>,
+    value: &'a str,
+    invalid: Option<&'a str>,
+    inherited: Option<&'a str>,
+    on_input: impl Fn(String) -> Message + Clone + 'a,
     on_reset: Option<Message>,
 ) -> Element<'a, Message> {
     let error_color = ERROR_RED;
@@ -528,7 +562,7 @@ pub(crate) fn color_control_over<'a>(
     let placeholder = inherited
         .filter(|i| !i.trim().is_empty())
         .unwrap_or("#rrggbb");
-    let field = input(placeholder, value, on_input)
+    let field = input(placeholder, value, on_input.clone())
         .width(Length::Fill)
         .style(move |t: &Theme, status| {
             let mut style = text_input_style(t, status);
@@ -555,13 +589,69 @@ pub(crate) fn color_control_over<'a>(
                 .style(button::secondary),
         );
     }
-    invalid_under(
-        row.spacing(6)
-            .align_y(Alignment::Center)
-            .width(Length::Fill)
-            .into(),
-        invalid,
+    let field = row
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .width(Length::Fill);
+    let chips: Option<Element<'a, Message>> = pal.map(|pal| {
+        let mut row = Row::new().spacing(4).align_y(Alignment::Center);
+        // The card tone is the form's own surface: a chip would be
+        // invisible. The muted text is the useful fifth tone.
+        for tone in [pal.bg, pal.fg, pal.muted, pal.accent, pal.accent_hover] {
+            row = row.push(palette_chip(pal, tone, &color_hex(tone), on_input.clone()));
+        }
+        row.into()
+    });
+    let mut column = Column::new().push(field);
+    if let Some(chips) = chips {
+        column = column.push(chips).spacing(4);
+    }
+    invalid_under(column.width(Length::Fill).into(), invalid)
+}
+
+/// One palette tone as a clickable chip: clicking it writes the hex
+/// value into the field.
+fn palette_chip<'a>(
+    pal: Palette,
+    tone: Color,
+    hex: &str,
+    on_input: impl Fn(String) -> Message + 'a,
+) -> Element<'a, Message> {
+    let hex = hex.to_string();
+    button(
+        Space::new()
+            .width(Length::Fixed(12.0))
+            .height(Length::Fixed(12.0)),
     )
+    .on_press(on_input(hex))
+    .padding(0)
+    .style(move |_t, _s| button::Style {
+        background: Some(Background::Color(tone)),
+        border: Border {
+            width: 1.0,
+            color: pal.card_border,
+            radius: 2.0.into(),
+        },
+        ..button::Style::default()
+    })
+    .into()
+}
+
+/// `#rrggbb` for an opaque colour, `#rrggbbaa` otherwise — the same
+/// forms the config parser accepts.
+fn color_hex(color: Color) -> String {
+    let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    if color.a >= 0.999 {
+        format!("#{:02x}{:02x}{:02x}", channel(color.r), channel(color.g), channel(color.b))
+    } else {
+        format!(
+            "#{:02x}{:02x}{:02x}{:02x}",
+            channel(color.r),
+            channel(color.g),
+            channel(color.b),
+            channel(color.a)
+        )
+    }
 }
 
 /// Slider control without override controls (see [`slider_control_over`]).

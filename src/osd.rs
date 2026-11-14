@@ -1,8 +1,11 @@
-//! The volume/brightness on-screen display: a small centred card that
-//! appears when a reading changes (its own wheel, the volume keys, the
-//! brightness keys) and goes away after a moment. One surface, created
-//! on the first change and closed when it expires — nothing runs while
-//! no value moves.
+//! The volume/brightness on-screen display: a small card that appears
+//! when a reading changes (its own wheel, the volume keys, the brightness
+//! keys) and goes away after a moment. One surface, created on the first
+//! change and closed when it expires — nothing runs while no value moves.
+//!
+//! The same card carries one-off messages (a hot-reloaded config, a shell
+//! action that failed at startup): a toast is the same style without the
+//! progress bar, sized on its own text.
 
 use std::time::{Duration, Instant};
 
@@ -18,6 +21,10 @@ use crate::{popup_style, text_width, Command, Message, Panel};
 
 /// How long the card stays after the last change.
 const LINGER: Duration = Duration::from_millis(1200);
+/// A toast is read once, not watched: it gets twice the time.
+const TOAST_LINGER: Duration = Duration::from_secs(3);
+/// Widest a toast grows before the text is ellipsized.
+const TOAST_MAX_W: u32 = 520;
 /// Same width as the notification popup, so a corner/centre position
 /// lines the two cards up edge to edge.
 /// Card width: the longest label plus a "100%" reading, one gap and the
@@ -36,7 +43,27 @@ fn card_width(panel: &Panel, style: &crate::PopupStyle, padding: u32) -> u32 {
 
 /// Card height: the text line, the bar and the gaps, plus the padding.
 fn card_height(style: &crate::PopupStyle, padding: u32) -> u32 {
-    2 * padding + (style.font_size as f32 * 1.2).ceil() as u32 + 8 + 6
+    2 * padding + line_height(style) + 8 + 6
+}
+
+/// Toast height: the same line box and padding, no bar.
+fn toast_height(style: &crate::PopupStyle, padding: u32) -> u32 {
+    2 * padding + line_height(style) + 4
+}
+
+fn line_height(style: &crate::PopupStyle) -> u32 {
+    (style.font_size as f32 * 1.2).ceil() as u32
+}
+
+/// Toast width: the label, one gap and the (already fitted) message.
+fn toast_width(panel: &Panel, style: &crate::PopupStyle, padding: u32, label: &str, text: &str) -> u32 {
+    let font = panel_font(&panel.config);
+    let width = u32::from(text_width::widest(&font, style.font_size, &[label.to_string()]))
+        + 8
+        + u32::from(text_width::widest(&font, style.font_size, &[text.to_string()]))
+        + 2 * padding
+        + 16;
+    width.clamp(160, TOAST_MAX_W)
 }
 
 pub(crate) struct Osd {
@@ -44,20 +71,66 @@ pub(crate) struct Osd {
     until: Instant,
     label: String,
     text: String,
-    fraction: f32,
+    /// Progress shown by the bar; `None` = a text-only toast.
+    fraction: Option<f32>,
 }
 
-/// Show (or refresh) the card. The surface is created on the first use
-/// and reused while it stays up.
+/// Show (or refresh) the progress card. The surface is created on the
+/// first use and reused while it stays up.
 pub(crate) fn show(panel: &mut Panel, label: &str, text: &str, fraction: f32) -> Command<Message> {
-    let until = Instant::now() + LINGER;
-    if let Some(osd) = panel.osd.as_mut() {
-        osd.until = until;
-        osd.label = label.to_string();
-        osd.text = text.to_string();
-        osd.fraction = fraction.clamp(0.0, 1.0);
-        return Command::none();
+    present(
+        panel,
+        label.to_string(),
+        text.to_string(),
+        Some(fraction.clamp(0.0, 1.0)),
+        LINGER,
+    )
+}
+
+/// Show a short message in the same card, without the progress bar: the
+/// hot-reload answer and a shell action that failed on startup.
+pub(crate) fn toast(panel: &mut Panel, text: &str) -> Command<Message> {
+    let st = popup_style(&panel.config, panel.palette.as_ref());
+    let font = panel_font(&panel.config);
+    let padding = st.padding.max(10);
+    // Fit the message to the widest card before it is measured again.
+    let label = "Piuma";
+    let label_w = u32::from(text_width::widest(&font, st.font_size, &[label.to_string()]));
+    let budget = TOAST_MAX_W
+        .saturating_sub(2 * padding + 16 + label_w + 8)
+        .max(40);
+    let fitted = text_width::fit(&font, st.font_size, &[(text.to_string(), budget)])
+        .pop()
+        .unwrap_or_default();
+    present(panel, label.to_string(), fitted, None, TOAST_LINGER)
+}
+
+/// Show, or refresh, the one OSD surface. A progress card and a toast
+/// have different sizes (the surface is fixed at creation), so switching
+/// kind closes the old surface and opens a fresh one; the same kind just
+/// updates the text.
+fn present(
+    panel: &mut Panel,
+    label: String,
+    text: String,
+    fraction: Option<f32>,
+    linger: Duration,
+) -> Command<Message> {
+    let until = Instant::now() + linger;
+    let same_kind = panel
+        .osd
+        .as_ref()
+        .is_some_and(|osd| osd.fraction.is_some() == fraction.is_some());
+    if same_kind {
+        if let Some(osd) = panel.osd.as_mut() {
+            osd.until = until;
+            osd.label = label;
+            osd.text = text;
+            osd.fraction = fraction;
+            return Command::none();
+        }
     }
+    let close = close(panel);
     // Same screen position as the notification popup (roadmap M4): a
     // configured corner/center, or its auto rule (opposite corner of the
     // bar, right side). The OSD is wider, the anchors and margins are the
@@ -67,8 +140,16 @@ pub(crate) fn show(panel: &mut Panel, label: &str, text: &str, fraction: f32) ->
     // The notification padding can be tiny (4 px); a card with a bar
     // needs a little more air, or the content hugs the border.
     let padding = st.padding.max(10);
+    let (width, height) = if fraction.is_some() {
+        (card_width(panel, &st, padding), card_height(&st, padding))
+    } else {
+        (
+            toast_width(panel, &st, padding, &label, &text),
+            toast_height(&st, padding),
+        )
+    };
     let (id, open) = Message::layershell_open(NewLayerShellSettings {
-        size: LayerSize::px(card_width(panel, &st, padding), card_height(&st, padding)),
+        size: LayerSize::px(width, height),
         layer: Layer::Overlay,
         anchor,
         // No `-1`: the compositor must apply the same reserved strip as
@@ -85,11 +166,11 @@ pub(crate) fn show(panel: &mut Panel, label: &str, text: &str, fraction: f32) ->
     panel.osd = Some(Osd {
         id,
         until,
-        label: label.to_string(),
-        text: text.to_string(),
-        fraction: fraction.clamp(0.0, 1.0),
+        label,
+        text,
+        fraction,
     });
-    open
+    Command::batch([close, open])
 }
 
 /// Close the card once its linger elapsed.
@@ -121,7 +202,7 @@ pub(crate) fn view(panel: &Panel) -> Element<'_, Message> {
     };
     let st = popup_style(&panel.config, panel.palette.as_ref());
     let font = panel_font(&panel.config);
-    let filled = ((osd.fraction * 100.0).round() as u16).max(1);
+    let filled = ((osd.fraction.unwrap_or(0.0) * 100.0).round() as u16).max(1);
     let empty = 100u16.saturating_sub(filled).max(1);
     let track = Row::new()
         .push(
@@ -143,33 +224,33 @@ pub(crate) fn view(panel: &Panel) -> Element<'_, Message> {
                 .height(Length::Fixed(6.0)),
         )
         .width(Length::Fill);
-    container(
-        Column::new()
-            .push(
-                container(
-                    Row::new()
-                        .push(
-                            text(&osd.label)
-                                .size(st.font_size)
-                                .font(font)
-                                .color(st.text),
-                        )
-                        .push(Space::new().width(Length::Fixed(8.0)))
-                        .push(
-                            text(&osd.text)
-                                .size(st.font_size)
-                                .font(font)
-                                .color(st.text),
-                        )
-                        .align_y(Alignment::Center),
-                )
-                .width(Length::Fill)
-                .align_x(Alignment::Center),
+    let mut card = Column::new()
+        .push(
+            container(
+                Row::new()
+                    .push(
+                        text(&osd.label)
+                            .size(st.font_size)
+                            .font(font)
+                            .color(st.text),
+                    )
+                    .push(Space::new().width(Length::Fixed(8.0)))
+                    .push(
+                        text(&osd.text)
+                            .size(st.font_size)
+                            .font(font)
+                            .color(st.text),
+                    )
+                    .align_y(Alignment::Center),
             )
-            .push(track)
-            .spacing(10)
-            .width(Length::Fill),
-    )
+            .width(Length::Fill)
+            .align_x(Alignment::Center),
+        )
+        .width(Length::Fill);
+    if osd.fraction.is_some() {
+        card = card.push(track).spacing(10);
+    }
+    container(card)
     .padding(st.padding.max(10) as f32)
     .width(Length::Fill)
     .height(Length::Fill)

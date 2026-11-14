@@ -7,7 +7,7 @@ use iced::Task;
 
 use crate::autostart;
 use crate::config;
-use crate::controls::{border_live, content_scroll_id, scroll_target, sensor_card_id, sensor_name_id, sorted_rules};
+use crate::controls::{border_live, content_scroll_id, scroll_target, section_name_id, sensor_card_id, sensor_name_id, sorted_rules};
 use crate::modal::{Modal, RuleDraft};
 use crate::view_wallpaper::wallpaper_set;
 use crate::model::*;
@@ -17,9 +17,55 @@ use crate::state::{file_path, list_config_files, sanitize_file_name, Message, Pi
 /// red fields, the section frames and the save guard follow every edit
 /// without needing a save attempt to appear.
 pub(crate) fn update(state: &mut PiumaSetup, message: Message) -> Task<Message> {
+    // Enter confirms only the modal whose primary action is safe; it then
+    // runs the normal confirm path (validation included).
+    if matches!(&message, Message::ModalEnter) {
+        if state.modal.as_ref().is_some_and(Modal::confirms_with_enter) {
+            return update(state, Message::ModalConfirm);
+        }
+        return Task::none();
+    }
+    // Snapshot before a mutating message: undo and redo manage their own
+    // stacks, every other edit is recorded when the model actually moved.
+    let before = if matches!(&message, Message::Undo | Message::Redo) {
+        None
+    } else {
+        state.serialize().ok()
+    };
     let task = update_inner(state, message);
+    if let Some(before) = before {
+        if state.document_loaded {
+            // The message loaded another file: its previous config is not
+            // an undo step of the new document.
+            state.document_loaded = false;
+        } else {
+            state.record_undo(before);
+        }
+    }
     state.refresh_validation();
     task
+}
+
+/// Close the editor window the window manager asked to close; only the
+/// close dialog can produce a pending id.
+fn close_window(state: &mut PiumaSetup) -> Task<Message> {
+    state
+        .pending_close
+        .take()
+        .map(iced::window::close)
+        .unwrap_or_else(Task::none)
+}
+
+/// Restart the running bar with the file on disk (footer action), off the
+/// UI thread.
+fn restart_piuma(state: &mut PiumaSetup) -> Task<Message> {
+    let path = std::fs::canonicalize(file_path(&state.current_file))
+        .unwrap_or_else(|_| file_path(&state.current_file));
+    state.set_status("Reloading Piuma…".to_string(), false);
+    Task::perform(
+        smol::unblock(move || crate::reload::reload(path)),
+        Message::PiumaReloaded,
+    )
 }
 
 fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
@@ -218,9 +264,6 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
         Message::GlassOpacityChanged(value) => {
             glass_mut(&mut state.config).opacity =
                 value.clamp(5, 100) as f32 / 100.0;
-        }
-        Message::AutoHideEnabled(value) => {
-            auto_hide_mut(&mut state.config).enabled = value;
         }
         Message::ScreensaverShow => {
             // The lock works even with the idle trigger off (the sensor
@@ -508,6 +551,7 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                     sensor_index: None,
                     kind: "perc_cpu".to_string(),
                     name: String::new(),
+                    query: String::new(),
                 });
             }
         }
@@ -523,6 +567,7 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                     sensor_index: Some(sensor_index),
                     kind: sensor.source_type.clone(),
                     name: String::new(),
+                    query: String::new(),
                 });
             }
         }
@@ -889,23 +934,13 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
             }
         },
         Message::ReloadPiuma => {
-            // Restarting reads the file: unsaved edits would be ignored,
-            // so ask for a save first instead of silently dropping them.
-            let dirty = state
-                .serialize()
-                .map(|current| current != state.snapshot)
-                .unwrap_or(true);
-            if dirty {
-                state.set_status("Save the configuration before reloading Piuma".to_string(), true);
+            // Restarting reads the file: with unsaved edits the dialog
+            // offers to save them first.
+            if state.is_dirty() {
+                state.modal = Some(Modal::ConfirmReload);
                 return Task::none();
             }
-            let path = std::fs::canonicalize(file_path(&state.current_file))
-                .unwrap_or_else(|_| file_path(&state.current_file));
-            state.set_status("Reloading Piuma…".to_string(), false);
-            return Task::perform(
-                smol::unblock(move || crate::reload::reload(path)),
-                Message::PiumaReloaded,
-            );
+            return restart_piuma(state);
         }
         Message::PiumaReloaded(result) => match result {
             Ok(()) => state.set_status(
@@ -940,6 +975,11 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
             Some(Modal::BrowseIcons { query, .. }) => *query = value,
             _ => {}
         },
+        Message::SensorQueryChanged(value) => {
+            if let Some(Modal::AddSensor { query, .. }) = state.modal.as_mut() {
+                *query = value;
+            }
+        }
         Message::ModalTypeChanged(kind) => {
             let mut retype = None;
             if let Some(Modal::AddSensor { section_index, sensor_index, kind: slot, .. }) =
@@ -1000,10 +1040,42 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                     state.modal = Some(Modal::ConfirmSaveAs(name));
                 }
             }
+            Some(Modal::ConfirmClose) => {
+                let name = state.current_file.clone();
+                if state.save_reporting(&name).is_ok() {
+                    return close_window(state);
+                }
+                // Invalid values replaced the dialog with the field list;
+                // any other failure keeps it up for a retry.
+                if state.validation.is_empty() {
+                    state.modal = Some(Modal::ConfirmClose);
+                }
+            }
+            Some(Modal::ConfirmReload) => {
+                let name = state.current_file.clone();
+                if state.save_reporting(&name).is_ok() {
+                    return restart_piuma(state);
+                }
+                if state.validation.is_empty() {
+                    state.modal = Some(Modal::ConfirmReload);
+                }
+            }
+            Some(Modal::ConfirmLoad(name)) => {
+                if state.load_reporting(&name).is_err() {
+                    state.modal = Some(Modal::LoadFile {
+                        selected: name,
+                        files: list_config_files(),
+                    });
+                }
+            }
+            Some(Modal::ConfirmReset) => state.reset_defaults(),
             Some(Modal::LoadFile { selected, files }) => {
                 if selected.is_empty() {
                     state.set_status("No config file found to load".to_string(), true);
                     state.modal = Some(Modal::LoadFile { selected, files });
+                } else if state.is_dirty() {
+                    // Loading replaces the unsaved edits: ask first.
+                    state.modal = Some(Modal::ConfirmLoad(selected));
                 } else if state.load_reporting(&selected).is_err() {
                     state.modal = Some(Modal::LoadFile { selected, files });
                 }
@@ -1022,7 +1094,7 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                 state.sensors_open.insert((new_index, 0));
                 return operation::snap_to_end(content_scroll_id());
             }
-            Some(Modal::AddSensor { section_index, sensor_index, kind, name }) => {
+            Some(Modal::AddSensor { section_index, sensor_index, kind, name, .. }) => {
                 if let Some(sensor_index) = sensor_index {
                     if let Some(sensor) = state
                         .config
@@ -1160,7 +1232,48 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
             }
             None => {}
         },
-        Message::ModalCancel => state.modal = None,
+        Message::ModalCancel => {
+            state.modal = None;
+            state.pending_close = None;
+        }
+        // Handled by the wrapper before this match: Enter is only a
+        // confirmation alias for the safe modals.
+        Message::ModalEnter => {}
+        Message::WindowCloseRequested(id) => {
+            state.pending_close = Some(id);
+            if state.is_dirty() {
+                state.modal = Some(Modal::ConfirmClose);
+                return Task::none();
+            }
+            return close_window(state);
+        }
+        Message::CloseDiscard => {
+            state.modal = None;
+            return close_window(state);
+        }
+        Message::Undo => {
+            state.undo();
+        }
+        Message::Redo => {
+            state.redo();
+        }
+        Message::SectionDuplicated(index) => {
+            if let Some(new_index) = state.duplicate_section(index) {
+                return operation::focus(section_name_id(new_index));
+            }
+        }
+        Message::SectionFilterChanged(value) => {
+            state.section_filter = value;
+        }
+        Message::JumpToFirstError => {
+            if let Some(path) = state.validation.first().map(|error| error.path.clone()) {
+                if let Some((section, sensor)) = sensor_error_path(&path) {
+                    // The sensor jump also opens its tab, section and card.
+                    return update_inner(state, Message::SensorSelected(section, sensor));
+                }
+                state.active_tab = tab_for_error_path(&path);
+            }
+        }
         Message::ToggleDefaults => state.defaults_expanded = !state.defaults_expanded,
         Message::ToggleSecDefaults => state.sec_defaults_expanded = !state.sec_defaults_expanded,
         Message::ToggleSensorStyle(section, sensor) => {
@@ -1180,15 +1293,45 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
             }
         }
         Message::ResetConfig => {
-            // Reset goes back to the shipped default (the bar's own
-            // first-start config), not the bare built-in model.
-            state.config = PiumaConfig::default();
-            let _ = state.load_from_json(crate::state::SHIPPED_DEFAULT);
-            state.set_status("Configuration reset to defaults".to_string(), false);
+            if state.is_dirty() {
+                state.modal = Some(Modal::ConfirmReset);
+            } else {
+                state.reset_defaults();
+            }
         }
         Message::Status(_) => {}
     }
     Task::none()
+}
+
+/// `panel.sections[i].sensors[j]…` → the sensor the path belongs to.
+pub(crate) fn sensor_error_path(path: &str) -> Option<(usize, usize)> {
+    let rest = path.strip_prefix("panel.sections[")?;
+    let (section, rest) = rest.split_once(']')?;
+    let rest = rest.strip_prefix(".sensors[")?;
+    let (sensor, _) = rest.split_once(']')?;
+    Some((section.parse().ok()?, sensor.parse().ok()?))
+}
+
+/// Tab holding a non-sensor invalid value (the same split the rail
+/// badges use).
+pub(crate) fn tab_for_error_path(path: &str) -> Tab {
+    if path.starts_with("panel.notifications.") {
+        Tab::Notifications
+    } else if path.starts_with("panel.sensor_defaults.") {
+        Tab::SensorDefaults
+    } else if path.starts_with("panel.section_defaults.") {
+        Tab::SectionDefaults
+    } else if path.starts_with("panel.wallpaper.") {
+        Tab::Wallpaper
+    } else if path.starts_with("panel.tweaks.") {
+        Tab::Tweaks
+    } else if path.starts_with("panel.sections[") {
+        // A section field (not a sensor): its card is in Sections.
+        Tab::Sections
+    } else {
+        Tab::Panel
+    }
 }
 
 /// Widget operation behind the mini-bar jump: reads the content

@@ -6,6 +6,7 @@
 //! (the gate lives in `main::icons_theme`).
 
 use iced::Element;
+use crate::config;
 use iced::Length;
 use iced::widget::{image, svg};
 use std::collections::HashMap;
@@ -219,6 +220,33 @@ pub fn icons_per_line(available: u32, slot: u32, gap: u32) -> u16 {
         return 1;
     }
     (available.saturating_add(gap) / slot).clamp(1, u32::from(u16::MAX)) as u16
+}
+
+/// The theme to resolve sensor icons under, or `None` while no sensor of
+/// the config declares one (roadmap N1): the gate keeps the whole icon
+/// machinery — theme parsing, file lookups, cache — dormant otherwise, and
+/// it fires before the first `resolve` even happens. `panel.icon_theme`
+/// wins; without it the tray's GTK rule applies.
+pub(crate) fn icons_theme(config: &config::Config) -> Option<&str> {
+    let declares_icon = config
+        .panel
+        .sections
+        .iter()
+        .flat_map(|section| section.sensors.iter())
+        .any(|sensor| {
+            sensor.icon.is_some()
+                || matches!(
+                    sensor.source,
+                    config::SensorSource::VolumeMeter { .. }
+                        | config::SensorSource::Wifi {}
+                )
+        });
+    if !declares_icon {
+        return None;
+    }
+    // A closure, not the fn item: `unwrap_or_else` would otherwise unify
+    // `T` with the item's `&'static str` and demand `config: 'static`.
+    Some(config.panel.icon_theme.as_deref().unwrap_or_else(|| icon_theme()))
 }
 
 #[cfg(test)]
