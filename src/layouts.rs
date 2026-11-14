@@ -81,6 +81,10 @@ pub struct LayoutState {
     /// Addresses at the last check, to tell a create/close from a mere
     /// workspace move: only the former starts a new window set.
     addresses: HashSet<String>,
+    /// The address of the window that just appeared, when it is the one
+    /// the user opened: the layout restores the focus to it, not to the
+    /// window the workspace move left focused.
+    created: Option<String>,
     /// Whether the last check found a matching layout — the text
     /// between checks (`✓`/`⋯`).
     matched: bool,
@@ -180,7 +184,7 @@ pub fn tick(state: &mut LayoutState, rows: &[WinRow]) -> String {
         state.file = load();
     }
     if let Some(trigger) = arrangement_trigger(state, rows) {
-        if trigger == Trigger::CreatedOrClosed {
+        if trigger != Trigger::WorkspaceOnly {
             // A new window set: the previous apply no longer shields it.
             state.applied_layout = None;
         }
@@ -193,19 +197,20 @@ pub fn tick(state: &mut LayoutState, rows: &[WinRow]) -> String {
                     eprintln!("[piuma] layout applied: {name}");
                     state.applied_flash = Some(Instant::now());
                     state.applied_layout = Some(name.clone());
-                    // The dispatches (moving windows between workspaces
-                    // above all) can pull the focus off the application
-                    // that just opened: remember it before the pass and
-                    // put it back afterwards.
-                    let focus = focus_after_apply(trigger, rows);
+                    // The workspace moves can pull the focus off the
+                    // window the user just opened (B): restore B, not the
+                    // window the moves left focused.
+                    let focus = focus_after_apply(trigger, rows, state.created.as_deref());
                     apply(rows, entries);
                     // A focus dispatch is not free: Hyprland warps the
                     // pointer to the focused window's centre (and steals
                     // focus from an open menu), so only restore when the
-                    // dispatches really moved the focus.
+                    // dispatches really moved the focus. Waited: a
+                    // workspace move after a fire-and-forget focus would
+                    // steal it again.
                     if let Some(address) = focus {
                         if focus_is_needed(&address, hypr::fresh_clients().as_deref()) {
-                            windows::focus(&address);
+                            windows::dispatch_waited(&windows::focus_call(&address));
                         }
                     }
                 }
@@ -229,16 +234,28 @@ fn focus_is_needed(address: &str, current: Option<&[WinRow]>) -> bool {
     })
 }
 
-/// The window to re-focus after a layout pass: only a create/close pass
-/// runs right after an application opened, and the dispatches can leave
-/// it unfocused. A workspace move must not yank the focus back.
-fn focus_after_apply(trigger: Trigger, rows: &[WinRow]) -> Option<String> {
-    if trigger != Trigger::CreatedOrClosed {
-        return None;
+/// The window to re-focus after a layout pass: the window the user just
+/// opened on a create, the current one on a close, none on a workspace
+/// move (which must not yank the focus back). The created address is
+/// known even when the workspace rule already moved the focus elsewhere.
+fn focus_after_apply(
+    trigger: Trigger,
+    rows: &[WinRow],
+    created: Option<&str>,
+) -> Option<String> {
+    let current = || {
+        rows.iter()
+            .find(|row| row.focused)
+            .map(|row| row.address.clone())
+    };
+    match trigger {
+        Trigger::Created => created
+            .filter(|address| rows.iter().any(|row| row.address == *address))
+            .map(str::to_string)
+            .or_else(current),
+        Trigger::Closed => current(),
+        Trigger::WorkspaceOnly => None,
     }
-    rows.iter()
-        .find(|row| row.focused)
-        .map(|row| row.address.clone())
 }
 
 /// What changed since the last check. A create/close starts a new window
@@ -246,7 +263,8 @@ fn focus_after_apply(trigger: Trigger, rows: &[WinRow]) -> Option<String> {
 /// the set, so an already applied layout is not re-applied.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Trigger {
-    CreatedOrClosed,
+    Created,
+    Closed,
     WorkspaceOnly,
 }
 
@@ -266,9 +284,26 @@ fn arrangement_trigger(state: &mut LayoutState, rows: &[WinRow]) -> Option<Trigg
         return None;
     }
     let trigger = if addresses == state.addresses {
+        state.created = None;
         Trigger::WorkspaceOnly
     } else {
-        Trigger::CreatedOrClosed
+        let created: Vec<&String> = addresses.difference(&state.addresses).collect();
+        let closed = state.addresses.difference(&addresses).next().is_some();
+        if closed {
+            // A replaced window set: the previous focus may be gone, so
+            // the current focus is the only safe target.
+            state.created = None;
+            Trigger::Closed
+        } else {
+            // The window the user just opened: prefer one already
+            // focused, otherwise the only created address.
+            state.created = rows
+                .iter()
+                .find(|r| r.focused && created.contains(&&r.address))
+                .map(|r| r.address.clone())
+                .or_else(|| (created.len() == 1).then(|| created[0].to_string()));
+            Trigger::Created
+        }
     };
     state.addresses = addresses;
     state.arrangement = arrangement;
@@ -727,24 +762,46 @@ mod tests {
         }
     }
 
-    /// A layout pass caused by a window create/close restores the focus
-    /// the dispatches may have stolen (the app that just opened); a
-    /// workspace move keeps the user's current focus.
+    /// A create pass restores the focus to the window the user just
+    /// opened, even when the workspace move left another one focused; a
+    /// close keeps the current focus, a workspace move changes nothing.
     #[test]
-    fn focus_is_restored_only_after_a_created_window_set() {
-        let mut opened = row("0xA", "kitty", "shell", "1", false);
-        opened.focused = true;
-        let other = row("0xB", "vivaldi", "web", "1", false);
+    fn focus_returns_to_the_created_window() {
+        let mut other = row("0xA", "kitty", "shell", "1", false);
+        other.focused = true;
+        let mut opened = row("0xB", "vivaldi", "web", "1", false);
         assert_eq!(
-            focus_after_apply(Trigger::CreatedOrClosed, &[other.clone(), opened.clone()]),
+            focus_after_apply(
+                Trigger::Created,
+                &[other.clone(), opened.clone()],
+                Some("0xB")
+            ),
+            Some("0xB".to_string()),
+            "the created window is the target, not the focused one"
+        );
+        opened.focused = true;
+        assert_eq!(
+            focus_after_apply(
+                Trigger::Created,
+                &[other.clone(), opened.clone()],
+                Some("0xB")
+            ),
+            Some("0xB".to_string())
+        );
+        assert_eq!(
+            focus_after_apply(Trigger::Created, &[other.clone()], Some("0xB")),
+            Some("0xA".to_string()),
+            "a vanished target falls back to the current focus"
+        );
+        assert_eq!(
+            focus_after_apply(Trigger::Closed, &[other.clone()], None),
             Some("0xA".to_string())
         );
         assert_eq!(
-            focus_after_apply(Trigger::WorkspaceOnly, &[opened.clone()]),
+            focus_after_apply(Trigger::WorkspaceOnly, &[other], None),
             None,
             "a workspace move must not yank the focus back"
         );
-        assert_eq!(focus_after_apply(Trigger::CreatedOrClosed, &[other]), None);
     }
 
     /// The restore dispatch is skipped when nobody else stole the focus:
@@ -793,7 +850,7 @@ mod tests {
         let a = row("0xA", "kitty", "shell", "1", false);
         assert_eq!(
             arrangement_trigger(&mut state, std::slice::from_ref(&a)),
-            Some(Trigger::CreatedOrClosed),
+            Some(Trigger::Created),
             "the first set is a change"
         );
         assert_eq!(arrangement_trigger(&mut state, std::slice::from_ref(&a)), None, "same windows: no check");
@@ -807,14 +864,20 @@ mod tests {
         let b = row("0xB", "firefox", "Home", "1", false);
         assert_eq!(
             arrangement_trigger(&mut state, &[a.clone(), b.clone()]),
-            Some(Trigger::CreatedOrClosed),
+            Some(Trigger::Created),
             "a new window is an event"
         );
         assert_eq!(
+            state.created.as_deref(),
+            Some("0xB"),
+            "the created address is remembered"
+        );
+        assert_eq!(
             arrangement_trigger(&mut state, std::slice::from_ref(&b)),
-            Some(Trigger::CreatedOrClosed),
+            Some(Trigger::Closed),
             "a closed window is an event"
         );
+        assert_eq!(state.created, None, "a close has no created address");
         assert_eq!(arrangement_trigger(&mut state, &[b]), None, "same set again: quiet");
     }
 

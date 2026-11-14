@@ -421,6 +421,9 @@ pub(crate) struct Panel {
     pub(crate) last_cursor: Option<(f32, f32)>,
     /// Popup stack window (F3): its id while open, `None` while hidden.
     pub(crate) popup: Option<iced::window::Id>,
+    /// Popups sliding out: their state was cleared, the window keeps
+    /// rendering this ghost until the close animation ends.
+    pub(crate) closing: Vec<(iced::window::Id, popup_anim::Ghost)>,
     /// Card count the popup surface is currently sized for.
     pub(crate) popup_cards: usize,
     /// Card under the cursor (`hover_*` style fields), `None` outside.
@@ -704,8 +707,11 @@ pub(crate) enum Message {
     /// One animation frame while a value effect is alive: only prunes
     /// expired effects; the view computes their progress.
     EffectFrame,
-    /// One frame of a popup's open slide (see `popup_anim`).
+    /// One frame of a popup's slide (see `popup_anim`).
     PopupFrame,
+    /// A popup's close slide finished: destroy its surface and drop the
+    /// ghost.
+    PopupClosed(iced::window::Id),
     /// The tick's data pass finished on a worker thread: the config
     /// generation it read against (a reply from an older config is
     /// dropped, see `spawn_read`) and every sensor's reading.
@@ -1038,6 +1044,14 @@ pub(crate) fn border_bar(color: Color, width: Length, height: Length) -> Element
             ..ContainerStyle::default()
         })
         .into()
+}
+
+/// The line box of bar text, rounded to an even whole number of pixels.
+/// The renderer floors the text origin and rounds the baseline onto the
+/// pixel grid, so a fractional line height (11 px × 1.2 = 13.2) drags the
+/// ink a pixel off the box centre; an even box stays on the grid.
+pub(crate) fn bar_line_height(font_size: u32) -> f32 {
+    (font_size as f32 * 0.6).round().max(1.0) * 2.0
 }
 
 /// Build a styled box: background plus its border, drawn according to
@@ -1592,12 +1606,16 @@ fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<Command<Mess
     // on stale coordinates and, after the cursor rests on another
     // application's window, no event ever arrives again.
     if let Some(gp) = reap_abandoned_popup(panel) {
-        cmds.push(iced::window::close(gp.id));
+        cmds.push(popup_anim::close(panel, gp.id, popup_anim::Ghost::Graph(gp)));
     }
     // The calendar popup's three-second grace runs on the same
     // pass: neither sensor nor surface under the cursor spends it.
     if let Some(cp) = reap_abandoned_calendar(panel) {
-        cmds.push(iced::window::close(cp.id));
+        cmds.push(popup_anim::close(
+            panel,
+            cp.id,
+            popup_anim::Ghost::Calendar(cp),
+        ));
     }
     // The popup follows the active set (and re-anchors with the bar
     // on a geometry change) — one place drives its window.
@@ -1810,10 +1828,18 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
                 panel.volume_drag = None;
                 panel.value_effects.clear();
                 if let Some(gp) = panel.graph_popup.take() {
-                    cmds.push(iced::window::close(gp.id));
+                    cmds.push(popup_anim::close(
+                        panel,
+                        gp.id,
+                        popup_anim::Ghost::Graph(gp),
+                    ));
                 }
                 if let Some(cp) = panel.calendar.take() {
-                    cmds.push(iced::window::close(cp.id));
+                    cmds.push(popup_anim::close(
+                        panel,
+                        cp.id,
+                        popup_anim::Ghost::Calendar(cp),
+                    ));
                 }
             }
             // The popup follows the active set (and re-anchors with the
@@ -2042,9 +2068,13 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
                     .iter()
                     .any(|i| i.bus == menu.bus && i.path == menu.path);
                 if !alive {
-                    let (id, _) = panel.tray_menu.take().unwrap();
+                    let (id, menu) = panel.tray_menu.take().unwrap();
                     panel.tray_menu_hover = None;
-                    cmds.push(iced::window::close(id));
+                    cmds.push(popup_anim::close(
+                        panel,
+                        id,
+                        popup_anim::Ghost::Tray(menu),
+                    ));
                 }
             }
             // Only the tray sensors change with the items — a full
@@ -2101,16 +2131,16 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             // in menu mode just toggles it (reopen-on-the-next-press).
             if let Some((id, menu)) = panel.tray_menu.take() {
                 panel.tray_menu_hover = None;
-                cmds.push(iced::window::close(id));
-                if menu.bus == bus
+                let same = menu.bus == bus
                     && menu.path == path
-                    && target == tray::ClickTarget::Menu
-                {
-                    return if cmds.is_empty() {
-                        Command::none()
-                    } else {
-                        Command::batch(cmds)
-                    };
+                    && target == tray::ClickTarget::Menu;
+                cmds.push(popup_anim::close(
+                    panel,
+                    id,
+                    popup_anim::Ghost::Tray(menu),
+                ));
+                if same {
+                    return Command::batch(cmds);
                 }
             }
             match target {
@@ -2238,7 +2268,7 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             if let Some((id, menu)) = panel.tray_menu.take() {
                 panel.tray_menu_hover = None;
                 dbusmenu::spawn_event(&menu.bus, &menu.menu_path, entry_id);
-                iced::window::close(id)
+                popup_anim::close(panel, id, popup_anim::Ghost::Tray(menu))
             } else {
                 Command::none()
             }
@@ -2284,9 +2314,9 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
         Message::TrayMenuClosed => {
             // The surface only exists with its state (and a press
             // already bumps the generation before this can fire).
-            if let Some((id, _)) = panel.tray_menu.take() {
+            if let Some((id, menu)) = panel.tray_menu.take() {
                 panel.tray_menu_hover = None;
-                iced::window::close(id)
+                popup_anim::close(panel, id, popup_anim::Ghost::Tray(menu))
             } else {
                 Command::none()
             }
@@ -2559,9 +2589,9 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
         Message::NotifListClicked(id) => {
             // A row runs its notification's spec `default` action (the
             // sensor's old click) and the popup closes with it.
-            if let Some((win, _)) = panel.notif_list.take() {
+            if let Some((win, state)) = panel.notif_list.take() {
                 notifications::invoke_id(id);
-                return iced::window::close(win);
+                return popup_anim::close(panel, win, popup_anim::Ghost::NotifList(state));
             }
             Command::none()
         }
@@ -2582,7 +2612,11 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             let mut cmds: Vec<Command<Message>> = Vec::new();
             if let Some((id, _)) = panel.taskbar_menu.take() {
                 panel.taskbar_menu_hover = None;
-                cmds.push(iced::window::close(id));
+                cmds.push(popup_anim::close(
+                    panel,
+                    id,
+                    popup_anim::Ghost::Taskbar,
+                ));
             }
             let Some(at) = tray::cursor_output_point(panel) else {
                 return if cmds.is_empty() {
@@ -2633,7 +2667,7 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             if let Some((id, menu)) = panel.taskbar_menu.take() {
                 panel.taskbar_menu_hover = None;
                 windows::move_to_workspace(&menu.address, workspace);
-                return iced::window::close(id);
+                return popup_anim::close(panel, id, popup_anim::Ghost::Taskbar);
             }
             Command::none()
         }
@@ -2643,7 +2677,7 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             if let Some((id, menu)) = panel.taskbar_menu.take() {
                 panel.taskbar_menu_hover = None;
                 window_menu::run(action, &menu.address, menu.floating, menu.pinned);
-                return iced::window::close(id);
+                return popup_anim::close(panel, id, popup_anim::Ghost::Taskbar);
             }
             Command::none()
         }
@@ -2677,6 +2711,10 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
         }
         Message::WindowMenuFrame => window_menu::frame(panel),
         Message::PopupFrame => popup_anim::frame(),
+        Message::PopupClosed(id) => {
+            panel.closing.retain(|(window, _)| *window != id);
+            iced::window::close(id)
+        }
         Message::WindowMenuIdle(idled) => window_menu::idle(panel, idled),
         Message::TaskbarMenuHover(row) => {
             panel.taskbar_menu_hover = row;
@@ -2708,7 +2746,7 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
         Message::TaskbarMenuClosed => {
             if let Some((id, _)) = panel.taskbar_menu.take() {
                 panel.taskbar_menu_hover = None;
-                return iced::window::close(id);
+                return popup_anim::close(panel, id, popup_anim::Ghost::Taskbar);
             }
             Command::none()
         }
@@ -2815,10 +2853,18 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             // popups go with it, and a stale hover is cleared.
             let mut cmds = Vec::new();
             if let Some(gp) = panel.graph_popup.take_if(|gp| gp.section == index) {
-                cmds.push(iced::window::close(gp.id));
+                cmds.push(popup_anim::close(
+                    panel,
+                    gp.id,
+                    popup_anim::Ghost::Graph(gp),
+                ));
             }
             if let Some(cp) = panel.calendar.take_if(|cp| cp.section == index) {
-                cmds.push(iced::window::close(cp.id));
+                cmds.push(popup_anim::close(
+                    panel,
+                    cp.id,
+                    popup_anim::Ghost::Calendar(cp),
+                ));
             }
             if panel.hovered.is_some_and(|(section, _)| section == index) {
                 panel.hovered = None;
@@ -2981,7 +3027,7 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             }
             if let Some(gp) = panel.graph_popup.take() {
                 eprintln!("[piuma] graph: close (pointer left the popup)");
-                iced::window::close(gp.id)
+                popup_anim::close(panel, gp.id, popup_anim::Ghost::Graph(gp))
             } else {
                 Command::none()
             }
@@ -3152,6 +3198,9 @@ fn bar_view<'a>(
     }
     if panel.corners.iter().any(|(_, id)| *id == window) {
         return corners_view(panel, window);
+    }
+    if let Some((_, ghost)) = panel.closing.iter().find(|(id, _)| *id == window) {
+        return popup_anim::ghost_view(panel, ghost);
     }
     if let Some((id, _)) = panel.tray_menu.as_ref() {
         if *id == window {
@@ -3370,11 +3419,13 @@ fn bar_view<'a>(
             let value_color = effect_progress
                 .map(|t| effects::fade(text_color, t))
                 .unwrap_or(text_color);
+            let line_height =
+                iced::widget::text::LineHeight::Absolute(bar_line_height(font_size).into());
             let value_text = text(&s.value)
                 .color(value_color)
                 .size(font_size)
                 .font(value_font_obj)
-                .line_height(iced::widget::text::LineHeight::Relative(1.2));
+                .line_height(line_height);
             let effect_value = s.effect
                 && matches!(value_effect, effects::UNDERLINE | effects::SHEEN);
             let value_width = if effect_value {
@@ -3394,7 +3445,7 @@ fn bar_view<'a>(
                 effects::underline(
                     value_text.into(),
                     value_width,
-                    (font_size as f32 * 1.2).max(1.0),
+                    bar_line_height(font_size),
                     text_color,
                     effect_progress,
                 )
@@ -3402,7 +3453,7 @@ fn bar_view<'a>(
                 effects::sheen(
                     value_text.into(),
                     value_width,
-                    (font_size as f32 * 1.2).max(1.0),
+                    bar_line_height(font_size),
                     text_color,
                     effect_progress,
                 )
@@ -3593,7 +3644,7 @@ fn bar_view<'a>(
                         .color(text_color)
                         .size(font_size)
                         .font(font_obj)
-                        .line_height(iced::widget::text::LineHeight::Relative(1.2));
+                        .line_height(line_height);
                     if vertical {
                         let mut col = Column::new().push(name_text);
                         if show_value {
@@ -3617,11 +3668,14 @@ fn bar_view<'a>(
             let desc_value = desc_str.clone();
 
             let content: Element<'a, Message> = if has_desc {
+                let desc_size = font_size.saturating_sub(2);
                 let desc_widget = text(desc_value)
                     .color(Color::from_rgba(0.5, 0.5, 0.5, 0.7))
-                    .size(font_size.saturating_sub(2))
+                    .size(desc_size)
                     .font(font_obj)
-                    .line_height(iced::widget::text::LineHeight::Relative(1.2));
+                    .line_height(iced::widget::text::LineHeight::Absolute(
+                        bar_line_height(desc_size).into(),
+                    ));
                 Column::new().push(main).push(desc_widget).into()
             } else {
                 main
@@ -3706,12 +3760,15 @@ fn bar_view<'a>(
         // The section title, in both orientations: above the stacked
         // column, leading the horizontal row (a thin bar has room only
         // sideways). Hidden by an empty name or `panel.section_title`.
+        let title_size = font_size.saturating_add(2);
         let title_el: Element<'a, Message> = container(
             text(section.name.clone())
                 .color(title_color)
-                .size(font_size.saturating_add(2))
+                .size(title_size)
                 .font(font_obj)
-                .line_height(iced::widget::text::LineHeight::Relative(1.2)),
+                .line_height(iced::widget::text::LineHeight::Absolute(
+                    bar_line_height(title_size).into(),
+                )),
         )
         .align_x(Alignment::Center)
         .padding(content_pad)
@@ -4487,6 +4544,7 @@ fn main() -> Result<(), iced_exwlshell::Error> {
                         last_exclusive_zone: zone,
                         last_cursor: None,
                         popup: None,
+                        closing: Vec::new(),
                         popup_cards: 0,
                         popup_hover: None,
                         notif_scroll: HashMap::new(),
@@ -4731,11 +4789,27 @@ fn parse_config_arg() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        config, cursor_in_rect, focused_output_in, hover_is_fresh, icons_theme,
-        monitor_names_json, palette, popup_card_h, popup_style, screen_size_in,
-        setup_binary_path, start_mode_for, HoverGate, PopupStyle, StartMode, HOVER_MOTION_GRACE,
+        bar_line_height, config, cursor_in_rect, focused_output_in, hover_is_fresh,
+        icons_theme, monitor_names_json, palette, popup_card_h, popup_style,
+        screen_size_in, setup_binary_path, start_mode_for, HoverGate, PopupStyle,
+        StartMode, HOVER_MOTION_GRACE,
     };
     use std::time::Instant;
+
+    /// The bar text keeps an even whole-pixel line box (the renderer floors
+    /// the origin and rounds the baseline, so a fractional box loses a
+    /// pixel of the vertical centring) and stays close to 1.2 × the size.
+    #[test]
+    fn bar_line_height_is_an_even_whole_pixel() {
+        for size in 8..=32u32 {
+            let height = bar_line_height(size);
+            assert_eq!(height % 2.0, 0.0, "size {size}: {height}");
+            assert!(
+                (height - size as f32 * 1.2).abs() <= 1.0,
+                "size {size}: {height}"
+            );
+        }
+    }
 
     /// `panel.output` selects the monitor: the size must be that output's,
     /// with the focused monitor as the fallback.

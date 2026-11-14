@@ -3,7 +3,7 @@
 
 use crate::dbusmenu;
 use crate::text_width;
-use crate::{corner_radius, panel_font, popup_style, styled_box, DEFAULT_FONT_SIZE};
+use crate::{corner_radius, panel_font, popup_style, styled_box, DEFAULT_FONT_SIZE, TrayMenu};
 use crate::{Message, Panel};
 use iced::font::Font;
 use iced::widget::container::Style as ContainerStyle;
@@ -168,6 +168,15 @@ pub(crate) fn tray_menu_view(panel: &Panel) -> Element<'_, Message> {
             .height(Length::Fill)
             .into();
     };
+    tray_menu_view_with(panel, menu)
+}
+
+/// The menu view for a given state: a closing popup's ghost owns the
+/// menu data after the live state has been cleared.
+pub(crate) fn tray_menu_view_with<'a>(
+    panel: &'a Panel,
+    menu: &'a TrayMenu,
+) -> Element<'a, Message> {
     let st = popup_style(&panel.config, panel.palette.as_ref());
     let font = panel_font(&panel.config);
     let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
@@ -384,6 +393,12 @@ pub(crate) fn taskbar_menu_view(panel: &Panel) -> Element<'_, Message> {
             .height(Length::Fill)
             .into();
     }
+    taskbar_menu_view_with(panel)
+}
+
+/// The menu view for a closing ghost: the rows come from the taskbar,
+/// not from the (already taken) menu state.
+pub(crate) fn taskbar_menu_view_with(panel: &Panel) -> Element<'_, Message> {
     let st = popup_style(&panel.config, panel.palette.as_ref());
     let font = panel_font(&panel.config);
     let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);

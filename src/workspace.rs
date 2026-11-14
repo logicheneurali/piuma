@@ -115,7 +115,9 @@ pub fn row<'a>(
                     .color(fg)
                     .size(font_size)
                     .font(font)
-                    .line_height(iced::widget::text::LineHeight::Relative(1.2))
+                    .line_height(iced::widget::text::LineHeight::Absolute(
+                        crate::bar_line_height(font_size).into(),
+                    ))
                     .into(),
                 bg,
                 style.border_color,

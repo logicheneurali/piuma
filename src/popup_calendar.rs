@@ -71,7 +71,11 @@ pub(crate) fn calendar_hover_sync(
     // Crossing between two calendar sensors: the old surface dies with
     // its own leave events too, but closing here keeps the order definite.
     if let Some(old) = panel.calendar.take() {
-        cmds.push(iced::window::close(old.id));
+        cmds.push(crate::popup_anim::close(
+            panel,
+            old.id,
+            crate::popup_anim::Ghost::Calendar(old),
+        ));
     }
     let weekdays = calendar::weekday_labels();
     let (w, h) = calendar_size(&panel.config, &weekdays);

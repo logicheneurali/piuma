@@ -100,7 +100,11 @@ pub(crate) fn graph_hover_sync(
         if showing && !cursor_in_graph_popup(panel) {
             let gp = panel.graph_popup.take().expect("showing");
             eprintln!("[piuma] graph: close (sensor left, cursor off the popup)");
-            return iced::window::close(gp.id);
+            return crate::popup_anim::close(
+                panel,
+                gp.id,
+                crate::popup_anim::Ghost::Graph(gp),
+            );
         }
         if showing {
             eprintln!("[piuma] graph: keep (sensor left, cursor still on the popup)");
@@ -128,7 +132,11 @@ pub(crate) fn graph_hover_sync(
     // Crossing between two graph sensors: the old surface dies with its
     // own leave events too, but closing here keeps the order definite.
     if let Some(old) = panel.graph_popup.take() {
-        cmds.push(iced::window::close(old.id));
+        cmds.push(crate::popup_anim::close(
+            panel,
+            old.id,
+            crate::popup_anim::Ghost::Graph(old),
+        ));
     }
     let Some((x, y)) = tray::cursor_output_point(panel) else {
         // The enter can beat the first CursorMoved event (nothing moved

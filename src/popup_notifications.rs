@@ -59,7 +59,11 @@ pub(crate) fn sync_popup(panel: &mut Panel, reposition: bool) -> Option<Command<
             panel.popup = None;
             panel.popup_cards = 0;
             panel.popup_hover = None;
-            Some(iced::window::close(id))
+            Some(crate::popup_anim::close(
+                panel,
+                id,
+                crate::popup_anim::Ghost::NotifCards,
+            ))
         }
         (None, n) => {
             let (anchor, margin) = popup_placement(&panel.config);
@@ -448,8 +452,12 @@ pub(crate) fn notif_list_size(
 /// corner with the newest entries — nothing to reread → nothing to
 /// open.
 pub(crate) fn toggle_notif_list(panel: &mut Panel) -> Command<Message> {
-    if let Some((id, _)) = panel.notif_list.take() {
-        return iced::window::close(id);
+    if let Some((id, state)) = panel.notif_list.take() {
+        return crate::popup_anim::close(
+            panel,
+            id,
+            crate::popup_anim::Ghost::NotifList(state),
+        );
     }
     let rows = notifications::history_rows(NOTIF_LIST_MAX);
     if rows.is_empty() {
@@ -489,6 +497,15 @@ pub(crate) fn notif_list_view(panel: &Panel) -> Element<'_, Message> {
             .height(Length::Fill)
             .into();
     };
+    notif_list_view_with(panel, state)
+}
+
+/// The list view for a closing ghost: the offset comes from the taken
+/// state, the rows from the shared history.
+pub(crate) fn notif_list_view_with<'a>(
+    panel: &'a Panel,
+    state: &'a NotifList,
+) -> Element<'a, Message> {
     let st = popup_style(&panel.config, panel.palette.as_ref());
     let font = panel_font(&panel.config);
     let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
