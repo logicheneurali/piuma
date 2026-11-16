@@ -239,6 +239,13 @@ pub fn font_icon_edge(font: u32, padding: u32) -> u16 {
     (font + 2 + 2 * padding).clamp(20, 48) as u16
 }
 
+/// The edge icons draw at: `auto` is the layout's own fit, while an
+/// explicit `panel.icon_size` wins only when it fits — the row cannot
+/// be outgrown, so a too-large value behaves like auto.
+pub fn icon_edge(requested: Option<u32>, auto: u16) -> u16 {
+    requested.map_or(auto, |px| px.min(u32::from(auto)) as u16)
+}
+
 /// How many icon slots of `slot` px with `gap` px between them fit on
 /// one line of `available` px: the wrap width the tray and taskbar rows
 /// chunk on, so their flow turns to the next line inside the box (iced
@@ -347,6 +354,16 @@ mod tests {
         assert_eq!(row_icon_target(400, 4, 0, 0), 48);
         // A narrow side bar spends less inset: a 28 px panel leaves 24.
         assert_eq!(row_icon_target(28, 2, 0, 0), 24);
+    }
+
+    /// `panel.icon_size`: absent = the layout's fit; a value smaller
+    /// than the fit wins; a larger one cannot outgrow the row.
+    #[test]
+    fn icon_edge_honours_the_override_within_the_row() {
+        assert_eq!(icon_edge(None, 16), 16);
+        assert_eq!(icon_edge(Some(12), 16), 12);
+        assert_eq!(icon_edge(Some(16), 16), 16);
+        assert_eq!(icon_edge(Some(40), 16), 16, "capped by the row");
     }
 
     /// The title term applies only to a vertical layout with a name to

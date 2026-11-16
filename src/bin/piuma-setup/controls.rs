@@ -106,7 +106,14 @@ pub(crate) fn sensor_icon_size(cfg: &PiumaConfig, section: &Section, _sensor: &S
     };
     // The bar spends no vertical padding on the row (padding is horizontal
     // only), so the icon gets the full height there; the preview mirrors it.
-    icons::row_icon_target(thickness, u32::from(icons::SECTION_CONTENT_PAD), title_extra, 0)
+    // `panel.icon_size`, when set, overrides that fit (never past it).
+    let auto = icons::row_icon_target(
+        thickness,
+        u32::from(icons::SECTION_CONTENT_PAD),
+        title_extra,
+        0,
+    );
+    icons::icon_edge(cfg.icon_size, auto)
 }
 
 /// The themed icon widget at the sensor row's size, or `None` when the

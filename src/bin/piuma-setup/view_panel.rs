@@ -1,13 +1,12 @@
 //! Panel tab: the panel-wide card (font, palette, wallpaper and autostart
 //! shortcuts) and the notifications card styling the popup.
-use iced::widget::{button, column, container, scrollable, text, toggler, Column, Row, Slider};
+use iced::widget::{button, column, container, text, toggler, Column, Row, Slider};
 use iced::{Element, Length};
 
 use crate::controls::{
     align_row, anchor_grid, border_type_options, color_control, color_control_over, font_families,
-    form_grid, icon_theme_options, input, invalid_under, monitor_outputs, notif_position_grid,
-    options_with_current, picklist, slider_control, theme_cell, DEFAULT_OPTION,
-    SYSTEM_ICON_THEME,
+    form_grid, input, invalid_under, monitor_outputs, notif_position_grid,
+    options_with_current, picklist, slider_control, DEFAULT_OPTION,
 };
 use crate::style::*;
 use crate::state::{Message, PiumaSetup};
@@ -27,6 +26,15 @@ pub(crate) fn panel_settings(state: &PiumaSetup) -> Element<'_, Message> {
     // Font Size / Thickness keep their u32 sliders inline: a shared generic
     // slider helper would need `num_traits` bounds, which this binary doesn't depend on.
     let fields = vec![
+        // Autostart lives in its own tab now (roadmap2 #2).
+        ("App Theme", toggler(state.config.app_theme.unwrap_or(false))
+            .label("Generate GTK theme")
+            .on_toggle(Message::AppThemeChanged)
+            .into()),
+        ("Theme", invalid_under(
+            theme_control(pal, state.config.theme_mode.as_deref().unwrap_or("dark")),
+            state.field_err("panel.theme_mode"),
+        )),
         (
             "Font",
             font_cell(state.config.font.as_deref().unwrap_or("")),
@@ -43,11 +51,6 @@ pub(crate) fn panel_settings(state: &PiumaSetup) -> Element<'_, Message> {
         ("Bold", toggler(state.config.bold.unwrap_or(false))
             .label("Bold text")
             .on_toggle(Message::BoldChanged)
-            .into()),
-        // Autostart lives in its own tab now (roadmap2 #2).
-        ("App Theme", toggler(state.config.app_theme.unwrap_or(false))
-            .label("Generate GTK theme")
-            .on_toggle(Message::AppThemeChanged)
             .into()),
         ("Thickness", invalid_under(
             Row::new()
@@ -81,10 +84,6 @@ pub(crate) fn panel_settings(state: &PiumaSetup) -> Element<'_, Message> {
             .width(Length::Fill)
             .into(),
             state.field_err("panel.value_effect"),
-        )),
-        ("Theme", invalid_under(
-            theme_control(pal, state.config.theme_mode.as_deref().unwrap_or("dark")),
-            state.field_err("panel.theme_mode"),
         )),
         ("Default BG", color_control_over(pal,
             state.config.default_bg_color.as_deref().unwrap_or(""),
@@ -124,7 +123,6 @@ pub(crate) fn panel_settings(state: &PiumaSetup) -> Element<'_, Message> {
             text("Panel Settings").size(16).style(fg_text(pal)),
             form_grid(fields),
             additional_panels(state),
-            icon_theme_grid(state),
         ]
         .spacing(10)
         .width(Length::Fill),
@@ -309,51 +307,6 @@ fn theme_control<'a>(pal: Palette, current: &str) -> Element<'a, Message> {
         );
     }
     row.into()
-}
-
-/// Icon themes as a 3×3-visible grid of cells previewing three sample
-/// icons in that theme; the rest scrolls.
-fn icon_theme_grid(state: &PiumaSetup) -> Element<'_, Message> {
-    use crate::icons;
-
-    let pal = palette(&state.config);
-    let current = state.config.icon_theme.as_deref().unwrap_or("");
-    let mut options: Vec<Option<String>> = vec![None];
-    options.extend(
-        icon_theme_options(state.config.icon_theme.as_deref())
-            .into_iter()
-            .filter(|theme| theme != SYSTEM_ICON_THEME)
-            .map(Some),
-    );
-    let mut grid = column![].spacing(6).width(Length::Fill);
-    let mut row = Row::new().spacing(6).width(Length::Fill);
-    let mut count = 0;
-    for option in options {
-        let label = option.clone().unwrap_or_else(|| {
-            format!("{SYSTEM_ICON_THEME} ({})", icons::icon_theme())
-        });
-        let selected = option.as_deref().unwrap_or("") == current;
-        row = row.push(theme_cell(pal, option.as_deref(), &label, selected));
-        count += 1;
-        if count % 3 == 0 {
-            grid = grid.push(row);
-            row = Row::new().spacing(6).width(Length::Fill);
-        }
-    }
-    if count % 3 != 0 {
-        grid = grid.push(row);
-    }
-    column![
-        text("Icon Theme").size(12).style(fg_text(pal)),
-        text("Three sample icons per theme, three rows visible — scroll for the rest.")
-            .size(10)
-            .style(muted_text(pal)),
-        scrollable(grid)
-            .height(Length::Fixed(200.0))
-            .width(Length::Fill),
-    ]
-    .spacing(6)
-    .into()
 }
 
 /// The `panel.notifications` editor: the enable toggle is the block's

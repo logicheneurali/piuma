@@ -53,6 +53,7 @@ mod update;
 mod view;
 mod view_layouts;
 mod view_panel;
+mod view_icons;
 mod view_sections;
 mod view_tweaks;
 mod view_themes;

@@ -450,8 +450,9 @@ pub(crate) fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<C
 /// whole row, the view draws these boxes without the cross-axis inset).
 /// One number — the smallest fit across every tray and taskbar sensor —
 /// is written to both rows, so tray and taskbar icons are always the same
-/// size in both orientations. With no such sensor at all the target is
-/// left alone.
+/// size in both orientations. `panel.icon_size` replaces that auto fit
+/// when set (still capped by the row). With no such sensor at all the
+/// target is left alone.
 pub(crate) fn update_icon_targets(panel: &Panel) {
     let thickness = panel_thickness(&panel.config);
     let font = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
@@ -471,9 +472,10 @@ pub(crate) fn update_icon_targets(panel: &Panel) {
             if sensor.tray.is_none() && sensor.taskbar.is_none() {
                 continue;
             }
-            let edge = icons::font_icon_edge(font, u32::from(sensor.padding)).min(
+            let auto = icons::font_icon_edge(font, u32::from(sensor.padding)).min(
                 icons::row_icon_target(thickness, u32::from(room.pad), room.title_extra, 0),
             );
+            let edge = icons::icon_edge(panel.config.panel.icon_size, auto);
             shared = Some(shared.map_or(edge, |m| m.min(edge)));
         }
     }

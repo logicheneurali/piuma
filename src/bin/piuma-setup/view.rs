@@ -11,6 +11,7 @@ use crate::modal::modal_overlay;
 use crate::preview;
 use crate::style::*;
 use crate::view_layouts::*;
+use crate::view_icons::*;
 use crate::view_panel::*;
 use crate::view_sections::*;
 use crate::view_tweaks::*;
@@ -76,6 +77,7 @@ fn active_card(state: &PiumaSetup) -> Element<'_, Message> {
         Tab::SensorDefaults => sensor_defaults_view(state),
         Tab::SectionDefaults => section_defaults_view(state),
         Tab::Sections => sections_list(state),
+        Tab::Icons => icons_settings(state),
         Tab::Wallpaper => wallpaper_settings(state),
         Tab::Themes => themes_settings(state),
         Tab::AutostartApps => autostart_apps_settings(state),
@@ -192,6 +194,7 @@ fn tab_error_count(state: &PiumaSetup, tab: Tab) -> usize {
         Tab::SensorDefaults => under("panel.sensor_defaults."),
         Tab::SectionDefaults => under("panel.section_defaults."),
         Tab::Wallpaper => under("panel.wallpaper."),
+        Tab::Icons => under("panel.icon_size"),
         // Panel keeps the remaining panel-level fields.
         Tab::Panel => state
             .validation
@@ -202,6 +205,7 @@ fn tab_error_count(state: &PiumaSetup, tab: Tab) -> usize {
                     && !error.path.starts_with("panel.sensor_defaults.")
                     && !error.path.starts_with("panel.section_defaults.")
                     && !error.path.starts_with("panel.wallpaper.")
+                    && !error.path.starts_with("panel.icon_size")
                     && !error.path.starts_with("panel.tweaks.")
             })
             .count(),

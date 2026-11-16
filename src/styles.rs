@@ -159,19 +159,21 @@ pub(crate) fn resolve_styles(
                             title_extra: 0,
                             pad: icons::SECTION_CONTENT_PAD,
                         });
-                    let icon_size = icons::row_icon_target(
+                    let auto_size = icons::row_icon_target(
                         thickness,
                         u32::from(room.pad),
                         room.title_extra,
                         0,
                     );
+                    // `panel.icon_size` overrides that fit, never past it;
+                    // auto keeps the built-in bell one notch smaller:
                     // Papirus' `stock_bell` fills its whole box while the
-                    // other sensor glyphs sit inside theirs: the built-in
-                    // bell is drawn a little smaller so it reads the same
-                    // size (a configured icon keeps the full fit).
+                    // other sensor glyphs sit inside theirs, and an
+                    // explicit size is the user's call.
+                    let icon_size = icons::icon_edge(cfg.panel.icon_size, auto_size);
                     let builtin_bell = s.icon.is_none()
                         && matches!(s.source, config::SensorSource::Notifications {});
-                    let icon_size = if builtin_bell {
+                    let icon_size = if builtin_bell && cfg.panel.icon_size.is_none() {
                         icon_size.saturating_sub(2)
                     } else {
                         icon_size

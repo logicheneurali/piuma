@@ -29,6 +29,10 @@ pub enum Message {
     BoldChanged(bool),
     /// Icon theme of the panel (roadmap N1); empty = absent.
     IconThemeChanged(String),
+    /// Icon size override (`panel.icon_size`): the edge in px.
+    IconSizeChanged(u32),
+    /// Auto icon size toggle: on = key absent (the row's own fit).
+    IconSizeAuto(bool),
     /// Freedesktop autostart toggle (roadmap N2).
     AutostartChanged(bool),
     /// Apply a theme (slug) or restore the user's colours (`None`):
@@ -334,6 +338,7 @@ pub enum Tab {
     SensorDefaults,
     SectionDefaults,
     Sections,
+    Icons,
     Wallpaper,
     Themes,
     AutostartApps,
@@ -343,11 +348,12 @@ pub enum Tab {
 
 impl Tab {
     /// Sidebar order.
-    pub(crate) const ALL: [Tab; 10] = [
+    pub(crate) const ALL: [Tab; 11] = [
         Tab::Panel,
         Tab::SectionDefaults,
         Tab::SensorDefaults,
         Tab::Sections,
+        Tab::Icons,
         Tab::Wallpaper,
         Tab::Themes,
         Tab::Notifications,
@@ -368,6 +374,7 @@ impl Tab {
             Tab::SensorDefaults => "◈",
             Tab::SectionDefaults => "◫",
             Tab::Sections => "≡",
+            Tab::Icons => "▣",
             Tab::Wallpaper => "▩",
             Tab::Themes => "◐",
             Tab::AutostartApps => "▷",
@@ -384,6 +391,7 @@ impl Tab {
             Tab::SensorDefaults => "Sensor Defaults",
             Tab::SectionDefaults => "Section Defaults",
             Tab::Sections => "Sections",
+            Tab::Icons => "Icons",
             Tab::Wallpaper => "Wallpaper",
             Tab::Themes => "Themes",
             Tab::AutostartApps => "Autostart apps",

@@ -343,6 +343,9 @@ pub struct PiumaConfig {
     /// Theme resolving the sensors' `icon` names (roadmap N1): `None` =
     /// key absent (the bar falls back to the system icon-theme setting).
     pub icon_theme: Option<String>,
+    /// Edge (px) every sensor, tray and taskbar icon draws at; `None` =
+    /// key absent (auto: the row's own fit, capped by the bar).
+    pub icon_size: Option<u32>,
     /// Freedesktop autostart launch with the bar (roadmap N2): `None` =
     /// key absent (the bar never scans or spawns anything).
     pub autostart: Option<bool>,
@@ -556,6 +559,7 @@ impl Default for PiumaConfig {
             font_size: 12,
             bold: None,
             icon_theme: None,
+            icon_size: None,
             autostart: None,
             autostart_disabled: Vec::new(),
             app_theme: None,
@@ -645,6 +649,9 @@ impl PiumaSetup {
         }
         if let Some(theme) = &self.config.icon_theme {
             panel.insert("icon_theme".to_string(), JsonValue::String(theme.clone()));
+        }
+        if let Some(size) = self.config.icon_size {
+            panel.insert("icon_size".to_string(), JsonValue::Number(size.into()));
         }
         if let Some(a) = self.config.autostart {
             panel.insert("autostart".to_string(), JsonValue::Bool(a));
@@ -1116,6 +1123,7 @@ impl PiumaSetup {
             font_size: 14,
             bold: None,
             icon_theme: None,
+            icon_size: None,
             autostart: None,
             autostart_disabled: Vec::new(),
             app_theme: None,
@@ -1157,6 +1165,11 @@ impl PiumaSetup {
             .get("icon_theme")
             .and_then(|v| v.as_str())
             .map(str::to_string);
+        // Absent `icon_size` stays `None` (auto: the row's own fit).
+        self.config.icon_size = panel
+            .get("icon_size")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
         // Absent `autostart` stays `None` (reset default): the bar reads
         // false and never scans the autostart directories (roadmap N2).
         self.config.autostart = panel.get("autostart").and_then(|v| v.as_bool());

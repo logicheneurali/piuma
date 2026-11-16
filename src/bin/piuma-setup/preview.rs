@@ -223,7 +223,9 @@ fn icon_size(cfg: &PiumaConfig, section: Option<&Section>, sensor: &Sensor) -> u
             } else {
                 cfg.thickness
             };
-            icons::row_icon_target(thickness, u32::from(icons::SECTION_CONTENT_PAD), 0, 0)
+            let auto =
+                icons::row_icon_target(thickness, u32::from(icons::SECTION_CONTENT_PAD), 0, 0);
+            icons::icon_edge(cfg.icon_size, auto)
         }
     }
 }

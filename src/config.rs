@@ -169,6 +169,11 @@ pub struct PanelConfig {
     /// Theme used to resolve the sensors' `icon` names (roadmap N1);
     /// absent = the tray's rule (GTK icon-theme setting, then `hicolor`).
     pub icon_theme: Option<String>,
+    /// Edge (px) every sensor, tray and taskbar icon draws at; absent =
+    /// auto (the row's own fit, `icons::row_icon_target`, and for tray/
+    /// taskbar the font's line height). The value is capped by that fit,
+    /// so it can only shrink a sensor icon and grow a tray one.
+    pub icon_size: Option<u32>,
     /// Launch the freedesktop autostart applications with the bar
     /// (roadmap N2); absent = false (nothing is scanned or spawned).
     pub autostart: Option<bool>,
@@ -888,6 +893,7 @@ pub fn default_config() -> Config {
             font_size: Some(14),
             bold: None,
             icon_theme: None,
+            icon_size: None,
             autostart: None,
             autostart_disabled: None,
             app_theme: None,
@@ -1103,6 +1109,7 @@ pub fn validate_config(cfg: &Config) -> Vec<ConfigError> {
     );
     err_range_u32(&mut errors, "panel.thickness", p.thickness, 4, 256);
     err_range_u32(&mut errors, "panel.font_size", p.font_size, 1, 256);
+    err_range_u32(&mut errors, "panel.icon_size", p.icon_size, 4, 48);
     err_range_u32(&mut errors, "panel.default_section_weight", p.default_section_weight, 1, 1000);
 
     if let Some(c) = &p.screen_corners {
@@ -2482,6 +2489,25 @@ mod tests {
             ],
             "every error at its path: {errors:?}"
         );
+    }
+
+    /// `panel.icon_size`: absent = auto (no error), 4..=48 valid, outside
+    /// rejected at its own path.
+    #[test]
+    fn icon_size_validates_only_when_explicit() {
+        let validate = |json: &str| {
+            let cfg: Config = serde_json::from_str(json).expect("config must parse");
+            validate_config(&cfg)
+        };
+        assert!(validate(r#"{"panel":{"sections":[]}}"#).is_empty());
+        assert!(validate(r#"{"panel":{"icon_size":4,"sections":[]}}"#).is_empty());
+        assert!(validate(r#"{"panel":{"icon_size":48,"sections":[]}}"#).is_empty());
+        for bad in [3, 49] {
+            let json = format!(r#"{{"panel":{{"icon_size":{bad},"sections":[]}}}}"#);
+            let errors = validate(&json);
+            assert_eq!(errors.len(), 1, "one error for {bad}: {errors:?}");
+            assert_eq!(errors[0].path, "panel.icon_size");
+        }
     }
 
     /// The -1 = disabled sentinel and the setup picklist's own values

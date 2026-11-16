@@ -561,6 +561,7 @@ fn icon_keys_roundtrip() {
 "align": "fill",
 "anchor": "top",
 "icon_theme": "Papirus",
+"icon_size": 12,
 "section_layout": "horizontal",
 "sections": [
   { "name": "sys", "sensors": [ { "name": "CPU", "icon": "cpu", "source": { "type": "perc_cpu" } } ] }
@@ -571,6 +572,7 @@ fn icon_keys_roundtrip() {
     let mut state = fixture();
     state.load_from_json(json).expect("config must load");
     assert_eq!(state.config.icon_theme.as_deref(), Some("Papirus"));
+    assert_eq!(state.config.icon_size, Some(12));
     assert_eq!(
         state.config.sections[0].sensors[0].icon.as_deref(),
         Some("cpu")
@@ -578,15 +580,18 @@ fn icon_keys_roundtrip() {
     let saved = state.serialize().expect("serialize must succeed");
     let out: JsonValue = serde_json::from_str(&saved).expect("saved JSON must parse");
     assert_eq!(out["panel"]["icon_theme"], "Papirus");
+    assert_eq!(out["panel"]["icon_size"], 12);
     assert_eq!(out["panel"]["sections"][0]["sensors"][0]["icon"], "cpu");
     serde_json::from_str::<config::Config>(&saved)
         .expect("piuma must accept the saved config (pre-save validation)");
     // A save never injects the keys when they were absent.
     state.config.icon_theme = None;
+    state.config.icon_size = None;
     state.config.sections[0].sensors[0].icon = None;
     let bare: JsonValue =
         serde_json::from_str(&state.serialize().expect("serialize must succeed")).unwrap();
     assert!(bare["panel"].get("icon_theme").is_none());
+    assert!(bare["panel"].get("icon_size").is_none());
     assert!(bare["panel"]["sections"][0]["sensors"][0].get("icon").is_none());
 }
 
@@ -738,6 +743,10 @@ fn sidebar_tab_selection_switches_the_active_tab() {
         Tab::ALL.last(),
         Some(&Tab::Tweaks),
         "Tweaks is the last sidebar category"
+    );
+    assert!(
+        Tab::ALL.windows(2).any(|pair| pair == [Tab::Icons, Tab::Wallpaper]),
+        "Icons sits right before Wallpaper"
     );
 }
 
@@ -1460,6 +1469,13 @@ fn icon_preview_uses_the_row_height() {
     // A hairline bar still keeps a visible icon (clamped at 4).
     s.config.thickness = 4;
     assert_eq!(sensor_icon_size(&s.config, section, sensor), 4);
+    // `panel.icon_size` replaces the fit, never past it.
+    s.config.thickness = 30;
+    s.config.icon_size = Some(12);
+    assert_eq!(sensor_icon_size(&s.config, section, sensor), 12);
+    s.config.icon_size = Some(40);
+    assert_eq!(sensor_icon_size(&s.config, section, sensor), 22, "capped by the row");
+    s.config.icon_size = None;
     // Theme: the system one until configured.
     assert_eq!(icon_theme_of(&s.config), icons::icon_theme());
     s.config.icon_theme = Some("Papirus".to_string());
@@ -2086,6 +2102,7 @@ fn error_paths_jump_to_the_sensor_or_its_tab() {
     );
     assert_eq!(tab_for_error_path("panel.tweaks.glass.opacity"), Tab::Tweaks);
     assert_eq!(tab_for_error_path("panel.thickness"), Tab::Panel);
+    assert_eq!(tab_for_error_path("panel.icon_size"), Tab::Icons);
     assert_eq!(
         tab_for_error_path("panel.sections[1].border_type"),
         Tab::Sections

@@ -7,6 +7,7 @@ use iced::Task;
 
 use crate::autostart;
 use crate::config;
+use crate::icons;
 use crate::controls::{border_live, content_scroll_id, scroll_target, section_name_id, sensor_card_id, sensor_name_id, sorted_rules};
 use crate::modal::{Modal, RuleDraft};
 use crate::view_wallpaper::wallpaper_set;
@@ -78,6 +79,19 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
         }
         Message::IconThemeChanged(value) => {
             state.config.icon_theme = if value.is_empty() { None } else { Some(value) };
+        }
+        Message::IconSizeChanged(value) => state.config.icon_size = Some(value),
+        Message::IconSizeAuto(auto) => {
+            // Auto drops the key; turning it off starts from the auto edge
+            // so the slider begins where the bar already draws.
+            state.config.icon_size = (!auto).then(|| {
+                u32::from(icons::row_icon_target(
+                    state.config.thickness,
+                    u32::from(icons::SECTION_CONTENT_PAD),
+                    0,
+                    0,
+                ))
+            });
         }
         Message::AutostartChanged(value) => {
             // On = explicit true; off drops back to absent (≈ false).
@@ -1324,6 +1338,8 @@ pub(crate) fn tab_for_error_path(path: &str) -> Tab {
         Tab::SectionDefaults
     } else if path.starts_with("panel.wallpaper.") {
         Tab::Wallpaper
+    } else if path.starts_with("panel.icon_size") {
+        Tab::Icons
     } else if path.starts_with("panel.tweaks.") {
         Tab::Tweaks
     } else if path.starts_with("panel.sections[") {

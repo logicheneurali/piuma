@@ -292,9 +292,13 @@ notification popup; `panel.bold: true` renders all of it bold.
 A sensor can declare `"icon"`: a freedesktop icon **name** (e.g. `"cpu"`)
 drawn before its text, sized to the font and resolved under
 `panel.icon_theme` (absent = the system icon-theme setting, then
-`hicolor` — the same rule as the tray). Lookups are cached and the whole
-icon machinery stays dormant — no theme parsing, no file resolution, no
-memory — until at least one sensor declares an icon.
+`hicolor` — the same rule as the tray). `panel.icon_size` (4–48, absent =
+auto) overrides the edge every sensor, tray and taskbar icon draws at;
+auto is the row's own fit, and an explicit value never outgrows it, so it
+can shrink a sensor icon and grow a tray one. Both live in piuma-setup's
+**Icons** tab. Lookups are cached and the whole icon machinery stays
+dormant — no theme parsing, no file resolution, no memory — until at
+least one sensor declares an icon.
 
 A sensor opts into the panel's value animation with `"effect": true`
 (absent = off); `panel.value_effect` above chooses the style.
@@ -607,7 +611,8 @@ registers, the sensor renders nothing at all (no empty box):
 - **Sizing**: icons scale to the usable height of their sensor box —
   thickness minus section/sensor padding and borders (and the section
   title where sensors stack vertically) — clamped to 4–48px, so they
-  fill the sensor and never overflow it.
+  fill the sensor and never overflow it. `panel.icon_size`, when set,
+  replaces that fit (still capped by it).
 - **Limitations (v1)**: the legacy XEmbed tray and `OverlayIcon*`
   overlays are not implemented; menus are not rendered host-side — the
   wheel/right-click are forwarded to the item instead (a `dbusmenu`
