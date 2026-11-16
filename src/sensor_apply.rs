@@ -495,7 +495,7 @@ pub(crate) fn refresh_tray_and_notif(panel: &mut Panel) {
                 sensor.tray = Some(tray::items());
             }
             if sensor.is_notifications {
-                sensor.value = notifications::display_value();
+                sensor.value = notifications::badge_value();
             }
         }
     }

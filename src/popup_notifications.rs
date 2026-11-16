@@ -7,13 +7,15 @@ use crate::notifications;
 use crate::text_width;
 use crate::{
     config, panel_anchor, panel_font, popup_card_h, popup_output_option, popup_style, styled_box,
-    Message, NotifList, Panel, DEFAULT_FONT_SIZE,
+    Message, NotifList, Panel,
 };
 use iced::font::Font;
 use iced::widget::image::Image;
 use iced::widget::{container, scrollable, stack, text, Column, MouseArea, Row, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Task as Command};
 use iced::widget::scrollable::{AutoScroll, Rail, Scroller};
+
+use std::time::Instant;
 use iced_exwlshell::reexport::{
     Anchor, KeyboardInteractivity, Layer, Margin, NewLayerShellSettings,
 };
@@ -193,7 +195,7 @@ pub(crate) fn popup_dismiss(panel: &mut Panel, id: u32) -> Command<Message> {
 /// Rewrite every `notifications` sensor's value in place after a UI
 /// change (the next tick confirms it), like the scroll/click arms do.
 pub(crate) fn refresh_notification_sensor(panel: &mut Panel) {
-    let value = notifications::display_value();
+    let value = notifications::badge_value();
     for (si, sec) in panel.config.panel.sections.iter().enumerate() {
         for (sni, s) in sec.sensors.iter().enumerate() {
             if matches!(s.source, config::SensorSource::Notifications {}) {
@@ -409,10 +411,11 @@ pub(crate) fn popup_view(panel: &Panel) -> Element<'_, Message> {
         .into()
 }
 
-/// Vertical rhythm of one list row: a double-height row (summary +
-/// body, spaced) — `menu_row_h`'s maths for two stacked lines.
+/// Vertical rhythm of one list row: summary, body and the age line,
+/// spaced — `menu_row_h`'s maths for three stacked lines (the extra pixel
+/// keeps an odd font size from clipping the last line).
 pub(crate) fn notif_list_row_h(font_size: u32) -> u32 {
-    menu_row_h(font_size) * 2 + 4
+    menu_row_h(font_size) * 2 + 5
 }
 
 /// The wheel's effect on the scroll offset: whole rows towards the
@@ -455,13 +458,21 @@ pub(crate) fn notif_list_size(
         .min(NOTIF_LIST_W_MAX.saturating_add(2 * MENU_PAD));
     let shown = rows.len().min(NOTIF_LIST_ROWS) as u32;
     let arrows = if rows.len() > NOTIF_LIST_ROWS { 2 } else { 0 };
-    // Header + shown rows + both arrow bands, plus one gap between each
-    // child of the column (the view's `LIST_GAP`).
-    let children = shown + arrows + 1;
+    // An empty history keeps a line for "No notifications" under the
+    // header, so the bell's click always opens something readable.
+    let empty_h = if rows.is_empty() {
+        menu_row_h(font_size)
+    } else {
+        0
+    };
+    // Header + shown rows + both arrow bands + the empty line, plus one
+    // gap between each child of the column (the view's `LIST_GAP`).
+    let children = shown + arrows + 1 + u32::from(rows.is_empty());
     let h = shown
         .saturating_mul(notif_list_row_h(font_size))
         .saturating_add(arrows.saturating_mul(menu_arrow_h(font_size)))
         .saturating_add(menu_arrow_h(font_size))
+        .saturating_add(empty_h)
         .saturating_add(children.saturating_sub(1).saturating_mul(LIST_GAP))
         .saturating_add(2 * MENU_PAD);
     (w, h)
@@ -479,14 +490,13 @@ pub(crate) fn toggle_notif_list(panel: &mut Panel) -> Command<Message> {
             crate::popup_anim::Ghost::NotifList(state),
         );
     }
+    // Opening the list reads the bell's counter; the empty state keeps
+    // the header (and its DND switch) reachable.
+    notifications::mark_read();
+    refresh_notification_sensor(panel);
     let rows = notifications::history_rows(NOTIF_LIST_MAX);
-    // With the history empty the list has nothing to show — but with do
-    // not disturb on its header is the only way back, so it still opens.
-    if rows.is_empty() && !notifications::dnd() {
-        return Command::none();
-    }
     let font = panel_font(&panel.config);
-    let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
+    let font_size = popup_style(&panel.config, panel.palette.as_ref()).font_size;
     let (w, h) = notif_list_size(&rows, &font, font_size);
     // The cards' own corner: the list belongs to the same notifications.
     let (anchor, margin) = popup_placement(&panel.config);
@@ -530,7 +540,9 @@ pub(crate) fn notif_list_view_with<'a>(
 ) -> Element<'a, Message> {
     let st = popup_style(&panel.config, panel.palette.as_ref());
     let font = panel_font(&panel.config);
-    let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
+    // The list is a notification surface: its type follows the
+    // `panel.notifications` style, like the cards, not the bar font size.
+    let font_size = st.font_size;
     let row_h = notif_list_row_h(font_size) as f32;
     let dim = Color::from_rgba(st.text.r, st.text.g, st.text.b, 0.45);
     let dim_closed = Color::from_rgba(st.text.r, st.text.g, st.text.b, 0.30);
@@ -602,6 +614,20 @@ pub(crate) fn notif_list_view_with<'a>(
         .width(Length::Fill)
         .align_y(Alignment::Center);
     let mut list: Column<'_, Message> = Column::new().spacing(LIST_GAP as f32).push(header);
+    if rows.is_empty() {
+        list = list.push(
+            container(
+                text("No notifications")
+                    .size(font_size.saturating_sub(1))
+                    .color(dim)
+                    .font(font),
+            )
+            .width(Length::Fill)
+            .height(Length::Fixed(menu_row_h(font_size) as f32))
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center),
+        );
+    }
     if scrollable {
         list = list.push(arrow(true, state.offset > 0));
     }
@@ -627,6 +653,16 @@ pub(crate) fn notif_list_view_with<'a>(
                     .size(font_size.saturating_sub(2))
                     .color(body_fg)
                     .font(font),
+            )
+            .push(
+                container(
+                    text(notifications::age_label(row.received, Instant::now()))
+                        .size(font_size.saturating_sub(2))
+                        .color(dim)
+                        .font(font),
+                )
+                .width(Length::Fill)
+                .align_x(Alignment::End),
             )
             .spacing(2);
         let styled = container(inner)
@@ -756,6 +792,7 @@ mod tests {
             summary: format!("summary {i}"),
             body: "a body line".to_string(),
             closed: false,
+            received: Instant::now(),
         };
         let rows: Vec<_> = (0..10)
             .map(|i| notifications::NotifRow {
@@ -763,6 +800,7 @@ mod tests {
                 summary: format!("summary {i} with a tail long enough to widen the box"),
                 body: "a body line".to_string(),
                 closed: false,
+                received: Instant::now(),
             })
             .collect();
         let (w, h) = notif_list_size(&rows, &font, 14);
@@ -785,5 +823,13 @@ mod tests {
             "one row, header, one gap, no arrows"
         );
         assert!(w_short < w, "fewer rows measure narrower");
+        // The bell's click on an empty history still opens the list: the
+        // surface keeps the header and one "No notifications" line.
+        let (_, h_empty) = notif_list_size(&[], &font, 14);
+        assert_eq!(
+            h_empty,
+            menu_arrow_h(14) + menu_row_h(14) + LIST_GAP + 2 * MENU_PAD,
+            "header, empty line, one gap"
+        );
     }
 }

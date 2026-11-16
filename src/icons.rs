@@ -157,6 +157,35 @@ pub(crate) fn cache_len() -> usize {
 /// carries the level.
 pub const VOLUME_ICON: &str = "audio-volume-high";
 
+/// The notifications bell: `stock_bell` is the literal bell in the
+/// common themes (Papirus, Adwaita via hicolor); a configured `icon`
+/// still wins.
+pub const NOTIFICATION_ICON: &str = "stock_bell";
+
+/// The Wi-Fi sensor's resting icon: the network name is shown only on
+/// hover, so the sensor keeps a signal glyph the rest of the time.
+pub const WIFI_ICON: &str = "network-wireless";
+
+/// Theme names a built-in sensor icon falls back to, in order: the
+/// primary is Papirus' literal bell/wedge, the others cover Breeze and
+/// Adwaita (their symbolic variants).
+pub(crate) const NOTIFICATION_ICONS: [&str; 4] = [
+    "stock_bell",
+    "preferences-desktop-notification",
+    "preferences-system-notifications-symbolic",
+    "notifications-symbolic",
+];
+pub(crate) const WIFI_ICONS: [&str; 3] = [
+    "network-wireless",
+    "network-wireless-symbolic",
+    "network-wireless-signal-excellent-symbolic",
+];
+
+/// First resolvable name among `names` for `theme`.
+pub(crate) fn resolve_any(theme: &str, names: &[&str], size: u16) -> Option<PathBuf> {
+    names.iter().find_map(|name| resolve(theme, name, size))
+}
+
 // ── icon sizing: one formula for tray, sensor rows and the setup preview ──
 
 /// Padding the section content Row/Column adds on every side: the layout
@@ -239,6 +268,7 @@ pub(crate) fn icons_theme(config: &config::Config) -> Option<&str> {
                     sensor.source,
                     config::SensorSource::VolumeMeter { .. }
                         | config::SensorSource::Wifi {}
+                        | config::SensorSource::Notifications {}
                 )
         });
     if !declares_icon {
@@ -252,6 +282,19 @@ pub(crate) fn icons_theme(config: &config::Config) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The built-in sensor icons fall through the theme-name list until
+    /// one resolves; a list with no hits yields no icon.
+    #[test]
+    fn resolve_any_walks_the_names_in_order() {
+        assert!(resolve_any("hicolor", &["piuma-definitely-missing"], 16).is_none());
+        // The first missing name falls through to the second; whether the
+        // theme actually ships it, the answer equals a direct lookup.
+        assert_eq!(
+            resolve_any("hicolor", &["piuma-definitely-missing", "folder"], 16),
+            resolve("hicolor", "folder", 16)
+        );
+    }
 
     /// A miss is remembered: the first call walks the theme once, the
     /// second one is a pure map hit (same `None`, same cache size), and a

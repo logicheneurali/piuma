@@ -22,8 +22,8 @@
 //!   v1 never claims the `body-markup` capability); sounds, `persistence`
 //!   and `ActivationToken` are out of scope for v1.
 //!
-//! State lives in `HISTORY`; the bar reads a snapshot through
-//! `display_value()` and is poked with `Message::NotificationsChanged`
+//! State lives in `HISTORY`; the bar reads the bell's counter through
+//! `badge_value()` and is poked with `Message::NotificationsChanged`
 //! (same pattern as the tray).
 
 use std::collections::{HashMap, VecDeque};
@@ -132,10 +132,10 @@ static ICONS: std::sync::LazyLock<RwLock<HashMap<u32, iced::widget::image::Handl
     std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
 /// Monotonic ids: spec allows any scheme, 1-based and never reused.
 static NEXT_ID: AtomicU32 = AtomicU32::new(1);
-/// Sensor scroll position: 0 = live (newest active entry), n > 0 = the
-/// n-th newest received entry (closed ones included). Every arrival
-/// resets it to 0, so the sensor follows what is new by default.
-static SELECTED: AtomicU32 = AtomicU32::new(0);
+/// Notifications delivered since the list was last opened: the bell's
+/// counter, cleared by `mark_read` (the list popup's click) and by
+/// `clear_history`.
+static UNREAD: AtomicU32 = AtomicU32::new(0);
 /// Do not disturb: deliveries keep landing in the history and moving
 /// the sensor, but no popup card opens while it is on. Runtime-only
 /// (the bar starts quiet); the list popup's header toggles it.
@@ -163,7 +163,7 @@ pub fn clear_history() -> Vec<u32> {
         .map(|n| n.id)
         .collect();
     hist.clear();
-    SELECTED.store(0, Ordering::Relaxed);
+    UNREAD.store(0, Ordering::Relaxed);
     if let Ok(mut icons) = ICONS.write() {
         icons.clear();
     }
@@ -192,56 +192,34 @@ pub fn configure(cfg: &crate::config::NotificationsConfig) {
 
 // ── bar-facing snapshots ───────────────────────────────────────────
 
-/// Text for the `notifications` sensor: the newest active notification's
-/// summary, with the number of active ones appended when there are
-/// several; empty while nothing is active (a closed notification only
-/// comes back through the scroll, F2). Truncated to `MAX_SUMMARY`.
-pub fn display_value() -> String {
-    let Ok(hist) = HISTORY.read() else {
-        return String::new();
-    };
-    // Browse mode (wheel moved off the live position): show that entry
-    // with its position in the history; an evicted entry falls back live.
-    let sel = SELECTED.load(Ordering::Relaxed);
-    if sel > 0 {
-        if let Some(n) = hist.iter().rev().nth(sel as usize - 1) {
-            return format!("{} ({sel}/{})", truncate(&n.summary, MAX_SUMMARY), hist.len());
-        }
-    }
-    let active = hist.iter().filter(|n| n.closed.is_none());
-    let mut count = 0usize;
-    let mut last: Option<&Notification> = None;
-    for n in active {
-        count += 1;
-        last = Some(n);
-    }
-    let Some(newest) = last else {
-        return String::new();
-    };
-    let mut out = truncate(&newest.summary, MAX_SUMMARY);
-    if count > 1 {
-        out.push_str(&format!(" ({count})"));
-    }
-    out
+/// Clear the unread counter: the list popup was opened, or its history
+/// was emptied.
+pub fn mark_read() {
+    UNREAD.store(0, Ordering::Relaxed);
 }
 
-/// Wheel over the sensor: down walks towards the oldest entry, up back
-/// towards live (list convention: newest on top).
-pub fn scroll(up: bool) {
-    if up {
-        SELECTED
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |s| {
-                Some(s.saturating_sub(1))
-            })
-            .ok();
+/// The bell's counter: deliveries since the list was last opened, an
+/// empty string while there is nothing new (the sensor then shows just
+/// the bell).
+pub fn badge_value() -> String {
+    match UNREAD.load(Ordering::Relaxed) {
+        0 => String::new(),
+        n => n.to_string(),
+    }
+}
+
+/// How long ago a notification was delivered, in the coarsest unit that
+/// reads naturally: seconds, minutes, hours, days.
+pub fn age_label(received: Instant, now: Instant) -> String {
+    let secs = now.saturating_duration_since(received).as_secs();
+    if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3_600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3_600)
     } else {
-        // Cap at the history length: index n addresses rev().nth(n - 1).
-        let cap = HISTORY.read().map(|h| h.len()).unwrap_or(0) as u32;
-        SELECTED
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |s| {
-                Some((s + 1).min(cap))
-            })
-            .ok();
+        format!("{}d ago", secs / 86_400)
     }
 }
 
@@ -254,6 +232,8 @@ pub struct NotifRow {
     pub body: String,
     /// A recorded close: the row renders dimmed.
     pub closed: bool,
+    /// Delivery time: the list shows the age from this instant.
+    pub received: Instant,
 }
 
 /// Snapshot of the newest `max` entries, newest first, for the list
@@ -271,6 +251,7 @@ pub fn history_rows(max: usize) -> Vec<NotifRow> {
             summary: truncate(&n.summary, MAX_SUMMARY),
             body: truncate(&n.body, MAX_BODY),
             closed: n.closed.is_some(),
+            received: n.received,
         })
         .collect()
 }
@@ -456,8 +437,8 @@ fn record(replace: u32, n: Notification) -> u32 {
         .read()
         .map(|s| *s)
         .unwrap_or(DEFAULTS);
-    // Anything new (or updated) makes the sensor follow it again.
-    SELECTED.store(0, Ordering::Relaxed);
+    // A delivery (new or updated) is unread until the list is opened.
+    UNREAD.fetch_add(1, Ordering::Relaxed);
     let mut hist = HISTORY.write().unwrap_or_else(|e| e.into_inner());
     if settings.replace_existing && replace != 0 {
         if let Some(existing) = hist.iter_mut().find(|n| n.id == replace) {
@@ -852,7 +833,7 @@ mod tests {
         HISTORY.write().unwrap().clear();
         ICONS.write().unwrap().clear();
         NEXT_ID.store(1, Ordering::Relaxed);
-        SELECTED.store(0, Ordering::Relaxed);
+        UNREAD.store(0, Ordering::Relaxed);
         *SETTINGS.write().unwrap() = DEFAULTS;
         guard
     }
@@ -1058,51 +1039,33 @@ mod tests {
     }
 
     #[test]
-    fn display_shows_the_newest_active_with_count_and_truncates() {
+    fn the_badge_counts_deliveries_and_clears_on_read() {
         let _g = fresh();
-        assert_eq!(display_value(), String::new(), "empty history");
-        let a = record(0, sample("first", 1, None));
-        assert_eq!(display_value(), "first");
+        assert_eq!(badge_value(), String::new(), "nothing unread");
+        record(0, sample("first", 1, None));
         record(0, sample("second", 1, None));
-        assert_eq!(display_value(), "second (2)", "count appended");
-        // Closing the newest reveals the older one again.
-        let newest_id = HISTORY.read().unwrap().back().unwrap().id;
-        mark_closed(newest_id, REASON_EXPIRED);
-        assert_eq!(display_value(), "first");
-        mark_closed(a, REASON_EXPIRED);
-        assert_eq!(display_value(), String::new(), "all closed");
-        // Long summaries are cut at a char boundary.
-        record(0, sample(&"x".repeat(200), 1, None));
-        let out = display_value();
-        assert_eq!(out.chars().count(), MAX_SUMMARY);
-        assert!(out.ends_with('…'));
+        assert_eq!(badge_value(), "2");
+        mark_read();
+        assert_eq!(badge_value(), String::new(), "opening the list clears it");
+        // A replacement is a new delivery and reads as unread again.
+        let id = HISTORY.read().unwrap().back().unwrap().id;
+        record(id, sample("second, edited", 1, None));
+        assert_eq!(badge_value(), "1");
+        clear_history();
+        assert_eq!(badge_value(), String::new(), "clearing the history resets it");
     }
 
     #[test]
-    fn wheel_walks_the_history_and_new_arrivals_reset_to_live() {
-        let _g = fresh();
-        record(0, sample("one", 1, None));
-        record(0, sample("two", 1, None));
-        assert_eq!(display_value(), "two (2)", "live");
-        // Down: newest received (position marker), then the older one.
-        scroll(false);
-        assert_eq!(display_value(), "two (1/2)");
-        scroll(false);
-        assert_eq!(display_value(), "one (2/2)");
-        scroll(false);
-        assert_eq!(display_value(), "one (2/2)", "capped at the oldest");
-        // Up walks back to live.
-        scroll(true);
-        scroll(true);
-        assert_eq!(display_value(), "two (2)", "live again");
-        scroll(true);
-        scroll(true);
-        assert_eq!(display_value(), "two (2)", "saturated at live");
-        // A new notification resets the selection to live.
-        scroll(false);
-        scroll(false);
-        record(0, sample("three", 1, None));
-        assert_eq!(display_value(), "three (3)", "arrival resets to live");
+    fn the_age_label_uses_the_coarsest_unit() {
+        let now = Instant::now();
+        let age = |secs: u64| age_label(now - Duration::from_secs(secs), now);
+        assert_eq!(age(0), "0s ago");
+        assert_eq!(age(59), "59s ago");
+        assert_eq!(age(60), "1m ago");
+        assert_eq!(age(3_599), "59m ago");
+        assert_eq!(age(3_600), "1h ago");
+        assert_eq!(age(86_399), "23h ago");
+        assert_eq!(age(86_400), "1d ago");
     }
 
     #[test]

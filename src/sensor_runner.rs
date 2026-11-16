@@ -375,7 +375,7 @@ pub fn run(source: &SensorSource, hypr: Option<&crate::hypr::Snapshot>) -> Read 
         // state (see `tray.rs`), rendered by the view directly.
         SensorSource::Tray {} => plain(String::new()),
         // Newest active notification's summary (see `notifications.rs`).
-        SensorSource::Notifications {} => plain(notifications::display_value()),
+        SensorSource::Notifications {} => plain(notifications::badge_value()),
         // Taskbar icons carry no text: the slots come from
         // `windows::task_icons()`, built per tick in `update`.
         SensorSource::Taskbar {} => plain(String::new()),

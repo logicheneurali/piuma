@@ -165,14 +165,33 @@ pub(crate) fn resolve_styles(
                         room.title_extra,
                         0,
                     );
-                    let icon_name = s.icon.as_deref().or_else(|| {
-                        matches!(s.source, config::SensorSource::VolumeMeter { .. })
-                            .then_some(icons::VOLUME_ICON)
+                    // Papirus' `stock_bell` fills its whole box while the
+                    // other sensor glyphs sit inside theirs: the built-in
+                    // bell is drawn a little smaller so it reads the same
+                    // size (a configured icon keeps the full fit).
+                    let builtin_bell = s.icon.is_none()
+                        && matches!(s.source, config::SensorSource::Notifications {});
+                    let icon_size = if builtin_bell {
+                        icon_size.saturating_sub(2)
+                    } else {
+                        icon_size
+                    };
+                    let icon_name = s.icon.as_deref().or(match &s.source {
+                        config::SensorSource::VolumeMeter { .. } => Some(icons::VOLUME_ICON),
+                        config::SensorSource::Notifications {} => {
+                            Some(icons::NOTIFICATION_ICON)
+                        }
+                        config::SensorSource::Wifi {} => Some(icons::WIFI_ICON),
+                        _ => None,
                     });
                     let icon = match (icon_theme, icon_name) {
-                        (Some(theme), Some(icon_name)) => {
-                            icons::resolve(theme, icon_name, icon_size)
+                        (Some(theme), Some(name)) if name == icons::NOTIFICATION_ICON => {
+                            icons::resolve_any(theme, &icons::NOTIFICATION_ICONS, icon_size)
                         }
+                        (Some(theme), Some(name)) if name == icons::WIFI_ICON => {
+                            icons::resolve_any(theme, &icons::WIFI_ICONS, icon_size)
+                        }
+                        (Some(theme), Some(name)) => icons::resolve(theme, name, icon_size),
                         _ => None,
                     };
                     let own_border = s.border_color.is_some();

@@ -783,9 +783,12 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
         }
         Message::NotificationsChanged => {
             // A notification arrived, was replaced, expired or closed:
-            // only the feed sensor's text moves (see
-            // `refresh_tray_and_notif`); the popup and the list read
-            // the shared state on their own.
+            // only the bell's counter moves (see `refresh_tray_and_notif`).
+            // While the list is open the deliveries are already in front
+            // of the user, so they count as read.
+            if panel.notif_list.is_some() {
+                notifications::mark_read();
+            }
             refresh_tray_and_notif(panel);
             Command::none()
         }
@@ -1176,18 +1179,6 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
                     mpris::step(up);
                     return Command::none();
                 }
-                if matches!(source, Some(config::SensorSource::Notifications {})) {
-                    notifications::scroll(up);
-                    // Rewrite the value at once; the next tick confirms it.
-                    if let Some(sensor_value) = panel
-                        .sections
-                        .get_mut(section_index)
-                        .and_then(|sec| sec.sensors.get_mut(sensor_index))
-                    {
-                        sensor_value.value = notifications::display_value();
-                    }
-                    return Command::none();
-                }
                 if matches!(source, Some(config::SensorSource::PowerProfile {})) {
                     // Wheel cycles the profile like a click.
                     std::thread::spawn(sensors::cycle_power_profile);
@@ -1275,9 +1266,10 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
         }
         Message::NotifListScrolled(delta_y) => {
             // Wheel over the list: whole rows per notch (the surface
-            // height is exact, so the math matches the layout).
+            // height is exact, so the math matches the layout). The row
+            // height follows the notification style's font size.
+            let font_size = popup_style(&panel.config, panel.palette.as_ref()).font_size;
             if let Some((_, state)) = panel.notif_list.as_mut() {
-                let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
                 let row_h = notif_list_row_h(font_size) as f32;
                 let rows = (-delta_y / row_h).round() as i32;
                 let len = notifications::history_rows(NOTIF_LIST_MAX).len();

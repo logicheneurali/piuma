@@ -206,24 +206,20 @@ fn bar_view<'a>(
         };
 
         // Build sensor widgets with optional per-sensor background. A tray
-        // sensor with no items renders nothing at all (no empty box), and
-        // so does the notifications sensor with nothing active — its
-        // display value is empty in that case (roadmap2 #3), and it
-        // reappears with the next notification.
+        // sensor with no items renders nothing at all (no empty box); the
+        // notifications bell always shows (its counter is empty until the
+        // next delivery).
         let sensor_widgets: Vec<Element<'a, Message>> = section.sensors.iter().enumerate().filter_map(|(sensor_idx, s)| {
             if s.tray.as_ref().is_some_and(|icons| icons.is_empty()) {
                 return None;
             }
-            let is_notifications = panel
+            let is_wifi = panel
                 .config
                 .panel
                 .sections
                 .get(section_idx)
                 .and_then(|sec| sec.sensors.get(sensor_idx))
-                .is_some_and(|cfg_s| matches!(cfg_s.source, config::SensorSource::Notifications {}));
-            if is_notifications && s.value.is_empty() {
-                return None;
-            }
+                .is_some_and(|cfg_s| matches!(cfg_s.source, config::SensorSource::Wifi {}));
             let is_media = panel
                 .config
                 .panel
@@ -497,11 +493,13 @@ fn bar_view<'a>(
                 // the row's 6px gap, making the box wider than the icon and
                 // shifting it left of centre. Omit empty values (unless a
                 // fixed width pins the slot for jitter-free readings).
+                // Wi-Fi names the SSID only while hovered: the signal icon
+                // stays, the network name is one hover away.
                 let show_value = if is_list {
                     s.name.is_empty() && !s.value.is_empty()
                 } else {
                     !s.value.is_empty() || s.fixed_width.is_some()
-                };
+                } && !(is_wifi && !is_hovered);
                 if s.name.is_empty() {
                     if show_value {
                         row = row.push(value_widget);
