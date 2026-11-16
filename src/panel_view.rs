@@ -10,6 +10,7 @@ use iced::widget::container::Style as ContainerStyle;
 
 use crate::corners::corners_view;
 use crate::dashboard;
+use crate::media_ui;
 use crate::fill_sections::FillSections;
 use crate::styles::panel_background;
 use crate::geometry::{panel_vertical, section_touch_for};
@@ -236,7 +237,7 @@ fn bar_view<'a>(
                 .get(section_idx)
                 .and_then(|sec| sec.sensors.get(sensor_idx))
                 .is_some_and(|cfg_s| matches!(cfg_s.source, config::SensorSource::List { .. }));
-            if is_media && s.value.is_empty() {
+            if is_media && s.media.is_none() {
                 return None;
             }
             // A workspace sensor with no buttons (hyprctl unreachable)
@@ -472,6 +473,17 @@ fn bar_view<'a>(
                     ));
                 }
                 row.into()
+            } else if let Some(media) = &s.media {
+                // MPRIS transport: previous, play/pause and next as
+                // buttons (dimmed when the player disables them), then
+                // the track text; the hover popup carries the full
+                // title and the position/length.
+                let mut row = Row::new().spacing(6).align_y(Alignment::Center);
+                if let Some(path) = &s.icon {
+                    row = row.push(icons::widget(path, s.icon_size as f32));
+                }
+                row = row.push(media_ui::row(media, font_size, font_obj, text_color));
+                row.into()
             } else if let Some(count) = workspace_dots {
                 // Purely graphical workspace switch: one circle per
                 // numbered workspace, the active one filled.
@@ -609,7 +621,7 @@ fn bar_view<'a>(
                     Message::SensorScrolled(section_idx, sensor_idx, up)
                 })
                 .interaction(iced::mouse::Interaction::Pointer);
-            if is_volume_meter || workspace_dots.is_some() {
+            if is_volume_meter || workspace_dots.is_some() || s.media.is_some() {
                 return Some(area.into());
             }
             Some(

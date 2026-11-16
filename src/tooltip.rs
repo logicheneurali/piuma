@@ -12,15 +12,27 @@ use crate::{
 };
 use crate::{Message, Panel};
 use iced::font::Font;
-use iced::widget::{container, text};
+use iced::widget::{container, progress_bar, text, Column};
 use iced::{Alignment, Element, Length, Task as Command};
 use iced_exwlshell::reexport::{
     Anchor, KeyboardInteractivity, Layer, Margin, NewLayerShellSettings,
 };
 use iced_exwlshell::settings::LayerSize;
+use std::time::{Duration, Instant};
 /// Distance between a tooltip and the widget it describes (icons and
 /// tray items): enough to read it as attached, never on the widget.
 pub(crate) const TOOLTIP_GAP: f32 = 8.0;
+
+/// How long a tooltip stays on screen before retiring on its own: a
+/// missed mouse exit (fast motion, a fullscreen surface, a stale event)
+/// must never leave the surface pinned. The bar's tick checks it, so the
+/// real lifetime is this value plus up to one second.
+const TOOLTIP_TTL: Duration = Duration::from_secs(6);
+
+/// Whether a tooltip opened at `opened_at` has outlived `TOOLTIP_TTL`.
+fn tooltip_expired(opened_at: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(opened_at) >= TOOLTIP_TTL
+}
 
 /// Line height of a tooltip line, relative to the font size: the text
 /// widget renders with this exact factor, so the surface is as tall as
@@ -31,6 +43,10 @@ const TOOLTIP_LINE: f32 = 1.2;
 /// Vertical padding above and below the text (the horizontal one is
 /// `MENU_PAD`, like every popup).
 const TOOLTIP_PAD_Y: u32 = 4;
+
+/// Height of the media hover's progress bar and the gap above it.
+const TOOLTIP_BAR_H: u32 = 3;
+const TOOLTIP_BAR_GAP: u32 = 4;
 
 /// Anchor + edge margins for a tooltip window at the cursor point:
 /// just off the bar's anchored edge on the screen's inner side (a top
@@ -221,6 +237,29 @@ pub(crate) fn tooltip_fit(
 /// fitted to half the output width, so a long title is cut like the
 /// tray menu's labels instead of stretching off-screen.
 pub(crate) fn tooltip_open(panel: &mut Panel, id: String, text: String) -> Command<Message> {
+    open(panel, id, text, None, None)
+}
+
+/// A tooltip owned by a hover (`hover_sync`): `sync` refreshes its clock
+/// while that sensor is still hovered, so the TTL only counts after the
+/// pointer leaves.
+pub(crate) fn tooltip_open_owned(
+    panel: &mut Panel,
+    id: String,
+    text: String,
+    owner: (usize, usize),
+    progress: Option<f32>,
+) -> Command<Message> {
+    open(panel, id, text, Some(owner), progress)
+}
+
+fn open(
+    panel: &mut Panel,
+    id: String,
+    text: String,
+    owner: Option<(usize, usize)>,
+    progress: Option<f32>,
+) -> Command<Message> {
     if text.is_empty() {
         return Command::none();
     }
@@ -242,7 +281,12 @@ pub(crate) fn tooltip_open(panel: &mut Panel, id: String, text: String) -> Comma
     let budget = (sw as u32 / 2).saturating_sub(2 * MENU_PAD);
     let (text_w, text_h, fitted) = tooltip_fit(&font, font_size, &text, budget);
     let w = text_w.saturating_add(2 * MENU_PAD).max(48);
-    let h = text_h.saturating_add(2 * TOOLTIP_PAD_Y);
+    let bar = if progress.is_some() {
+        TOOLTIP_BAR_H + TOOLTIP_BAR_GAP
+    } else {
+        0
+    };
+    let h = text_h.saturating_add(2 * TOOLTIP_PAD_Y).saturating_add(bar);
     let at = tooltip_cursor_point(panel);
     let thickness = panel_thickness(&panel.config) as i32;
     let anchor =
@@ -263,7 +307,16 @@ pub(crate) fn tooltip_open(panel: &mut Panel, id: String, text: String) -> Comma
         namespace: Some("piuma-tooltip".to_string()),
         ..Default::default()
     });
-    panel.bar_tooltip = Some((win, BarTooltip { id, text: fitted }));
+    panel.bar_tooltip = Some((
+        win,
+        BarTooltip {
+            id,
+            text: fitted,
+            opened_at: Instant::now(),
+            owner,
+            progress,
+        },
+    ));
     cmds.push(open);
     Command::batch(cmds)
 }
@@ -280,30 +333,58 @@ pub(crate) fn tooltip_close(panel: &mut Panel, id: String) -> Command<Message> {
     Command::none()
 }
 
-/// Close the tooltip when a fullscreen window covers the bar and the
-/// tooltip with it: the pointer does not move, so the source's exit
-/// never fires and nothing else would retire the surface. The shared
-/// snapshot names the focused window; its rect must contain the cursor,
-/// so a maximized window (bar still clear) or a fullscreen one on
-/// another output leaves the tooltip alone.
-pub(crate) fn sync(panel: &mut Panel) -> Command<Message> {
-    if panel.bar_tooltip.is_none() {
-        return Command::none();
-    }
-    let Some(at) = hyprctl_cursor_global() else {
-        return Command::none();
-    };
-    if !panel
-        .hypr
-        .as_ref()
-        .is_some_and(|snapshot| snapshot.focused_covers(at))
-    {
-        return Command::none();
-    }
+/// Close whatever tooltip is open: the bar lost the pointer, or the
+/// surface outlived its time (`sync`).
+pub(crate) fn hide(panel: &mut Panel) -> Command<Message> {
     match panel.bar_tooltip.take() {
         Some((win, _)) => iced::window::close(win),
         None => Command::none(),
     }
+}
+
+/// Retire the tooltip on its own: after `TOOLTIP_TTL` no matter where
+/// the pointer is (a missed exit must not pin the surface), and at once
+/// when a fullscreen window covers the bar — the pointer does not move
+/// there either. The fullscreen check names the focused window in the
+/// shared snapshot; its rect must contain the cursor, so a maximized
+/// window (bar still clear) or a fullscreen one on another output leaves
+/// the tooltip alone.
+pub(crate) fn sync(panel: &mut Panel) -> Command<Message> {
+    let Some((_, tip)) = panel.bar_tooltip.as_mut() else {
+        return Command::none();
+    };
+    // A hover-owned popup (list, media) stays alive while its sensor is
+    // still hovered: the refresh keeps a long text readable, and the TTL
+    // starts counting when the hover ends.
+    if tip.owner.is_some() && tip.owner == panel.hovered {
+        tip.opened_at = Instant::now();
+        // The media popup's bar follows the player while it is open: the
+        // shared sensor state is refreshed once per tick.
+        if let Some((section, sensor)) = tip.owner {
+            tip.progress = panel
+                .sections
+                .get(section)
+                .and_then(|sec| sec.sensors.get(sensor))
+                .and_then(|value| value.media.as_ref())
+                .and_then(crate::mpris::media_progress);
+        }
+    }
+    // The clock first: it costs no fork, and it also bounds the
+    // lifetime of a tooltip whose cursor can no longer be read.
+    if tooltip_expired(tip.opened_at, Instant::now()) {
+        return hide(panel);
+    }
+    let Some(at) = hyprctl_cursor_global() else {
+        return Command::none();
+    };
+    if panel
+        .hypr
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.focused_covers(at))
+    {
+        return hide(panel);
+    }
+    Command::none()
 }
 
 /// The tooltip window: one fitted line in the popup style — a label
@@ -320,14 +401,36 @@ pub(crate) fn tooltip_window_view(panel: &Panel) -> Element<'_, Message> {
     let st = popup_style(&panel.config, panel.palette.as_ref());
     let font = panel_font(&panel.config);
     let font_size = panel.config.panel.font_size.unwrap_or(DEFAULT_FONT_SIZE);
-    let body = container(
-        text(&tip.text)
-            .size(font_size)
-            .color(st.text)
-            .font(font)
-            .line_height(TOOLTIP_LINE)
-            .width(Length::Fill),
-    )
+    let line = text(&tip.text)
+        .size(font_size)
+        .color(st.text)
+        .font(font)
+        .line_height(TOOLTIP_LINE)
+        .width(Length::Fill);
+    let content: Element<'_, Message> = match tip.progress {
+        Some(fraction) => {
+            let track = iced::Color { a: 0.5, ..st.text };
+            Column::new()
+                .push(line)
+                .push(
+                    progress_bar(0.0..=1.0, fraction)
+                        .girth(TOOLTIP_BAR_H as f32)
+                        .length(Length::Fill)
+                        .style(move |_theme: &iced::Theme| progress_bar::Style {
+                            background: iced::Background::Color(track),
+                            bar: iced::Background::Color(st.text),
+                            border: iced::Border {
+                                radius: 2.0.into(),
+                                ..Default::default()
+                            },
+                        }),
+                )
+                .spacing(TOOLTIP_BAR_GAP as f32)
+                .into()
+        }
+        None => line.into(),
+    };
+    let body = container(content)
     .width(Length::Fill)
     .height(Length::Fill)
     .center_x(Length::Fill)
@@ -354,6 +457,21 @@ pub(crate) fn tooltip_window_view(panel: &Panel) -> Element<'_, Message> {
 
 #[cfg(test)]
 mod tests {
+    /// The surface retires exactly at the TTL, never before.
+    #[test]
+    fn tooltip_expires_at_the_ttl() {
+        let opened = Instant::now();
+        assert!(!tooltip_expired(
+            opened,
+            opened + TOOLTIP_TTL - Duration::from_millis(1)
+        ));
+        assert!(tooltip_expired(opened, opened + TOOLTIP_TTL));
+        assert!(tooltip_expired(
+            opened,
+            opened + TOOLTIP_TTL + Duration::from_secs(30)
+        ));
+    }
+
     use super::*;
 
     /// Every `\n`-separated line is fitted and measured: the surface

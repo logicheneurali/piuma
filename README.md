@@ -531,7 +531,7 @@ Each sensor's `source` object has a `type` plus the parameters listed
 | `list`           | the sensor shows its `name`, or the command's first output line when the name is empty; **hovering** opens the output as a list | `command`, `interval`, `max_lines` (default 10, 1–200) |
 | `env_var`        | environment variable value                                   | `env_var`                                                               |
 | `static_text`    | text/icon: fixed text, or just the sensor `icon` when the text is empty | `static_text` (optional with an `icon`)                        |
-| `media`          | MPRIS player: `⏵  title — artist` (25 chars each); click play/pause, wheel prev/next | —                                                        |
+| `media`          | MPRIS player: `[⏮][⏵/⏸][⏭] title — artist` (20 chars each); the buttons control the player (dimmed when it cannot), wheel prev/next; hover shows `artist - title position/length` with a progress bar | —                                           |
 | `tray`           | system tray icons (StatusNotifierItem)                       | —                                                                       |
 | `notifications`  | newest active notification (`N6 newest (5)`)                 | —                                                                       |
 | `lock`           | lock-screen trigger: shows its name/icon, **clicking locks** every output (password to unlock) | —                                            |
@@ -604,7 +604,8 @@ registers, the sensor renders nothing at all (no empty box):
 - **Interaction**: left click → `Activate`, middle click →
   `SecondaryActivate`, right click → `ContextMenu` (coordinates are
   advisory hints in the spec), wheel → `Scroll` (120 units per notch),
-  hover shows the item's tooltip (markup filtered out). Items in
+  hover shows the item's tooltip (markup filtered out; it retires
+  after 6 s). Items in
   `NeedsAttention` swap to their attention icon and get a red frame;
   `NewIcon` / `NewStatus` / `NewToolTip` refresh the icon immediately,
   and a dead tray app removes its icon at once.

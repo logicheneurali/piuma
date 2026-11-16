@@ -41,6 +41,7 @@ mod layouts;
 mod logging;
 mod menus;
 mod mpris;
+mod media_ui;
 mod osd;
 mod output;
 mod panel;
@@ -322,6 +323,11 @@ pub(crate) enum Message {
     TooltipHide {
         id: String,
     },
+    /// The media sensor's transport buttons (unavailable ones are
+    /// dimmed; `mpris` no-ops them anyway).
+    MediaPrevious,
+    MediaPlayPause,
+    MediaNext,
     /// Left the taskbar menu's surface: close it.
     TaskbarMenuClosed,
     /// Tray state changed (item added/removed/updated): rebuild now.
@@ -653,6 +659,14 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             Command::none()
         }
         Message::IcedEvent(id, e) => {
+            // The pointer left the bar: no source can still own a
+            // tooltip below it (the exit that would close it can be lost
+            // on a fast move).
+            if BAR_ID.get().copied() == Some(id)
+                && matches!(e, Event::Mouse(iced::mouse::Event::CursorLeft))
+            {
+                return tooltip::hide(panel);
+            }
             // While locked, input never unlocks: only the password does.
             // The prompt surface asks for keyboard focus when it opens.
             if power_menu::is_window(panel, id)
@@ -1034,19 +1048,6 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
         Message::ActionFinished(Some(text)) => osd::toast(panel, &text),
         Message::ActionFinished(None) => Command::none(),
         Message::SensorPressed(section_index, sensor_index, action) => {
-            // The media sensor's click is its transport control; a
-            // configured shell action has no useful meaning here.
-            let is_media = panel
-                .config
-                .panel
-                .sections
-                .get(section_index)
-                .and_then(|sec| sec.sensors.get(sensor_index))
-                .is_some_and(|s| matches!(s.source, config::SensorSource::Media {}));
-            if is_media {
-                mpris::play_pause();
-                return Command::none();
-            }
             // The runtime-state sensors' click is their control: the
             // power profile cycles, Bluetooth toggles, the keyboard
             // layout advances. Like the media sensor, a configured shell
@@ -1472,6 +1473,18 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
                 panel.taskbar_hover = None;
             }
             tooltip_close(panel, address)
+        }
+        Message::MediaPrevious => {
+            mpris::step(true);
+            Command::none()
+        }
+        Message::MediaPlayPause => {
+            mpris::play_pause();
+            Command::none()
+        }
+        Message::MediaNext => {
+            mpris::step(false);
+            Command::none()
         }
         Message::TooltipShow { id, text } => tooltip_open(panel, id, text),
         Message::TooltipHide { id } => tooltip_close(panel, id),

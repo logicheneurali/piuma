@@ -14,7 +14,8 @@ use iced_runtime::core::widget::operation::Outcome;
 use crate::popup_calendar::calendar_hover_sync;
 use crate::popup_graph::graph_hover_sync;
 use crate::sensor_runner;
-use crate::tooltip::{tooltip_close, tooltip_open};
+use crate::mpris;
+use crate::tooltip::{tooltip_close, tooltip_open_owned};
 use crate::{config, Command, Message, Panel};
 
 #[derive(Default)]
@@ -144,6 +145,7 @@ pub(crate) fn hover_sync(panel: &mut Panel, section: usize, sensor: usize, hover
         graph_hover_sync(panel, section, sensor, hovered),
         calendar_hover_sync(panel, section, sensor, hovered),
         list_hover_sync(panel, section, sensor, hovered),
+        media_hover_sync(panel, section, sensor, hovered),
     ])
 }
 
@@ -180,7 +182,37 @@ pub(crate) fn list_hover_sync(
     if lines.is_empty() {
         return Command::none();
     }
-    tooltip_open(panel, id, lines.join("\n"))
+    tooltip_open_owned(panel, id, lines.join("\n"), (section, sensor), None)
+}
+
+/// The media sensor's hover popup: the full artist - title plus the
+/// position and total length when the player reports them. Same surface
+/// and leave rule as the list popups.
+pub(crate) fn media_hover_sync(
+    panel: &mut Panel,
+    section: usize,
+    sensor: usize,
+    hovered: bool,
+) -> Command<Message> {
+    let id = format!("media:{section}:{sensor}");
+    if !hovered {
+        return tooltip_close(panel, id);
+    }
+    let Some(media) = panel
+        .sections
+        .get(section)
+        .and_then(|sec| sec.sensors.get(sensor))
+        .and_then(|value| value.media.as_ref())
+    else {
+        return Command::none();
+    };
+    tooltip_open_owned(
+        panel,
+        id,
+        mpris::media_details(media),
+        (section, sensor),
+        mpris::media_progress(media),
+    )
 }
 
 

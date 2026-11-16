@@ -16,7 +16,7 @@ use iced_exwlshell::settings::LayerSize;
 use crate::hover::HoverGate;
 use crate::menus::TaskbarRow;
 use crate::{
-    config, dashboard, dbusmenu, graphs, hypr, layouts, osd, palette, popup_anim, screensaver, tray, window_menu, windows, workspace,
+    config, dashboard, dbusmenu, graphs, hypr, layouts, mpris, osd, palette, popup_anim, screensaver, tray, window_menu, windows, workspace,
 };
 
 #[derive(Clone)]
@@ -53,6 +53,10 @@ pub(crate) struct SensorValue {
     /// otherwise), one per open window, built per tick by
     /// `windows::task_icons()`.
     pub(crate) taskbar: Option<Vec<windows::TaskIcon>>,
+    /// The selected MPRIS player when the source is a `media` sensor
+    /// (`None` otherwise); the view draws its transport buttons and the
+    /// hover popup from it.
+    pub(crate) media: Option<mpris::MediaState>,
     /// Whether this sensor shows the notification feed: its text
     /// refreshes from the shared state alone when a notification
     /// changes (`refresh_tray_and_notif`), without re-reading every
@@ -424,6 +428,16 @@ pub(crate) struct TaskbarMenu {
 pub(crate) struct BarTooltip {
     pub(crate) id: String,
     pub(crate) text: String,
+    /// When the surface opened: `tooltip::sync` retires it after
+    /// `TOOLTIP_TTL`, so a missed mouse exit can never pin it forever.
+    pub(crate) opened_at: std::time::Instant,
+    /// The sensor whose hover owns this popup (`hover_sync`'s list and
+    /// media popups): while it stays hovered the TTL is refreshed, so a
+    /// long text is readable; once the hover ends the TTL runs again.
+    pub(crate) owner: Option<(usize, usize)>,
+    /// Played fraction (0..=1) drawn as a bar under the text; `None` =
+    /// text only (every tooltip but the media hover's).
+    pub(crate) progress: Option<f32>,
 }
 
 /// The open sensor-graph popup: which sensor's trend it draws and the

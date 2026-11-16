@@ -333,6 +333,7 @@ pub(crate) fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<C
                     tray: tray_icons,
                     workspaces: workspace_buttons,
                     taskbar: taskbar_icons,
+                    media: read.media,
                     is_notifications: st.is_notifications,
                     icon: st.icon.clone().or(wifi_icon),
                     icon_size: st.icon_size,

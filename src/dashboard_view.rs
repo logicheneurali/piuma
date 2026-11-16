@@ -281,10 +281,12 @@ fn media_block<'a>(panel: &'a Panel, st: &crate::PopupStyle, font: iced::Font) -
     };
 
     let play = if now.status == "Playing" { "⏸" } else { "⏵" };
+    // A control the player does not advertise is dimmed (the click is a
+    // no-op in `mpris`, which checks the same capability).
     let transport = row![
-        transport_button("⏮", Action::Previous, st, font),
-        transport_button(play, Action::PlayPause, st, font),
-        transport_button("⏭", Action::Next, st, font),
+        transport_button("⏮", Action::Previous, now.can_previous, st, font),
+        transport_button(play, Action::PlayPause, now.can_control, st, font),
+        transport_button("⏭", Action::Next, now.can_next, st, font),
     ]
     .spacing(6);
 
@@ -353,10 +355,16 @@ fn media_block<'a>(panel: &'a Panel, st: &crate::PopupStyle, font: iced::Font) -
 fn transport_button<'a>(
     glyph: &'a str,
     action: Action,
+    enabled: bool,
     st: &crate::PopupStyle,
     font: iced::Font,
 ) -> Element<'a, Message> {
-    button(text(glyph).size(14).font(font).color(st.text))
+    let alpha = if enabled { 1.0 } else { 0.5 };
+    let color = Color {
+        a: st.text.a * alpha,
+        ..st.text
+    };
+    button(text(glyph).size(14).font(font).color(color))
         .on_press(Message::DashboardAction(action))
         .padding([3, 10])
         .style(button_style(st))

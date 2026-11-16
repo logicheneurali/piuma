@@ -17,6 +17,10 @@ use std::time::{Duration, Instant};
 pub struct Read {
     pub text: String,
     pub graph: Option<(f64, graphs::Scale)>,
+    /// The media sensor's player state: the view draws its transport
+    /// buttons and the hover popup from it. `None` for every other
+    /// source (and for "no player").
+    pub media: Option<crate::mpris::MediaState>,
 }
 
 /// A reading without a graph sample.
@@ -24,6 +28,7 @@ fn plain(text: String) -> Read {
     Read {
         text,
         graph: None,
+        media: None,
     }
 }
 
@@ -43,6 +48,7 @@ fn measured(text: String, source: &SensorSource, value: f64) -> Read {
     Read {
         text,
         graph: graphs::scale_of(source).map(|scale| (value, scale)),
+        media: None,
     }
 }
 
@@ -359,7 +365,11 @@ pub fn run(source: &SensorSource, hypr: Option<&crate::hypr::Snapshot>) -> Read 
         SensorSource::WorkspaceDots { .. } => plain(String::new()),
         // MPRIS state is read by the same background pass; no player
         // yields an empty value and the view hides the sensor.
-        SensorSource::Media {} => plain(crate::mpris::display_value()),
+        SensorSource::Media {} => Read {
+            text: String::new(),
+            graph: None,
+            media: crate::mpris::media_state(),
+        },
         // A trigger, not a reading: its value is empty, the name/icon is
         // what the bar draws (the click locks, see `main::update`).
         SensorSource::Lock {} => plain(String::new()),

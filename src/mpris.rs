@@ -12,8 +12,8 @@ const PREFIX: &str = "org.mpris.MediaPlayer2.";
 const PLAYER_IFACE: &str = "org.mpris.MediaPlayer2.Player";
 const ROOT_IFACE: &str = "org.mpris.MediaPlayer2";
 const PLAYER_PATH: &str = "/org/mpris/MediaPlayer2";
-const MAX_TITLE: usize = 25;
-const MAX_ARTIST: usize = 25;
+const MAX_TITLE: usize = 20;
+const MAX_ARTIST: usize = 20;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Player {
@@ -44,6 +44,88 @@ pub(crate) struct NowPlaying {
     pub art: Option<String>,
     pub length_ms: Option<u64>,
     pub position_ms: Option<u64>,
+    /// Transport capabilities: unavailable buttons read dimmed.
+    pub can_control: bool,
+    pub can_previous: bool,
+    pub can_next: bool,
+}
+
+/// What the bar's `media` sensor renders: the transport buttons' state
+/// and the truncated track text. The full text goes to the hover popup
+/// (`media_details`), which is why position and length travel too.
+#[derive(Clone, Debug)]
+pub(crate) struct MediaState {
+    pub status: String,
+    pub title: String,
+    pub artist: String,
+    pub position_ms: Option<u64>,
+    pub length_ms: Option<u64>,
+    pub can_control: bool,
+    pub can_previous: bool,
+    pub can_next: bool,
+}
+
+/// The selected player as the bar needs it; `None` = no player (the
+/// sensor hides).
+pub(crate) fn media_state() -> Option<MediaState> {
+    let player = selected()?;
+    let title = if player.title.is_empty() {
+        player.identity
+    } else {
+        player.title
+    };
+    Some(MediaState {
+        status: player.status,
+        title,
+        artist: player.artist,
+        position_ms: player.position_ms,
+        length_ms: player.length_ms,
+        can_control: player.can_control,
+        can_previous: player.can_previous,
+        can_next: player.can_next,
+    })
+}
+
+/// The sensor's one-line text: title and artist, 20 chars each.
+pub(crate) fn media_label(media: &MediaState) -> String {
+    let title = truncate(&media.title, MAX_TITLE);
+    let artist = truncate(&media.artist, MAX_ARTIST);
+    match (title.is_empty(), artist.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => artist,
+        (false, true) => title,
+        (false, false) => format!("{title} — {artist}"),
+    }
+}
+
+/// The played fraction for the hover popup's bar: `None` when the
+/// player reports no position/length (the popup then shows no bar).
+pub(crate) fn media_progress(media: &MediaState) -> Option<f32> {
+    match (media.position_ms, media.length_ms) {
+        (Some(position), Some(length)) if length > 0 => {
+            Some((position as f32 / length as f32).clamp(0.0, 1.0))
+        }
+        _ => None,
+    }
+}
+
+/// The hover popup: full artist - title plus position/length when the
+/// player reports both.
+pub(crate) fn media_details(media: &MediaState) -> String {
+    let track = match (media.artist.is_empty(), media.title.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => media.title.clone(),
+        (false, true) => media.artist.clone(),
+        (false, false) => format!("{} - {}", media.artist, media.title),
+    };
+    match (media.position_ms, media.length_ms) {
+        (Some(position), Some(length)) => format!(
+            "{track} {}/{}",
+            crate::dashboard::duration(position),
+            crate::dashboard::duration(length)
+        ),
+        _ => track,
+    }
 }
 
 pub(crate) fn now_playing() -> Option<NowPlaying> {
@@ -59,13 +141,10 @@ pub(crate) fn now_playing() -> Option<NowPlaying> {
         art: player.art,
         length_ms: player.length_ms,
         position_ms: player.position_ms,
+        can_control: player.can_control,
+        can_previous: player.can_previous,
+        can_next: player.can_next,
     })
-}
-
-/// The text shown by the sensor: status glyph, title and artist. An
-/// empty string means "no player" and hides the sensor.
-pub(crate) fn display_value() -> String {
-    selected().map(|player| format_player(&player)).unwrap_or_default()
 }
 
 /// Whether any player is playing right now: the idle screensaver stays
@@ -202,30 +281,6 @@ fn is_browser_bridge(bus: &str) -> bool {
     bus.ends_with("plasma-browser-integration")
 }
 
-fn format_player(player: &Player) -> String {
-    let title = if player.title.is_empty() {
-        &player.identity
-    } else {
-        &player.title
-    };
-    if title.is_empty() {
-        return String::new();
-    }
-    let title = truncate(title, MAX_TITLE);
-    let artist = truncate(&player.artist, MAX_ARTIST);
-    let body = if artist.is_empty() {
-        title
-    } else {
-        format!("{title} — {artist}")
-    };
-    let glyph = match player.status.as_str() {
-        "Playing" => "⏵",
-        "Paused" => "⏸",
-        _ => "⏹",
-    };
-    format!("{glyph}  {body}")
-}
-
 fn truncate(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
@@ -289,31 +344,52 @@ mod tests {
         }
     }
 
-    #[test]
-    fn format_carries_status_title_and_artist() {
-        assert_eq!(
-            format_player(&player("a", "Playing", "Song", "Artist")),
-            "⏵  Song — Artist"
-        );
-        assert_eq!(
-            format_player(&player("a", "Paused", "Song", "")),
-            "⏸  Song"
-        );
-        assert_eq!(format_player(&player("a", "Stopped", "", "")), "");
+    fn media(title: &str, artist: &str, position: Option<u64>, length: Option<u64>) -> MediaState {
+        MediaState {
+            status: "Playing".to_string(),
+            title: title.to_string(),
+            artist: artist.to_string(),
+            position_ms: position,
+            length_ms: length,
+            can_control: true,
+            can_previous: true,
+            can_next: true,
+        }
     }
 
     #[test]
-    fn title_and_artist_are_truncated_to_25_each() {
+    fn the_label_carries_title_and_artist_truncated_to_20_each() {
         let title = "abcdefghijklmnopqrstuvwxyz1234";
         let artist = "ABCDEFGHIJKLMNOPQRSTUVWXYZ5678";
-        let text = format_player(&player("a", "Playing", title, artist));
-        let expected = format!(
-            "⏵  {}... — {}...",
-            &title[..25],
-            &artist[..25]
-        );
+        let text = media_label(&media(title, artist, None, None));
+        let expected = format!("{}... — {}...", &title[..20], &artist[..20]);
         assert_eq!(text, expected);
-        assert!(text.starts_with("⏵  "));
+        assert_eq!(media_label(&media("Song", "", None, None)), "Song");
+        assert_eq!(media_label(&media("", "", None, None)), "");
+    }
+
+    /// The hover popup: full artist - title, then position/length when
+    /// the player reports both.
+    #[test]
+    fn the_progress_fraction_is_clamped_and_needs_both_values() {
+        assert_eq!(media_progress(&media("S", "A", Some(50_000), Some(100_000))), Some(0.5));
+        assert_eq!(media_progress(&media("S", "A", Some(0), Some(100_000))), Some(0.0));
+        assert_eq!(media_progress(&media("S", "A", Some(200_000), Some(100_000))), Some(1.0));
+        assert_eq!(media_progress(&media("S", "A", Some(1), None)), None);
+        assert_eq!(media_progress(&media("S", "A", None, Some(0))), None);
+    }
+
+    #[test]
+    fn the_details_line_adds_position_and_length() {
+        assert_eq!(
+            media_details(&media("Song", "Artist", Some(61_000), Some(200_000))),
+            "Artist - Song 1:01/3:20"
+        );
+        assert_eq!(
+            media_details(&media("Song", "Artist", None, None)),
+            "Artist - Song"
+        );
+        assert_eq!(media_details(&media("Song", "", None, None)), "Song");
     }
 
     /// The screensaver gate: any player mid-playback blocks it, paused
