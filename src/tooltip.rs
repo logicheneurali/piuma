@@ -280,6 +280,32 @@ pub(crate) fn tooltip_close(panel: &mut Panel, id: String) -> Command<Message> {
     Command::none()
 }
 
+/// Close the tooltip when a fullscreen window covers the bar and the
+/// tooltip with it: the pointer does not move, so the source's exit
+/// never fires and nothing else would retire the surface. The shared
+/// snapshot names the focused window; its rect must contain the cursor,
+/// so a maximized window (bar still clear) or a fullscreen one on
+/// another output leaves the tooltip alone.
+pub(crate) fn sync(panel: &mut Panel) -> Command<Message> {
+    if panel.bar_tooltip.is_none() {
+        return Command::none();
+    }
+    let Some(at) = hyprctl_cursor_global() else {
+        return Command::none();
+    };
+    if !panel
+        .hypr
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.focused_covers(at))
+    {
+        return Command::none();
+    }
+    match panel.bar_tooltip.take() {
+        Some((win, _)) => iced::window::close(win),
+        None => Command::none(),
+    }
+}
+
 /// The tooltip window: one fitted line in the popup style — a label
 /// just off the bar (see [`tooltip_placement`]), never a strip inside
 /// the bar surface itself.

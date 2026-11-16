@@ -572,6 +572,9 @@ fn update_panel(panel: &mut Panel, message: Message) -> Command<Message> {
             // The floating window menu follows its tweak the same way:
             // created on enable, closed on disable, re-placed on edits.
             cmds.push(window_menu::sync(panel));
+            // A fullscreen window covers the bar and its tooltip with
+            // it, and the resting pointer never sends the source's exit.
+            cmds.push(tooltip::sync(panel));
             // The volume/brightness OSD and the power menu close
             // themselves after their linger.
             cmds.push(osd::sync(panel));

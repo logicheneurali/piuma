@@ -28,6 +28,22 @@ pub struct Snapshot {
     pub active_workspace: Option<String>,
 }
 
+impl Snapshot {
+    /// Whether the focused window is fullscreen and its rect covers the
+    /// global point `at`: such a window sits above the bar's layer, so a
+    /// surface the bar still shows there (its tooltip) is really hidden.
+    pub fn focused_covers(&self, at: (i32, i32)) -> bool {
+        self.clients
+            .as_deref()
+            .and_then(|rows| rows.iter().find(|row| row.focused))
+            .is_some_and(|row| {
+                row.fullscreen
+                    && (row.x..row.x + row.w).contains(&at.0)
+                    && (row.y..row.y + row.h).contains(&at.1)
+            })
+    }
+}
+
 /// Fetch every document once — three forks instead of one per sensor —
 /// and parse each of them here, once.
 pub fn snapshot() -> Snapshot {
@@ -131,6 +147,43 @@ mod tests {
         assert_eq!(parse_fullscreen(r#"{"fullscreen":2}"#), Some(true));
         assert_eq!(parse_fullscreen("{}"), Some(false), "no window");
         assert_eq!(parse_fullscreen("not json"), None);
+    }
+
+    /// The shared snapshot's focused window covers a point only when it
+    /// is fullscreen and its own rect contains it: another output, a
+    /// maximized window (the bar's strip stays clear) and an unfocused
+    /// fullscreen window do not count.
+    #[test]
+    fn focused_covers_only_a_fullscreen_rect_over_the_point() {
+        let clients = |json: &str| Snapshot {
+            clients: Some(windows::parse_clients(json)),
+            ..Default::default()
+        };
+        let game = clients(
+            r#"[{"address":"0x1","class":"game","title":"game","workspace":{"name":"1"},
+                 "focusHistoryID":0,"at":[0,0],"size":[1920,1080],"fullscreen":2},
+                {"address":"0x2","class":"app","title":"app","workspace":{"name":"2"},
+                 "focusHistoryID":1,"at":[1920,0],"size":[2560,1600],"fullscreen":0}]"#,
+        );
+        assert!(game.focused_covers((960, 500)), "point on the game's output");
+        assert!(!game.focused_covers((2000, 500)), "point on the other output");
+
+        // Mode 1 (within the gaps) leaves the bar's strip clear.
+        let maximized = clients(
+            r#"[{"address":"0x1","class":"app","title":"app","workspace":{"name":"1"},
+                 "focusHistoryID":0,"at":[0,24],"size":[1920,1056],"fullscreen":1}]"#,
+        );
+        assert!(maximized.focused_covers((960, 500)));
+        assert!(!maximized.focused_covers((960, 12)), "bar strip not covered");
+
+        let other = clients(
+            r#"[{"address":"0x1","class":"game","title":"game","workspace":{"name":"1"},
+                 "focusHistoryID":0,"at":[0,0],"size":[1920,1080],"fullscreen":0},
+                {"address":"0x2","class":"app","title":"app","workspace":{"name":"2"},
+                 "focusHistoryID":1,"at":[0,0],"size":[1920,1080],"fullscreen":2}]"#,
+        );
+        assert!(!other.focused_covers((960, 500)), "unfocused fullscreen");
+        assert!(!Snapshot::default().focused_covers((960, 500)), "no clients");
     }
 
     /// `activeworkspace -j` → its name; junk yields none.
