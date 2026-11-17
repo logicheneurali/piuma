@@ -57,6 +57,14 @@ pub(crate) struct SensorValue {
     /// (`None` otherwise); the view draws its transport buttons and the
     /// hover popup from it.
     pub(crate) media: Option<mpris::MediaState>,
+    /// How a level sensor draws its reading; ignored by the other
+    /// sources.
+    pub(crate) value_display: ValueDisplay,
+    /// Fraction (0..=1) of the sensor's reference: the value itself for
+    /// `perc_*`, used/total for the `used_*` with a total, the rate over
+    /// `scale_max` (or the history peak) for the network rates. `None`
+    /// = no grid (unknown reading or no reference).
+    pub(crate) level: Option<f32>,
     /// Whether this sensor shows the notification feed: its text
     /// refreshes from the shared state alone when a notification
     /// changes (`refresh_tray_and_notif`), without re-reading every
@@ -497,3 +505,36 @@ pub(crate) struct CalendarPopup {
 }
 
 // ── messages ────────────────────────────────────────────────────────
+
+/// How a percentage sensor shows its reading: the number, the 3×3 grid
+/// (10% per square) or both. Absent config = [`Both`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ValueDisplay {
+    Numeric,
+    Grid,
+    #[default]
+    Both,
+}
+
+impl ValueDisplay {
+    pub(crate) fn from_config(value: Option<&str>) -> Self {
+        match value {
+            Some("numeric") => Self::Numeric,
+            Some("grid") => Self::Grid,
+            _ => Self::Both,
+        }
+    }
+}
+
+#[cfg(test)]
+mod value_display_tests {
+    use super::ValueDisplay;
+
+    #[test]
+    fn absent_or_unknown_falls_back_to_both() {
+        assert_eq!(ValueDisplay::from_config(None), ValueDisplay::Both);
+        assert_eq!(ValueDisplay::from_config(Some("weird")), ValueDisplay::Both);
+        assert_eq!(ValueDisplay::from_config(Some("numeric")), ValueDisplay::Numeric);
+        assert_eq!(ValueDisplay::from_config(Some("grid")), ValueDisplay::Grid);
+    }
+}

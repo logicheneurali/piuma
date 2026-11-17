@@ -27,11 +27,11 @@ pub(crate) fn panel_settings(state: &PiumaSetup) -> Element<'_, Message> {
     // slider helper would need `num_traits` bounds, which this binary doesn't depend on.
     let fields = vec![
         // Autostart lives in its own tab now (roadmap2 #2).
-        ("App Theme", toggler(state.config.app_theme.unwrap_or(false))
+        ("GTK theme", toggler(state.config.app_theme.unwrap_or(false))
             .label("Generate GTK theme")
             .on_toggle(Message::AppThemeChanged)
             .into()),
-        ("Theme", invalid_under(
+        ("Colour mode", invalid_under(
             theme_control(pal, state.config.theme_mode.as_deref().unwrap_or("dark")),
             state.field_err("panel.theme_mode"),
         )),
@@ -61,7 +61,7 @@ pub(crate) fn panel_settings(state: &PiumaSetup) -> Element<'_, Message> {
                 .into(),
             state.field_err("panel.thickness"),
         )),
-        ("Section Layout", invalid_under(
+        ("Sections layout", invalid_under(
             picklist(
                 vec!["horizontal".to_string(), "vertical".to_string()],
                 Some(state.config.section_layout.clone()),
@@ -71,11 +71,11 @@ pub(crate) fn panel_settings(state: &PiumaSetup) -> Element<'_, Message> {
             .into(),
             state.field_err("panel.section_layout"),
         )),
-        ("Section Title", toggler(state.config.section_title.unwrap_or(true))
+        ("Section titles", toggler(state.config.section_title.unwrap_or(true))
             .label("Show section titles")
             .on_toggle(Message::SectionTitleChanged)
             .into()),
-        ("Value Effect", invalid_under(
+        ("Value animation", invalid_under(
             picklist(
                 vec!["off".to_string(), "underline".to_string(), "sheen".to_string()],
                 Some(value_effect),
@@ -85,14 +85,14 @@ pub(crate) fn panel_settings(state: &PiumaSetup) -> Element<'_, Message> {
             .into(),
             state.field_err("panel.value_effect"),
         )),
-        ("Default BG", color_control_over(pal,
+        ("Bar background", color_control_over(pal,
             state.config.default_bg_color.as_deref().unwrap_or(""),
             state.field_err("panel.default_bg_color"),
             Some("#1a1b26"),
             Message::DefaultBgColorChanged,
             Some(Message::DefaultBgColorChanged(String::new())),
         )),
-        ("Default Text", color_control_over(pal,
+        ("Bar text", color_control_over(pal,
             state.config.default_text_color.as_deref().unwrap_or(""),
             state.field_err("panel.default_text_color"),
             Some("#e8e8e8"),
@@ -354,8 +354,8 @@ pub(crate) fn notifications_settings<'a>(state: &'a PiumaSetup) -> Element<'a, M
             )
             .push(form_grid(vec![
                 ("Position", notif_position_grid(pal, &n.popup_position)),
-                ("Margin H", slider_control(0..=100, n.popup_margin_h, state.field_err("panel.notifications.popup_margin_h"), |value| Message::NotifNumberChanged("popup_margin_h".to_string(), value))),
-                ("Margin V", slider_control(0..=100, n.popup_margin_v, state.field_err("panel.notifications.popup_margin_v"), |value| Message::NotifNumberChanged("popup_margin_v".to_string(), value))),
+                ("Horizontal margin", slider_control(0..=100, n.popup_margin_h, state.field_err("panel.notifications.popup_margin_h"), |value| Message::NotifNumberChanged("popup_margin_h".to_string(), value))),
+                ("Vertical margin", slider_control(0..=100, n.popup_margin_v, state.field_err("panel.notifications.popup_margin_v"), |value| Message::NotifNumberChanged("popup_margin_v".to_string(), value))),
             ]));
 
         // Popup style: the same controls as Sensor Defaults (colors, border,
@@ -370,16 +370,16 @@ pub(crate) fn notifications_settings<'a>(state: &'a PiumaSetup) -> Element<'a, M
             )
             .push(form_grid(vec![
                 ("Font Size", slider_control(8..=32, n.font_size as i32, state.field_err("panel.notifications.font_size"), |value| Message::NotifNumberChanged("font_size".to_string(), value))),
-                ("Text", color_control(pal, &n.text_color, state.field_err("panel.notifications.text_color"), |value| Message::NotifStyleChanged("text_color".to_string(), value))),
-                ("Hover Text", color_control(pal, &n.text_color_hover, state.field_err("panel.notifications.text_color_hover"), |value| Message::NotifStyleChanged("text_color_hover".to_string(), value))),
-                ("BG", color_control(pal, &n.bg_color, state.field_err("panel.notifications.bg_color"), |value| Message::NotifStyleChanged("bg_color".to_string(), value))),
-                ("Hover BG", color_control(pal, &n.bg_color_hover, state.field_err("panel.notifications.bg_color_hover"), |value| Message::NotifStyleChanged("bg_color_hover".to_string(), value))),
+                ("Text colour", color_control(pal, &n.text_color, state.field_err("panel.notifications.text_color"), |value| Message::NotifStyleChanged("text_color".to_string(), value))),
+                ("Hover text colour", color_control(pal, &n.text_color_hover, state.field_err("panel.notifications.text_color_hover"), |value| Message::NotifStyleChanged("text_color_hover".to_string(), value))),
+                ("Background", color_control(pal, &n.bg_color, state.field_err("panel.notifications.bg_color"), |value| Message::NotifStyleChanged("bg_color".to_string(), value))),
+                ("Hover background", color_control(pal, &n.bg_color_hover, state.field_err("panel.notifications.bg_color_hover"), |value| Message::NotifStyleChanged("bg_color_hover".to_string(), value))),
                 ("Border", color_control(pal, &n.border_color, state.field_err("panel.notifications.border_color"), |value| Message::NotifStyleChanged("border_color".to_string(), value))),
-                ("Border Hover", color_control(pal, &n.border_color_hover, state.field_err("panel.notifications.border_color_hover"), |value| Message::NotifStyleChanged("border_color_hover".to_string(), value))),
+                ("Hover border", color_control(pal, &n.border_color_hover, state.field_err("panel.notifications.border_color_hover"), |value| Message::NotifStyleChanged("border_color_hover".to_string(), value))),
                 ("Border Width", slider_control(0..=10, n.border_width, state.field_err("panel.notifications.border_width"), |value| Message::NotifNumberChanged("border_width".to_string(), value))),
                 ("Border Radius", slider_control(0..=20, n.border_radius, state.field_err("panel.notifications.border_radius"), |value| Message::NotifNumberChanged("border_radius".to_string(), value))),
                 ("Padding", slider_control(0..=24, n.padding, state.field_err("panel.notifications.padding"), |value| Message::NotifNumberChanged("padding".to_string(), value))),
-                ("Border Type", invalid_under(
+                ("Border style", invalid_under(
                     picklist(
                         border_type_options(),
                         Some(n.border_type.clone()),

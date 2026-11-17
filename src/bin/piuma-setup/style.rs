@@ -53,7 +53,7 @@ pub(crate) fn text_input_style(
 
 /// Fixed label column width so every form row lines up and labels never
 /// overlap their controls (`Length` only accepts u32).
-pub(crate) const LABEL_WIDTH: u32 = 110;
+pub(crate) const LABEL_WIDTH: u32 = 120;
 
 /// Body text size: the iced default (16 pt) reduced by 2 pt as requested.
 pub(crate) const BODY: u32 = 14;

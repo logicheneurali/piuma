@@ -881,6 +881,26 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
                 }
             }
         }
+        Message::SensorScaleMaxChanged(section_index, sensor_index, value) => {
+            if section_index < state.config.sections.len() {
+                let section = &mut state.config.sections[section_index];
+                if sensor_index < section.sensors.len() {
+                    section.sensors[sensor_index].scale_max =
+                        (!value.trim().is_empty()).then_some(value);
+                }
+            }
+        }
+        Message::SensorValueDisplayChanged(section_index, sensor_index, value) => {
+            if section_index < state.config.sections.len() {
+                let section = &mut state.config.sections[section_index];
+                if sensor_index < section.sensors.len() {
+                    // `Both` is the absent default: keep the file minimal.
+                    let mode = value.to_ascii_lowercase();
+                    section.sensors[sensor_index].value_display =
+                        (mode != "both").then_some(mode);
+                }
+            }
+        }
         Message::SensorEffectChanged(section_index, sensor_index, value) => {
             if section_index < state.config.sections.len() {
                 let section = &mut state.config.sections[section_index];
@@ -1246,6 +1266,7 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
             }
             None => {}
         },
+        Message::ModalBackdrop => {}
         Message::ModalCancel => {
             state.modal = None;
             state.pending_close = None;

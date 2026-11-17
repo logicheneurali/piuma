@@ -5,11 +5,12 @@
 
 
 use iced::widget::{container, text, Column, MouseArea, Row, Space};
-use iced::{Alignment, Background, Color, Element, Length};
+use iced::{Alignment, Background, Border, Color, Element, Length};
 use iced::widget::container::Style as ContainerStyle;
 
 use crate::corners::corners_view;
 use crate::dashboard;
+use crate::panel::ValueDisplay;
 use crate::media_ui;
 use crate::fill_sections::FillSections;
 use crate::styles::panel_background;
@@ -228,6 +229,15 @@ fn bar_view<'a>(
                 .get(section_idx)
                 .and_then(|sec| sec.sensors.get(sensor_idx))
                 .is_some_and(|cfg_s| matches!(cfg_s.source, config::SensorSource::Media {}));
+            // The power profile is a bare icon at rest; the profile name
+            // (its value) joins it while hovered, like the Wi-Fi SSID.
+            let is_power_profile = panel
+                .config
+                .panel
+                .sections
+                .get(section_idx)
+                .and_then(|sec| sec.sensors.get(sensor_idx))
+                .is_some_and(|cfg_s| matches!(cfg_s.source, config::SensorSource::PowerProfile {}));
             // A list sensor shows the name when it has one, the first
             // output line otherwise — never both.
             let is_list = panel
@@ -330,6 +340,28 @@ fn bar_view<'a>(
                     .align_x(Alignment::Center)
                     .into(),
                 None => value_element,
+            };
+            // One square per 10%: a compact level echo beside the number
+            // (the number keeps the exact value). "N/A" has no number and
+            // keeps the value alone.
+            // `value_display` picks between the number, the grid and
+            // both. A side bar has only `thickness` across its sensors,
+            // so "both" would push the value past the box: stacked rows
+            // keep the number alone (a grid-only choice still fits).
+            // "N/A" has no number and keeps the text whatever the mode.
+            let value_with_grid: Element<'a, Message> = match s.level {
+                Some(level) => match s.value_display {
+                    ValueDisplay::Numeric => value_widget,
+                    ValueDisplay::Grid => percent_grid(level * 100.0, value_color),
+                    ValueDisplay::Both if !vertical => Row::new()
+                        .spacing(4)
+                        .align_y(Alignment::Center)
+                        .push(percent_grid(level * 100.0, value_color))
+                        .push(value_widget)
+                        .into(),
+                    ValueDisplay::Both => value_widget,
+                },
+                None => value_widget,
             };
 
             // Name and value side by side, separated by a small gap (the
@@ -507,14 +539,18 @@ fn bar_view<'a>(
                 // fixed width pins the slot for jitter-free readings).
                 // Wi-Fi names the SSID only while hovered: the signal icon
                 // stays, the network name is one hover away.
+                // The power profile hides its text (name and value) at
+                // rest, so the bar shows just the icon.
+                let show_text = !(is_power_profile && !is_hovered);
                 let show_value = if is_list {
                     s.name.is_empty() && !s.value.is_empty()
                 } else {
                     !s.value.is_empty() || s.fixed_width.is_some()
-                } && !(is_wifi && !is_hovered);
-                if s.name.is_empty() {
+                } && !(is_wifi && !is_hovered)
+                    && show_text;
+                if s.name.is_empty() || !show_text {
                     if show_value {
-                        row = row.push(value_widget);
+                        row = row.push(value_with_grid);
                     }
                 } else {
                     let name_text = text(&s.name)
@@ -525,13 +561,13 @@ fn bar_view<'a>(
                     if vertical {
                         let mut col = Column::new().push(name_text);
                         if show_value {
-                            col = col.push(value_widget);
+                            col = col.push(value_with_grid);
                         }
                         row = row.push(col.spacing(2));
                     } else {
                         row = row.push(name_text);
                         if show_value {
-                            row = row.push(value_widget);
+                            row = row.push(value_with_grid);
                         }
                     }
                 }
@@ -836,3 +872,57 @@ fn bar_view<'a>(
 pub(crate) static BAR_ID: std::sync::OnceLock<iced::window::Id> = std::sync::OnceLock::new();
 
 
+
+/// Squares lit by a percentage: one per 10%, 0..=9 (100% lights all).
+fn percent_grid_filled(pct: f32) -> usize {
+    ((pct / 10.0).floor() as i32).clamp(0, 9) as usize
+}
+
+/// The percentage grid: 3×3 squares filling left→right and bottom→top,
+/// so 35% lights the bottom row and 89% all but the top-right square.
+/// Unlit squares keep the value colour at 22% alpha.
+fn percent_grid<'a>(pct: f32, color: Color) -> Element<'a, Message> {
+    const SQUARE: f32 = 4.0;
+    const GAP: f32 = 1.0;
+    let filled = percent_grid_filled(pct);
+    let dim = Color { a: 0.22, ..color };
+    let mut grid = Column::new().spacing(GAP);
+    for row_from_top in 0..3usize {
+        let mut row = Row::new().spacing(GAP);
+        for column in 0..3usize {
+            let index = (2 - row_from_top) * 3 + column;
+            let tint = if index < filled { color } else { dim };
+            row = row.push(
+                container(Space::new())
+                    .width(Length::Fixed(SQUARE))
+                    .height(Length::Fixed(SQUARE))
+                    .style(move |_t| ContainerStyle {
+                        background: Some(Background::Color(tint)),
+                        border: Border {
+                            radius: 1.0.into(),
+                            ..Default::default()
+                        },
+                        ..ContainerStyle::default()
+                    }),
+            );
+        }
+        grid = grid.push(row);
+    }
+    grid.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_grid_lights_one_square_per_ten_percent() {
+        assert_eq!(percent_grid_filled(0.0), 0);
+        assert_eq!(percent_grid_filled(9.0), 0, "under 10%: nothing lit");
+        assert_eq!(percent_grid_filled(10.0), 1);
+        assert_eq!(percent_grid_filled(35.0), 3, "the bottom row");
+        assert_eq!(percent_grid_filled(89.0), 8, "all but the top-right");
+        assert_eq!(percent_grid_filled(99.0), 9);
+        assert_eq!(percent_grid_filled(100.0), 9, "never a tenth square");
+    }
+}

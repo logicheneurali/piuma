@@ -113,7 +113,17 @@ polling, no extra D-Bus traffic.
 Sensor `type` values follow a naming convention by category:
 
 - **`perc_`** – percentage: `perc_cpu`, `perc_gpu`, `perc_mem`, `perc_swap`,
-  `perc_disk`, `perc_battery`, `perc_backlight`, `perc_volume`
+  `perc_disk`, `perc_battery`, `perc_backlight`, `perc_volume`. Each sensor
+  can pick `value_display`: `numeric` (the number), `grid` (a 3×3 grid,
+  one square per 10%, lit left→right and bottom→top — 35% lights the bottom
+  row, 89% all but the top-right) or `both` (the default). The same choice
+  covers the `used_mem`/`used_swap`/`used_disk`/`used_battery` family, whose
+  grid is the fraction of the current total, and the network rates, whose
+  reference is `scale_max` (`"12M"`, `"1.5G"`, `"500K"`, `"1T"`; binary
+  tiers, bare = B/s; absent = the peak of the last two minutes). The
+  temperature sensors (`temp_cpu`, `temp_gpu`) use the same grid with a
+  conventional 0–100 °C scale (one square per 10 °C), still coloured by
+  their `color_rules`
 - **`used_`** – numeric consumption: `used_mem`, `used_swap`, `used_disk`,
   `used_battery`, `used_netdown`, `used_netup`
 - **`total_`** – full value: `total_mem`, `total_swap`, `total_disk`,
@@ -519,7 +529,7 @@ Each sensor's `source` object has a `type` plus the parameters listed
 | `net_state`      | interface state (`connected`)                                | `interface`                                                             |
 | `net_info`       | active NetworkManager connection: VPN, Wi-Fi SSID or wired name (`offline` when none) | —                                                     |
 | `wifi`           | Wi-Fi state: SSID when online, `no internet` when associated without access, `off` when down; **the icon shows the signal** (excellent ≥75%, good ≥50%, ok ≥25%, weak below) | — |
-| `power_profile`  | power-profiles-daemon profile (`Balanced`); click cycles it   | —                                                                       |
+| `power_profile`  | power-profiles-daemon profile (`Balanced`); click cycles it; the bar shows just its icon, the profile name on hover | —                                                                       |
 | `bluetooth`      | BlueZ adapter (`Off`, `On`, `On (2)` or the connected device); click toggles it | —                                                     |
 | `keyboard`       | main keyboard layout (`IT`, `IT CAPS`, `IT NUM`); click switches layout | —                                                              |
 | `uptime`         | uptime (`up 2 hours, 30 minutes`)                            | —                                                                       |

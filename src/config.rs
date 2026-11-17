@@ -69,6 +69,45 @@ pub fn style_num(value: Option<i32>) -> Option<u32> {
     value.and_then(|v| u32::try_from(v).ok())
 }
 
+/// A byte-rate ceiling for `scale_max`: `"12M"`, `"1.5G"`, `"500K"`,
+/// `"1T"`, a bare byte count, also `MB`/`MiB`/`M/s` spellings. Tiers are
+/// binary (1024), like the bar's own rate text. `None` for an empty or
+/// malformed value (the validation rejects the latter).
+pub fn parse_rate_max(text: &str) -> Option<f64> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let split = text
+        .find(|c: char| c.is_ascii_alphabetic())
+        .unwrap_or(text.len());
+    let value: f64 = text[..split].trim().parse().ok()?;
+    let mut suffix = text[split..].trim().to_ascii_uppercase();
+    for tail in ["/S", "B", "I"] {
+        suffix = suffix.strip_suffix(tail).unwrap_or(&suffix).to_string();
+    }
+    let factor = match suffix.as_str() {
+        "" => 1.0,
+        "K" => 1024.0,
+        "M" => 1024.0f64.powi(2),
+        "G" => 1024.0f64.powi(3),
+        "T" => 1024.0f64.powi(4),
+        _ => return None,
+    };
+    let bytes = value * factor;
+    (bytes.is_finite() && bytes > 0.0).then_some(bytes)
+}
+
+/// Whether a `used_net*` sensor's grid has to be scaled by the history
+/// peak: it shows the grid and has no usable `scale_max`.
+pub fn net_auto_peak(s: &SensorConfig) -> bool {
+    matches!(
+        s.source,
+        SensorSource::UsedNetdown { .. } | SensorSource::UsedNetup { .. }
+    ) && !matches!(s.value_display.as_deref(), Some("numeric"))
+        && s.scale_max.as_deref().and_then(parse_rate_max).is_none()
+}
+
 /// Whether the panel asks for the light variant (absent = dark).
 pub fn light_mode(panel: &PanelConfig) -> bool {
     panel.theme_mode.as_deref() == Some("light")
@@ -664,6 +703,16 @@ pub struct SensorConfig {
     /// absent = off, so a global mode alone never animates everything.
     #[serde(default)]
     pub effect: bool,
+    /// How a level sensor shows its reading: `numeric`, `grid`
+    /// (3×3 squares, 10% each) or `both`; absent = `both`. `perc_*`,
+    /// `used_*` and `temp_*` use it; the other sources ignore it.
+    #[serde(default, alias = "percent_display")]
+    pub value_display: Option<String>,
+    /// `used_net*` reference for the grid: a byte rate with a binary
+    /// suffix (`"12M"`, `"1.5G"`, `"500K"`, `"1T"`; bare = B/s).
+    /// Absent/empty = the recent peak from the graph history.
+    #[serde(default)]
+    pub scale_max: Option<String>,
     /// Threshold colours for the displayed value (`color_rules`): the
     /// highest `min` the reading reaches wins; hover still overrides
     /// (`text_color_hover`). Absent = plain `text_color`.
@@ -877,11 +926,11 @@ pub fn default_config() -> Config {
         border_type: None,
         collapsible: false,
         sensors: vec![
-            SensorConfig { name: "CPU".to_string(), description: None, icon: None, source: SensorSource::PercCpu {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false, effect: false, color_rules: None },
-            SensorConfig { name: "GPU".to_string(), description: None, icon: None, source: SensorSource::PercGpu {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false, effect: false, color_rules: None },
-            SensorConfig { name: "MEM".to_string(), description: None, icon: None, source: SensorSource::DetailMem {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false, effect: false, color_rules: None },
-            SensorConfig { name: "DISK".to_string(), description: None, icon: None, source: SensorSource::PercDisk {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false, effect: false, color_rules: None },
-            SensorConfig { name: "UPTIME".to_string(), description: None, icon: None, source: SensorSource::Uptime {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false, effect: false, color_rules: None },
+            SensorConfig { name: "CPU".to_string(), description: None, icon: None, source: SensorSource::PercCpu {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false, effect: false, value_display: None, scale_max: None, color_rules: None },
+            SensorConfig { name: "GPU".to_string(), description: None, icon: None, source: SensorSource::PercGpu {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false, effect: false, value_display: None, scale_max: None, color_rules: None },
+            SensorConfig { name: "MEM".to_string(), description: None, icon: None, source: SensorSource::DetailMem {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false, effect: false, value_display: None, scale_max: None, color_rules: None },
+            SensorConfig { name: "DISK".to_string(), description: None, icon: None, source: SensorSource::PercDisk {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false, effect: false, value_display: None, scale_max: None, color_rules: None },
+            SensorConfig { name: "UPTIME".to_string(), description: None, icon: None, source: SensorSource::Uptime {}, text_color: None, bg_color: None, text_color_hover: None, bg_color_hover: None, border_color: None, border_color_hover: None, border_width: None, border_width_hover: None, border_radius: None, border_type: None, padding: None, action: None, draw_graph: false, effect: false, value_display: None, scale_max: None, color_rules: None },
         ],
     };
 
@@ -1274,6 +1323,20 @@ pub fn validate_config(cfg: &Config) -> Vec<ConfigError> {
                 sensor.border_radius,
                 sensor.padding,
             );
+            err_one_of(
+                &mut errors,
+                &format!("{spath}.value_display"),
+                sensor.value_display.as_deref(),
+                &["numeric", "grid", "both"],
+            );
+            if let Some(max) = sensor.scale_max.as_deref().filter(|m| !m.trim().is_empty()) {
+                if parse_rate_max(max).is_none() {
+                    errors.push(ConfigError {
+                        path: format!("{spath}.scale_max"),
+                        message: format!("{max}: expected a rate like 12M"),
+                    });
+                }
+            }
             if let Some(rules) = &sensor.color_rules {
                 for (k, rule) in rules.iter().enumerate() {
                     err_color(&mut errors, &format!("{spath}.color_rules[{k}].color"), Some(&rule.color));
@@ -2371,6 +2434,106 @@ mod tests {
         )
         .unwrap();
         assert_eq!(validate_config(&broken)[0].path, "panel.theme_mode");
+    }
+
+    /// `scale_max` takes binary suffixes and rejects junk; a network
+    /// sensor uses the history peak only when it shows the grid and has
+    /// no usable ceiling.
+    #[test]
+    fn rate_ceiling_parses_and_decides_the_auto_peak() {
+        assert_eq!(parse_rate_max("12M"), Some(12.0 * 1024.0 * 1024.0));
+        assert_eq!(parse_rate_max("1.5G"), Some(1.5 * 1024.0f64.powi(3)));
+        assert_eq!(parse_rate_max("500K"), Some(500.0 * 1024.0));
+        assert_eq!(parse_rate_max("2T"), Some(2.0 * 1024.0f64.powi(4)));
+        assert_eq!(parse_rate_max("1024"), Some(1024.0));
+        assert_eq!(parse_rate_max("12MiB"), Some(12.0 * 1024.0 * 1024.0));
+        assert_eq!(parse_rate_max(""), None);
+        assert_eq!(parse_rate_max("fast"), None);
+        assert_eq!(parse_rate_max("-1M"), None);
+
+        let parse = |json: &str| {
+            let cfg: Config = serde_json::from_str(json).expect("config must parse");
+            cfg.panel.sections[0].sensors[0].clone()
+        };
+        let auto = parse(
+            r#"{"panel":{"sections":[{"sensors":[{"name":"D","source":{"type":"used_netdown","interface":"wlan0"}}]}]}}"#,
+        );
+        assert!(net_auto_peak(&auto));
+        let fixed = parse(
+            r#"{"panel":{"sections":[{"sensors":[{"name":"D","scale_max":"12M","source":{"type":"used_netdown","interface":"wlan0"}}]}]}}"#,
+        );
+        assert!(!net_auto_peak(&fixed));
+        let numeric = parse(
+            r#"{"panel":{"sections":[{"sensors":[{"name":"D","value_display":"numeric","source":{"type":"used_netdown","interface":"wlan0"}}]}]}}"#,
+        );
+        assert!(!net_auto_peak(&numeric));
+        let mem = parse(
+            r#"{"panel":{"sections":[{"sensors":[{"name":"M","source":{"type":"used_mem"}}]}]}}"#,
+        );
+        assert!(!net_auto_peak(&mem), "only the network rates auto-scale");
+    }
+
+    /// `value_display` parses/serializes, only the three modes validate,
+    /// and absent stays absent (= both).
+    #[test]
+    fn value_display_roundtrips_and_validates() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[{"sensors":[{"name":"T","value_display":"grid","source":{"type":"perc_cpu"}}]}]}}"#,
+        )
+        .expect("config must parse");
+        assert_eq!(
+            cfg.panel.sections[0].sensors[0].value_display.as_deref(),
+            Some("grid")
+        );
+        let out = serde_json::to_string(&cfg).expect("serialize must succeed");
+        assert!(out.contains(r#""value_display":"grid""#), "got: {out}");
+        serde_json::from_str::<Config>(&out).expect("the serialized config parses back");
+
+        let bad: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[{"sensors":[{"name":"T","value_display":"foo","source":{"type":"perc_cpu"}}]}]}}"#,
+        )
+        .expect("config must parse");
+        let errors = validate_config(&bad);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.path == "panel.sections[0].sensors[0].value_display"),
+            "unknown mode rejected: {errors:?}"
+        );
+
+        let bare: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[{"sensors":[{"name":"T","source":{"type":"perc_cpu"}}]}]}}"#,
+        )
+        .expect("config must parse");
+        assert!(bare.panel.sections[0].sensors[0].value_display.is_none());
+
+        let old: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[{"sensors":[{"name":"T","percent_display":"grid","source":{"type":"perc_cpu"}}]}]}}"#,
+        )
+        .expect("the intermediate key still parses");
+        assert_eq!(
+            old.panel.sections[0].sensors[0].value_display.as_deref(),
+            Some("grid"),
+            "percent_display is read as value_display"
+        );
+
+        let net: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[{"sensors":[{"name":"D","scale_max":"12M","source":{"type":"used_netdown","interface":"wlan0"}}]}]}}"#,
+        )
+        .expect("network config must parse");
+        assert_eq!(
+            net.panel.sections[0].sensors[0].scale_max.as_deref(),
+            Some("12M")
+        );
+        let out = serde_json::to_string(&net).expect("serialize must succeed");
+        assert!(out.contains(r#""scale_max":"12M""#), "got: {out}");
+        let bad_max: Config = serde_json::from_str(
+            r#"{"panel":{"sections":[{"sensors":[{"name":"D","scale_max":"fast","source":{"type":"used_netdown","interface":"wlan0"}}]}]}}"#,
+        )
+        .expect("config must parse");
+        assert!(validate_config(&bad_max)
+            .iter()
+            .any(|e| e.path == "panel.sections[0].sensors[0].scale_max"));
     }
 
     /// Value effects: global mode and per-sensor opt-in roundtrip, and

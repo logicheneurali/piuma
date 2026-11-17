@@ -173,13 +173,15 @@ pub struct History {
 
 impl History {
     /// One column per config sensor with `draw_graph` on a graphable
-    /// source; any other sensor costs no memory.
+    /// source — plus the `used_net*` ones whose grid rides the history
+    /// peak; any other sensor costs no memory.
     pub fn new(sections: &[config::SectionConfig]) -> Self {
         let mut columns = Vec::new();
         let mut data = Vec::new();
         for (section, sec) in sections.iter().enumerate() {
             for (sensor, s) in sec.sensors.iter().enumerate() {
-                if let Some(scale) = s.draw_graph.then(|| scale_of(&s.source)).flatten() {
+                let tracked = s.draw_graph || config::net_auto_peak(s);
+                if let Some(scale) = tracked.then(|| scale_of(&s.source)).flatten() {
                     columns.push(Column {
                         section,
                         sensor,
@@ -221,6 +223,21 @@ impl History {
         }
         self.head = (self.head + 1) % SAMPLES;
         self.filled = (self.filled + 1).min(SAMPLES);
+    }
+
+    /// The highest sample in the recorded window: the `used_net*` grid's
+    /// auto reference. `None` before the first sample (the grid then
+    /// waits for the next tick).
+    pub fn peak(&self, section: usize, sensor: usize) -> Option<f32> {
+        let ci = self
+            .columns
+            .iter()
+            .position(|c| c.section == section && c.sensor == sensor)?;
+        let start = (self.head + SAMPLES - self.filled) % SAMPLES;
+        (0..self.filled)
+            .map(|i| self.data[ci * SAMPLES + (start + i) % SAMPLES])
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .fold(None, |acc: Option<f32>, v| Some(acc.map_or(v, |m| m.max(v))))
     }
 
     /// `(scale, samples oldest → newest)` of a sensor's column; the
@@ -493,6 +510,24 @@ mod tests {
         assert!(h.has_samples(0, 0), "the sample flags the column");
         assert!(!h.has_samples(0, 1), "the other column has no data");
         assert!(!h.has_samples(0, 2), "window never takes a column");
+    }
+
+    /// The peak is the highest sample of the recorded window, and a
+    /// net sensor takes a column even without `draw_graph` when its
+    /// grid rides the auto reference.
+    #[test]
+    fn the_peak_tracks_the_recorded_window() {
+        let sec = section(
+            r#"{"sensors":[{"name":"D","source":{"type":"used_netdown","interface":"wlan0"}}]}"#,
+        );
+        let mut h = History::new(std::slice::from_ref(&sec));
+        assert_eq!(h.peak(0, 0), None, "nothing recorded yet");
+        h.record(&[((0, 0), 100.0)]);
+        assert_eq!(h.peak(0, 0), Some(100.0));
+        h.record(&[((0, 0), 40.0)]);
+        assert_eq!(h.peak(0, 0), Some(100.0), "the earlier peak holds");
+        h.record(&[((0, 0), 250.0)]);
+        assert_eq!(h.peak(0, 0), Some(250.0));
     }
 
     /// The ring wraps, missing readings repeat the previous value and

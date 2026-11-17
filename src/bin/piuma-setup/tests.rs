@@ -329,6 +329,43 @@ fn value_effect_and_sensor_optin_roundtrip() {
         .expect("piuma must accept the saved effect config");
 }
 
+/// `value_display` survives a load/save and piuma accepts the result;
+/// absent stays absent (the bar reads "both").
+#[test]
+fn value_display_roundtrips() {
+    let json = r##"{"panel":{"sections":[{"sensors":[
+      {"name":"MEM","value_display":"grid","source":{"type":"perc_mem"}}]}]}}"##;
+    let mut state = fixture();
+    state.load_from_json(json).expect("percent config must load");
+    assert_eq!(
+        state.config.sections[0].sensors[0].value_display.as_deref(),
+        Some("grid")
+    );
+    let saved = state.serialize().expect("serialize must succeed");
+    let out: JsonValue = serde_json::from_str(&saved).expect("saved JSON must parse");
+    assert_eq!(out["panel"]["sections"][0]["sensors"][0]["value_display"], "grid");
+    serde_json::from_str::<config::Config>(&saved).expect("piuma must accept the saved config");
+
+    state
+        .load_from_json(r##"{"panel":{"sections":[{"sensors":[
+          {"name":"MEM","source":{"type":"perc_mem"}}]}]}}"##)
+        .expect("bare config must load");
+    let bare: JsonValue =
+        serde_json::from_str(&state.serialize().expect("serialize must succeed")).unwrap();
+    assert!(bare["panel"]["sections"][0]["sensors"][0]
+        .get("value_display")
+        .is_none());
+
+    state
+        .load_from_json(r##"{"panel":{"sections":[{"sensors":[
+          {"name":"NET","scale_max":"12M","source":{"type":"used_netdown","interface":"wlan0"}}]}]}}"##)
+        .expect("scale_max config must load");
+    let saved = state.serialize().expect("serialize must succeed");
+    let out: JsonValue = serde_json::from_str(&saved).expect("saved JSON must parse");
+    assert_eq!(out["panel"]["sections"][0]["sensors"][0]["scale_max"], "12M");
+    serde_json::from_str::<config::Config>(&saved).expect("piuma must accept the saved config");
+}
+
 /// The graphical workspace sensor's circle count survives a save and
 /// piuma accepts the result.
 #[test]
@@ -2126,4 +2163,23 @@ fn a_loaded_document_starts_without_undo() {
     let _ = update(&mut state, Message::FontSizeChanged(size));
     assert!(state.undo.is_empty(), "the pre-load config is not undoable");
     assert!(!state.document_loaded, "the barrier is consumed");
+}
+
+/// The dim backdrop of a modal swallows pointer events: the modal stays
+/// open and the editor underneath is untouched.
+#[test]
+fn the_modal_backdrop_swallows_clicks() {
+    let mut state = fixture();
+    state.modal = Some(Modal::ConfirmSave);
+    let before = state.serialize().expect("serialize must succeed");
+    let _ = update(&mut state, Message::ModalBackdrop);
+    assert!(
+        matches!(state.modal, Some(Modal::ConfirmSave)),
+        "the backdrop must not dismiss or replace the dialog"
+    );
+    assert_eq!(
+        state.serialize().expect("serialize must succeed"),
+        before,
+        "no editor value changed"
+    );
 }

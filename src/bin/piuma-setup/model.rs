@@ -527,6 +527,11 @@ pub struct Sensor {
     pub draw_graph: bool,
     /// Opt this sensor into the panel's value-change effect.
     pub effect: bool,
+    /// `value_display`: `numeric`, `grid` or `both`; absent = `both`.
+    pub value_display: Option<String>,
+    /// `used_net*` grid reference (`scale_max`): `"12M"`, `"1.5G"`, …
+    /// absent = the recent peak.
+    pub scale_max: Option<String>,
     /// Threshold colours for the displayed value (`color_rules`), the
     /// highest `min` the reading reaches wins on the bar; `None` = the
     /// sensor's plain `text_color` everywhere (mirrors src/config.rs).
@@ -629,6 +634,8 @@ impl Default for Sensor {
             action: None,
             draw_graph: false,
             effect: false,
+            value_display: None,
+            scale_max: None,
             color_rules: None,
         }
     }
@@ -1022,6 +1029,12 @@ impl PiumaSetup {
         }
         if sensor.effect {
             map.insert("effect".to_string(), JsonValue::Bool(true));
+        }
+        if let Some(mode) = &sensor.value_display {
+            map.insert("value_display".to_string(), JsonValue::String(mode.clone()));
+        }
+        if let Some(max) = sensor.scale_max.as_deref().filter(|m| !m.trim().is_empty()) {
+            map.insert("scale_max".to_string(), JsonValue::String(max.to_string()));
         }
 
         // Threshold colour rules, stored sorted by ascending `min` (the
@@ -1649,6 +1662,19 @@ impl PiumaSetup {
         // Graph toggle: absent = off (the config default).
         sensor.draw_graph = obj.get("draw_graph").and_then(|v| v.as_bool()).unwrap_or(false);
         sensor.effect = obj.get("effect").and_then(|v| v.as_bool()).unwrap_or(false);
+        // Absent or unknown = both (the bar's fallback); keeping an
+        // unknown value would only trip the pre-save check.
+        sensor.value_display = obj
+            .get("value_display")
+            .or_else(|| obj.get("percent_display"))
+            .and_then(|v| v.as_str())
+            .filter(|mode| matches!(*mode, "numeric" | "grid" | "both"))
+            .map(str::to_string);
+        sensor.scale_max = obj
+            .get("scale_max")
+            .and_then(|v| v.as_str())
+            .filter(|max| !max.trim().is_empty())
+            .map(str::to_string);
 
         // Threshold colour rules: loaded like `action`, otherwise the next
         // save would drop the key. Entries a rule cannot be made of (wrong

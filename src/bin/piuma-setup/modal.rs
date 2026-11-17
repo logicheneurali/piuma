@@ -1,7 +1,7 @@
 //! Modal dialogs stacked over the main view: save/load confirmations, the
 //! section/sensor editors, the colour-rule list and the icon browser.
 use iced::widget::text::Style as TextStyle;
-use iced::widget::{button, column, container, scrollable, text, Row};
+use iced::widget::{button, column, container, mouse_area, scrollable, text, Row};
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
 use crate::config;
 use crate::icons;
@@ -83,7 +83,7 @@ impl Modal {
 
 /// Dimmed full-window layer with the active modal card centered on top.
 pub(crate) fn modal_overlay(state: &PiumaSetup) -> Element<'_, Message> {
-    container(modal_card(state))
+    let dim = container(modal_card(state))
         .width(Length::Fill)
         .height(Length::Fill)
         .center_x(Length::Fill)
@@ -91,7 +91,17 @@ pub(crate) fn modal_overlay(state: &PiumaSetup) -> Element<'_, Message> {
         .style(|_t: &Theme| container::Style {
             background: Some(Background::Color(Color { r: 0.0, g: 0.0, b: 0.0, a: 0.55 })),
             ..container::Style::default()
-        })
+        });
+    // A container draws but does not take input: without this area a
+    // click on the dim backdrop fell through the stack into the editor
+    // underneath (a toggler, a colour, a whole row). The area swallows
+    // presses and the wheel with a no-op; the card's own buttons, inputs
+    // and scrollables are children and keep working.
+    mouse_area(dim)
+        .on_press(Message::ModalBackdrop)
+        .on_middle_press(Message::ModalBackdrop)
+        .on_right_press(Message::ModalBackdrop)
+        .on_scroll(|_| Message::ModalBackdrop)
         .into()
 }
 

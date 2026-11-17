@@ -208,7 +208,7 @@ pub(crate) fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<C
                 // Graph engine: record this pass's sample for the
                 // sensors that opted in (`draw_graph` on a
                 // graphable source); the columns ignore the rest.
-                if s.draw_graph {
+                if s.draw_graph || config::net_auto_peak(s) {
                     if let Some((sample, _)) = read.graph {
                         graph_samples.push(((section_idx, sensor_idx), sample));
                     }
@@ -283,6 +283,54 @@ pub(crate) fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<C
                 // through the memoized theme lookups.
                 let taskbar_icons = matches!(s.source, config::SensorSource::Taskbar {})
                     .then(|| windows::task_icons(hypr.as_ref()));
+                // The grid's fraction of its reference: the value itself
+                // for percentages, the reading's own used/total for the
+                // `used_*` families, the rate over `scale_max` (or the
+                // recent peak) for the network rates. The peak is the
+                // previous pass's history — one tick behind, and clamped
+                // below anyway.
+                let level: Option<f32> = match &s.source {
+                    config::SensorSource::PercCpu {}
+                    | config::SensorSource::PercGpu {}
+                    | config::SensorSource::PercMem {}
+                    | config::SensorSource::PercSwap {}
+                    | config::SensorSource::PercDisk {}
+                    | config::SensorSource::PercBattery {}
+                    | config::SensorSource::PercBacklight {}
+                    | config::SensorSource::PercVolume { .. } => {
+                        sensors::leading_number(&value).map(|pct| (pct / 100.0).clamp(0.0, 1.0))
+                    }
+                    config::SensorSource::UsedMem {}
+                    | config::SensorSource::UsedSwap {}
+                    | config::SensorSource::UsedDisk {}
+                    | config::SensorSource::UsedBattery {} => read
+                        .graph
+                        .map(|(percent, _)| (percent as f32 / 100.0).clamp(0.0, 1.0)),
+                    config::SensorSource::TempCpu {}
+                    | config::SensorSource::TempGpu {} => {
+                        read.graph.map(|(temp, _)| temp_level(temp))
+                    }
+                    config::SensorSource::UsedNetdown { .. }
+                    | config::SensorSource::UsedNetup { .. } => {
+                        // Auto peak ignores idle noise: a peak below
+                        // the floor is no reference at all (the grid
+                        // stays empty), or a quiet interface would show
+                        // a full grid just because that is the busiest
+                        // it has been.
+                        let reference = config::parse_rate_max(
+                            s.scale_max.as_deref().unwrap_or_default(),
+                        )
+                        .or_else(|| {
+                            panel
+                                .graphs
+                                .peak(section_idx, sensor_idx)
+                                .map(f64::from)
+                                .filter(|peak| *peak >= AUTO_PEAK_MIN)
+                        });
+                        rate_level(read.graph.map(|(rate, _)| rate), reference)
+                    }
+                    _ => None,
+                };
                 // Only the net rate sensors pin their value box
                 // (roadmap M5), and the pin is the displayed value's
                 // OWN tier: exact width (no headroom for units this
@@ -334,6 +382,10 @@ pub(crate) fn apply_read(panel: &mut Panel, data: sensor_runner::Reads) -> Vec<C
                     workspaces: workspace_buttons,
                     taskbar: taskbar_icons,
                     media: read.media,
+                    value_display: crate::panel::ValueDisplay::from_config(
+                        s.value_display.as_deref(),
+                    ),
+                    level,
                     is_notifications: st.is_notifications,
                     icon: st.icon.clone().or(wifi_icon),
                     icon_size: st.icon_size,
@@ -501,5 +553,53 @@ pub(crate) fn refresh_tray_and_notif(panel: &mut Panel) {
                 sensor.value = notifications::badge_value();
             }
         }
+    }
+}
+
+/// A temperature as a grid level: one square per 10 °C (a conventional
+/// 0–100 scale, clamped — the colour rules still say how hot it is).
+fn temp_level(temp: f64) -> f32 {
+    (temp / 100.0).clamp(0.0, 1.0) as f32
+}
+
+/// The auto peak ignores an idle interface: below this rate (bytes/s)
+/// the history holds noise, not a reference the grid should scale to.
+const AUTO_PEAK_MIN: f64 = 10_000.0;
+
+/// The grid level for a network rate. `None` only when the reading is
+/// missing (`N/A`); a zero rate — or a reference not known yet while the
+/// auto peak fills its window — is a real level of 0, so a grid-only
+/// sensor keeps the grid instead of flashing its "0.0 B" text.
+fn rate_level(rate: Option<f64>, reference: Option<f64>) -> Option<f32> {
+    let rate = rate?;
+    match reference.filter(|reference| *reference > 0.0) {
+        Some(reference) if rate.is_finite() && rate > 0.0 => {
+            Some((rate / reference).clamp(0.0, 1.0) as f32)
+        }
+        _ => Some(0.0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{rate_level, temp_level};
+
+    #[test]
+    fn a_temperature_maps_ten_degrees_per_square() {
+        assert_eq!(temp_level(0.0), 0.0);
+        assert_eq!(temp_level(61.0), 0.61);
+        assert_eq!(temp_level(75.0), 0.75);
+        assert_eq!(temp_level(100.0), 1.0);
+        assert_eq!(temp_level(120.0), 1.0, "clamped above boiling");
+    }
+
+    #[test]
+    fn a_zero_rate_is_an_empty_grid_not_missing_data() {
+        assert_eq!(rate_level(None, Some(1024.0)), None, "N/A keeps the text");
+        assert_eq!(rate_level(Some(0.0), Some(1024.0)), Some(0.0));
+        assert_eq!(rate_level(Some(0.0), None), Some(0.0), "peak not ready yet");
+        assert_eq!(rate_level(Some(2048.0), Some(4096.0)), Some(0.5));
+        assert_eq!(rate_level(Some(9000.0), Some(4096.0)), Some(1.0));
+        assert_eq!(rate_level(Some(2048.0), None), Some(0.0));
     }
 }

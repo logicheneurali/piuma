@@ -214,6 +214,13 @@ pub enum Message {
     SensorDrawGraphChanged(usize, usize, bool),
     /// Value-effect opt-in of one sensor.
     SensorEffectChanged(usize, usize, bool),
+    /// Percentage display of one sensor: `Numeric`, `Grid` or `Both`.
+    SensorValueDisplayChanged(usize, usize, String),
+    /// `used_net*` grid reference (`scale_max`), as typed.
+    SensorScaleMaxChanged(usize, usize, String),
+    /// A pointer event on the modal's dim backdrop: swallowed (the modal
+    /// stays open and the editor underneath is never touched).
+    ModalBackdrop,
     /// Opens the threshold colour-rules editor for one sensor (the "…"
     /// right of the Text colour field).
     ColorRulesPressed(usize, usize),
@@ -720,31 +727,31 @@ impl PiumaSetup {
         /// UI label of a field's last path segment.
         fn label(field: &str) -> &str {
             match field {
-                "text_color" => "Text",
-                "text_color_hover" => "Hover text",
-                "bg_color" => "BG",
-                "bg_color_hover" => "Hover BG",
+                "text_color" => "Text colour",
+                "text_color_hover" => "Hover text colour",
+                "bg_color" => "Background",
+                "bg_color_hover" => "Hover background",
                 "border_color" => "Border",
                 "border_color_hover" => "Hover border",
                 "border_width" => "Border width",
                 "border_width_hover" => "Hover border width",
                 "border_radius" => "Border radius",
-                "border_type" => "Border type",
-                "padding" => "Padding",
+                "border_type" => "Border style",
+                "padding" => "Side padding",
                 "weight" => "Weight",
-                "layout" => "Layout",
+                "layout" => "Sensors layout",
                 "anchor" => "Anchor",
                 "align" => "Align",
                 "section_layout" => "Section layout",
                 "thickness" => "Thickness",
                 "font_size" => "Font size",
-                "default_bg_color" => "Default BG",
-                "default_text_color" => "Default text",
+                "default_bg_color" => "Bar background",
+                "default_text_color" => "Bar text",
                 "default_section_weight" => "Default section weight",
                 "default_timeout_ms" => "Default timeout",
                 "history_size" => "History size",
-                "popup_margin_h" => "Popup margin H",
-                "popup_margin_v" => "Popup margin V",
+                "popup_margin_h" => "Horizontal margin",
+                "popup_margin_v" => "Vertical margin",
                 "interval" => "Interval",
                 "min" => "Minimum gap",
                 "max" => "Maximum gap",

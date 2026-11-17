@@ -5,7 +5,7 @@ use iced::widget::{
     button, canvas, column, container, text, Button, Column, PickList, Row, Slider, Space,
     TextInput,
 };
-use iced::{Alignment, Background, Border, Color, Element, Length, Point, Size, Theme};
+use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Point, Size, Theme};
 use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -24,12 +24,25 @@ use crate::state::Message;
 
 
 /// One label + control pair filling half of a form row.
+///
+/// The label rides the control's FIRST line, never the middle of the
+/// whole cell: a colour field carries a palette-chip row under its input
+/// and an anchor picker is a 3×3 grid, and centring the label against all
+/// of that made it read as a label for the wrong row. The top inset is
+/// what centres the label on a one-line input's text (~half the input's
+/// extra height over the text line).
 pub(crate) fn form_cell<'a>(label: &'a str, control: Element<'a, Message>) -> Row<'a, Message> {
+    const LABEL_TOP: f32 = 5.0;
     Row::new()
-        .push(text(label).size(BODY).width(LABEL_WIDTH))
+        .push(
+            container(text(label).size(BODY).width(LABEL_WIDTH)).padding(Padding {
+                top: LABEL_TOP,
+                ..Padding::ZERO
+            }),
+        )
         .push(control)
         .spacing(10)
-        .align_y(Alignment::Center)
+        .align_y(Alignment::Start)
         .width(Length::Fill)
 }
 
