@@ -81,8 +81,9 @@ Sensor `type` values follow a naming convention by category:
 - **`perc_`** – percentage: `perc_cpu`, `perc_gpu`, `perc_mem`, `perc_swap`,
   `perc_disk`, `perc_battery`, `perc_backlight`, `perc_volume`. Each sensor
   can pick `value_display`: `numeric` (the number), `grid` (a 3×3 grid,
-  one square per 10%, lit left→right and bottom→top — 35% lights the bottom
-  row, 89% all but the top-right) or `both` (the default). The same choice
+  one full square per 10%, lit left→right and bottom→top; a remainder over
+  5% adds the same 4×4 square at a lighter alpha in the next cell, so 35% lights the bottom
+  row and 36% adds the partial marker) or `both` (the default). The same choice
   covers the `used_mem`/`used_swap`/`used_disk`/`used_battery` family, whose
   grid is the fraction of the current total, and the network rates, whose
   reference is `scale_max` (`"12M"`, `"1.5G"`, `"500K"`, `"1T"`; binary

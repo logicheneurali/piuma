@@ -873,38 +873,61 @@ pub(crate) static BAR_ID: std::sync::OnceLock<iced::window::Id> = std::sync::Onc
 
 
 
-/// Squares lit by a percentage: one per 10%, 0..=9 (100% lights all).
+/// Full squares lit by a percentage: one per 10%, 0..=9.
 fn percent_grid_filled(pct: f32) -> usize {
     ((pct / 10.0).floor() as i32).clamp(0, 9) as usize
 }
 
-/// The percentage grid: 3×3 squares filling left→right and bottom→top,
-/// so 35% lights the bottom row and 89% all but the top-right square.
-/// Unlit squares keep the value colour at 22% alpha.
+/// Whether the next square is a partial: the remainder is over half a
+/// square (>5%) and there is still a cell for it (below 90%). It never
+/// rounds up — a remainder up to 5% lights nothing.
+fn percent_grid_partial(pct: f32) -> bool {
+    let full = percent_grid_filled(pct);
+    full < 9 && pct - full as f32 * 10.0 > 5.0
+}
+
+/// One grid square at `size` px.
+fn grid_cell<'a>(size: f32, color: Color) -> Element<'a, Message> {
+    container(Space::new())
+        .width(Length::Fixed(size))
+        .height(Length::Fixed(size))
+        .style(move |_t| ContainerStyle {
+            background: Some(Background::Color(color)),
+            border: Border {
+                radius: 1.0.into(),
+                ..Default::default()
+            },
+            ..ContainerStyle::default()
+        })
+        .into()
+}
+
+/// The percentage grid: 3×3 squares filling left→right and bottom→top.
+/// Full squares are 10% each; the square after them carries the partial
+/// remainder over 5% at a lighter alpha. Unlit squares keep the value
+/// colour at 22% alpha.
 fn percent_grid<'a>(pct: f32, color: Color) -> Element<'a, Message> {
     const SQUARE: f32 = 4.0;
     const GAP: f32 = 1.0;
     let filled = percent_grid_filled(pct);
+    let partial = percent_grid_partial(pct);
     let dim = Color { a: 0.22, ..color };
+    // Same size as a full square: the grid stays even, the partial
+    // reads as a half-lit cell rather than a smaller, odd one.
+    let half = Color { a: 0.65, ..color };
     let mut grid = Column::new().spacing(GAP);
     for row_from_top in 0..3usize {
         let mut row = Row::new().spacing(GAP);
         for column in 0..3usize {
             let index = (2 - row_from_top) * 3 + column;
-            let tint = if index < filled { color } else { dim };
-            row = row.push(
-                container(Space::new())
-                    .width(Length::Fixed(SQUARE))
-                    .height(Length::Fixed(SQUARE))
-                    .style(move |_t| ContainerStyle {
-                        background: Some(Background::Color(tint)),
-                        border: Border {
-                            radius: 1.0.into(),
-                            ..Default::default()
-                        },
-                        ..ContainerStyle::default()
-                    }),
-            );
+            let tint = if index < filled {
+                color
+            } else if partial && index == filled {
+                half
+            } else {
+                dim
+            };
+            row = row.push(grid_cell(SQUARE, tint));
         }
         grid = grid.push(row);
     }
@@ -918,11 +941,28 @@ mod tests {
     #[test]
     fn the_grid_lights_one_square_per_ten_percent() {
         assert_eq!(percent_grid_filled(0.0), 0);
-        assert_eq!(percent_grid_filled(9.0), 0, "under 10%: nothing lit");
+        assert_eq!(percent_grid_filled(9.0), 0, "no full square under 10%");
         assert_eq!(percent_grid_filled(10.0), 1);
         assert_eq!(percent_grid_filled(35.0), 3, "the bottom row");
         assert_eq!(percent_grid_filled(89.0), 8, "all but the top-right");
         assert_eq!(percent_grid_filled(99.0), 9);
         assert_eq!(percent_grid_filled(100.0), 9, "never a tenth square");
+    }
+
+    #[test]
+    fn over_half_a_square_gets_the_partial_marker() {
+        assert!(!percent_grid_partial(5.0), "exactly half: nothing");
+        assert!(percent_grid_partial(5.1));
+        assert!(percent_grid_partial(6.0));
+        assert!(percent_grid_partial(9.0), "no full square, one partial");
+        assert!(!percent_grid_partial(10.0), "the next full square");
+        assert!(!percent_grid_partial(15.0), "exactly half of the next cell");
+        assert!(percent_grid_partial(16.0));
+        assert!(!percent_grid_partial(35.0));
+        assert!(percent_grid_partial(36.0));
+        assert!(percent_grid_partial(89.0));
+        assert!(!percent_grid_partial(90.0), "ninety is nine full squares");
+        assert!(!percent_grid_partial(96.0), "no tenth cell: capped");
+        assert!(!percent_grid_partial(100.0));
     }
 }

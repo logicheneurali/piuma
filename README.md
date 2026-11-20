@@ -104,10 +104,7 @@ cargo install --git https://github.com/logicheneurali/piuma
 
 ## Status
 
-Piuma is **0.x software**: it targets Hyprland only, and Waybar remains far
-more mature in themes and third-party plugins. Bug reports and feature
-requests are welcome in the
-[issue tracker](https://github.com/logicheneurali/piuma/issues).
+Piuma is actively developed for Hyprland on Wayland.
 
 ## License
 
