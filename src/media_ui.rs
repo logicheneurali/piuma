@@ -3,7 +3,7 @@
 //! cannot perform is drawn at half alpha (its click is a no-op in
 //! `mpris`, which checks the same capability).
 
-use iced::widget::{button, text, Button, Row};
+use iced::widget::{button, container, text, Button, Row};
 use iced::{Background, Border, Color, Element, Font};
 
 use crate::mpris::{self, MediaState};
@@ -50,10 +50,20 @@ pub(crate) fn row<'a>(
             color,
         ))
         .push(
-            text(mpris::media_label(media))
-                .size(font_size)
-                .font(font)
-                .color(color),
+            // The Nerd Font transport glyphs are drawn centred in their
+            // cell, while the label's caps ride above the baseline: a
+            // pixel of top padding puts the two on the same optical
+            // centre instead of leaving the text visibly high.
+            container(
+                text(mpris::media_label(media))
+                    .size(font_size)
+                    .font(font)
+                    .color(color),
+            )
+            .padding(iced::Padding {
+                top: 2.0,
+                ..iced::Padding::ZERO
+            }),
         )
         .into()
 }
