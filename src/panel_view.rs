@@ -46,85 +46,107 @@ fn title_fit_name<'a>(panel: &'a Panel, section: &'a SectionData) -> &'a str {
 /// Root view: pick the layout for this window, publish its logical size
 /// (popup geometry reads the globals) and render the shared panel state.
 pub(crate) fn view<'a>(app: &'a App, window: iced::window::Id) -> Element<'a, Message> {
-    let index = app.windows.get(&window).copied().unwrap_or(0);
+    // A surface whose state is gone (its window is closing) must not fall
+    // through to the bar: that frame painted the panel's left edge where
+    // the popup had been.
+    if let Some(view) = side_window_view(&app.state, window) {
+        return view;
+    }
+    // Bar surfaces: the extra panels recorded at open, and the daemon's
+    // own first one (BAR_ID). Anything else is a closing side window.
+    let mapping = app.windows.get(&window).copied();
+    let is_bar = mapping.is_some()
+        || BAR_ID.get().copied().is_none_or(|id| id == window);
+    if !is_bar {
+        return container(Space::new().width(Length::Fill).height(Length::Fill)).into();
+    }
+    let index = mapping.unwrap_or(0);
+    let _ = BAR_ID.set(window);
     let layout = app.layouts.get(index).unwrap_or(&app.layouts[0]);
     let (width, height) = app.screens.get(index).copied().unwrap_or((1920, 1080));
     unsafe {
         SCREEN_WIDTH = width;
         SCREEN_HEIGHT = height;
     }
-    bar_view(&app.state, window, layout)
+    bar_view(&app.state, layout)
 }
 
-fn bar_view<'a>(
+/// The side surfaces — popups, menus, tooltips, the wallpaper and the
+/// corner masks — each render their own tree while their state names this
+/// window. `None` when no state owns it: a surface that is closing.
+fn side_window_view<'a>(
     panel: &'a Panel,
     window: iced::window::Id,
-    layout: &'a config::PanelLayout,
-) -> Element<'a, Message> {
-    // Side windows render their own trees; only bar calls feed BAR_ID.
+) -> Option<Element<'a, Message>> {
     if panel.wallpaper.iter().any(|(_, id)| *id == window) {
-        return wallpaper_view(panel, window);
+        return Some(wallpaper_view(panel, window));
     }
     if panel.corners.iter().any(|(_, id)| *id == window) {
-        return corners_view(panel, window);
+        return Some(corners_view(panel, window));
     }
     if let Some((_, ghost)) = panel.closing.iter().find(|(id, _)| *id == window) {
-        return popup_anim::ghost_view(panel, ghost);
+        return Some(popup_anim::ghost_view(panel, ghost));
     }
     if let Some((id, _)) = panel.tray_menu.as_ref() {
         if *id == window {
-            return tray_menu_view(panel);
+            return Some(tray_menu_view(panel));
         }
     }
     if let Some((id, _)) = panel.notif_list.as_ref() {
         if *id == window {
-            return notif_list_view(panel);
+            return Some(notif_list_view(panel));
         }
     }
     if let Some((id, _)) = panel.taskbar_menu.as_ref() {
         if *id == window {
-            return taskbar_menu_view(panel);
+            return Some(taskbar_menu_view(panel));
         }
     }
     if let Some(menu) = panel.window_menu.as_ref() {
         if menu.id == window {
-            return window_menu::view(panel, menu);
+            return Some(window_menu::view(panel, menu));
         }
     }
     if let Some((id, _)) = panel.bar_tooltip.as_ref() {
         if *id == window {
-            return tooltip_window_view(panel);
+            return Some(tooltip_window_view(panel));
         }
     }
     if let Some(gp) = panel.graph_popup.as_ref() {
         if gp.id == window {
-            return graph_popup_view(panel, gp);
+            return Some(graph_popup_view(panel, gp));
         }
     }
     if let Some(cp) = panel.calendar.as_ref() {
         if cp.id == window {
-            return calendar_popup_view(panel, cp);
+            return Some(calendar_popup_view(panel, cp));
         }
     }
     if power_menu::is_window(panel, window) {
-        return power_menu::view(panel);
+        return Some(power_menu::view(panel));
     }
     if theme_menu::is_window(panel, window) {
-        return theme_menu::view(panel);
+        return Some(theme_menu::view(panel));
     }
     if dashboard::is_window(panel, window) {
-        return dashboard_view::view(panel);
+        return Some(dashboard_view::view(panel));
     }
     if osd::is_window(panel, window) {
-        return osd::view(panel);
+        return Some(osd::view(panel));
     }
     if screensaver::is_window(panel, window) {
-        return screensaver::view(panel, window);
+        return Some(screensaver::view(panel, window));
     }
     if panel.popup == Some(window) {
-        return popup_view(panel);
+        return Some(popup_view(panel));
     }
-    let _ = BAR_ID.set(window);
+    None
+}
+
+fn bar_view<'a>(
+    panel: &'a Panel,
+    layout: &'a config::PanelLayout,
+) -> Element<'a, Message> {
     let font_obj = panel_font(&panel.config);
     // Value texts can ride a separate (typically monospaced) family.
     let value_font_obj = value_font(&panel.config);
