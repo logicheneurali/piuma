@@ -6,7 +6,21 @@ description = "Pannello di sistema leggero per Wayland (Hyprland)"
 license = "Apache-2.0"
 
 [dependencies]
-iced = { version = "0.14", features = ["smol", "advanced", "image", "svg", "canvas"] }
+# Wayland only, GPU renderer only: the `x11` backend and the unused
+# tiny-skia fallback stay out of the build (the bar never starts on X11,
+# and wgpu is the renderer iced selects).
+iced = { version = "0.14", default-features = false, features = [
+    "smol",
+    "advanced",
+    "image",
+    "svg",
+    "canvas",
+    "crisp",
+    "web-colors",
+    "thread-pool",
+    "wgpu",
+    "wayland",
+] }
 # Operation runner (`iced_runtime::task::widget`): the graph popup
 # queries its sensor's on-screen rect through the widget tree.
 iced_runtime = "0.14"
