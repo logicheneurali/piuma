@@ -8,6 +8,8 @@ use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
+use crate::text_util::truncate_chars;
+
 // ── CPU / GPU ───────────────────────────────────────────────────────
 
 /// Last aggregate /proc/stat sample for the CPU delta: (total, idle, at).
@@ -1121,14 +1123,6 @@ fn invalidate_probe<T>(slot: &'static ProbeSlot<T>) {
 }
 
 /// Cut `text` to `max` chars (multibyte-safe) with a trailing ellipsis.
-fn truncate_chars(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    let cut: String = text.chars().take(max.saturating_sub(1)).collect();
-    format!("{cut}…")
-}
-
 /// The active NetworkManager connection: VPN, then Wi-Fi (its SSID),
 /// then wired, then anything else; `offline` when nothing is up.
 pub fn net_info() -> String {

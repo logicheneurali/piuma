@@ -574,15 +574,14 @@ fn bar_view<'a>(
                 row.into()
             };
 
-            let desc_str: String = s.description.clone();
+            let desc = s.description.as_str();
             // The dots sensor is purely graphical: a configured description
             // must not put text back into its box.
-            let has_desc = !desc_str.is_empty() && workspace_dots.is_none();
-            let desc_value = desc_str.clone();
+            let has_desc = !desc.is_empty() && workspace_dots.is_none();
 
             let content: Element<'a, Message> = if has_desc {
                 let desc_size = font_size.saturating_sub(2);
-                let desc_widget = text(desc_value)
+                let desc_widget = text(desc)
                     .color(Color::from_rgba(0.5, 0.5, 0.5, 0.7))
                     .size(desc_size)
                     .font(font_obj)

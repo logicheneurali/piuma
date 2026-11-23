@@ -9,7 +9,7 @@ use iced::widget::{button, column, container, image, row, scrollable, text, Colu
 use iced::{Background, Border, Color, Element, Length};
 
 use crate::dashboard::{self, Action};
-use crate::text_util::panel_font;
+use crate::text_util::{panel_font, truncate_chars};
 use crate::{notifications, popup_style, Message, Panel};
 
 /// The overlay's full-screen scrim: dark enough to separate the card,
@@ -151,7 +151,7 @@ fn left_column<'a>(
                 .unwrap_or(p.power_profile.as_str())
         })
         .unwrap_or("N/A");
-    let bluetooth = truncate(probe.map(|p| p.bluetooth.as_str()).unwrap_or("N/A"), 20);
+    let bluetooth = truncate_chars(probe.map(|p| p.bluetooth.as_str()).unwrap_or("N/A"), 20);
     let controls = column![
         row![
             tile("Power profile", profile, false, Action::PowerProfile, st, font),
@@ -272,7 +272,7 @@ fn media_block<'a>(panel: &'a Panel, st: &crate::PopupStyle, font: iced::Font) -
     let title = if now.title.is_empty() {
         "Unknown track".to_string()
     } else {
-        truncate(&now.title, 40)
+        truncate_chars(&now.title, 40)
     };
     let status = if now.status == "Playing" {
         "Playing"
@@ -336,7 +336,7 @@ fn media_block<'a>(panel: &'a Panel, st: &crate::PopupStyle, font: iced::Font) -
             art,
             column![
                 text(title).size(15).font(font).color(st.text),
-                text(truncate(&now.artist, 32)).size(12).font(font).color(st.text_hover),
+                text(truncate_chars(&now.artist, 32)).size(12).font(font).color(st.text_hover),
                 text(status).size(10).font(font).color(st.text),
             ]
             .spacing(3)
@@ -505,11 +505,11 @@ fn right_column<'a>(
                 row![
                     icon,
                     column![
-                        text(truncate(&card.summary, 46))
+                        text(truncate_chars(&card.summary, 46))
                             .size(11)
                             .font(font)
                             .color(st.text_hover),
-                        text(truncate(&card.body, 70)).size(10).font(font).color(st.text),
+                        text(truncate_chars(&card.body, 70)).size(10).font(font).color(st.text),
                     ]
                     .spacing(1)
                     .width(Length::Fill),
@@ -763,26 +763,5 @@ fn blend(a: Color, b: Color, t: f32) -> Color {
         g: a.g + (b.g - a.g) * t,
         b: a.b + (b.b - a.b) * t,
         a: (a.a + (b.a - a.a) * t).max(a.a),
-    }
-}
-
-fn truncate(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    let cut: String = text.chars().take(max.saturating_sub(1)).collect();
-    format!("{cut}…")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn truncation_keeps_the_limit() {
-        assert_eq!(truncate("short", 10), "short");
-        let out = truncate("0123456789abcdef", 8);
-        assert_eq!(out.chars().count(), 8);
-        assert!(out.ends_with('…'));
     }
 }

@@ -107,7 +107,7 @@ pub(crate) fn run() -> Result<(), iced_exwlshell::Error> {
 
     // Load configuration once at startup; remember the file it came from so
     // it can be watched for hot reload.
-    let (mut config, resolved_config_path) = config::load_config(config_path.clone());
+    let (mut config, resolved_config_path) = config::load_config(config_path);
 
     eprintln!(
         "[piuma] Config loaded: {} section(s) from {}",
@@ -191,7 +191,7 @@ pub(crate) fn run() -> Result<(), iced_exwlshell::Error> {
     // bar listens for the session-lock windows it makes for a lock
     // request (see `screensaver::on_shell`).
     let (shell_tx, shell_rx) = iced_exwlshell::shell::channel();
-    let boot_base = config_base.clone();
+    let boot_base = config_base;
     let handle = std::thread::Builder::new()
         .name("piuma-panel".to_string())
         .spawn(move || {
@@ -324,7 +324,7 @@ pub(crate) fn run() -> Result<(), iced_exwlshell::Error> {
                             blur_option: glass_blur(&cfg),
                         });
                         app.windows.insert(id, index);
-                        app.state.bar_windows.push((id, layout.anchor.clone()));
+                        app.state.bar_windows.push((id, layout.anchor));
                         task = Command::batch([task, open]);
                     }
                     (app, task)
@@ -379,7 +379,7 @@ pub(crate) fn run() -> Result<(), iced_exwlshell::Error> {
 
 /// Parse `-c <path>` or `--config <path>` from CLI args.
 fn parse_config_arg() -> Option<String> {
-    let args: Vec<String> = std::env::args().map(|s| s.to_string()).collect();
+    let args: Vec<String> = std::env::args().collect();
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];

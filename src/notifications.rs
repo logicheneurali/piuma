@@ -248,8 +248,8 @@ pub fn history_rows(max: usize) -> Vec<NotifRow> {
         .take(max)
         .map(|n| NotifRow {
             id: n.id,
-            summary: truncate(&n.summary, MAX_SUMMARY),
-            body: truncate(&n.body, MAX_BODY),
+            summary: crate::text_util::truncate_chars(&n.summary, MAX_SUMMARY),
+            body: crate::text_util::truncate_chars(&n.body, MAX_BODY),
             closed: n.closed.is_some(),
             received: n.received,
         })
@@ -414,16 +414,6 @@ pub fn prune_icon_handles() {
         return;
     }
     icons.retain(|id, _| hist.iter().any(|n| n.id == *id && n.closed.is_none()));
-}
-
-/// Cut at a char boundary and append `…`.
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
-    out.push('…');
-    out
 }
 
 // ── record / close logic (unit-tested core) ────────────────────────

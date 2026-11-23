@@ -60,3 +60,28 @@ pub(crate) fn value_font(config: &config::Config) -> Font {
         None => panel_font(config),
     }
 }
+
+/// `text` cut to `max` characters; the cut one is replaced by an ellipsis,
+/// so the result never exceeds `max` (the bar's labels, the notification
+/// cards and the dashboard share this rule).
+pub(crate) fn truncate_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(max.saturating_sub(1)).collect();
+    format!("{cut}…")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncation_keeps_the_limit() {
+        assert_eq!(truncate_chars("short", 10), "short");
+        let out = truncate_chars("0123456789abcdef", 8);
+        assert_eq!(out.chars().count(), 8);
+        assert!(out.ends_with('…'));
+        assert_eq!(truncate_chars("0123456789", 5), "0123…");
+    }
+}
