@@ -623,9 +623,36 @@ pub struct SectionDefaults {
     pub border_width: Option<i32>,
     pub border_radius: Option<i32>,
     pub border_type: Option<String>,
+    /// Content inset (title and sensors) inside a section on a
+    /// horizontal bar, px; absent = 4.
+    pub content_padding: Option<i32>,
+    /// The same inset on a vertical bar (a side bar spends less of its
+    /// width on it), px; absent = 2.
+    pub content_padding_narrow: Option<i32>,
     /// When true only the sides NOT flush with a screen edge get rounded
     /// borders (roadmap M3); absent = false.
     pub respect_screen_edges: Option<bool>,
+}
+
+impl PanelConfig {
+    /// The section content inset the view draws around a section's title
+    /// and sensors: `content_padding` on a horizontal bar,
+    /// `content_padding_narrow` on a vertical one (4/2 when unset).
+    pub fn section_content_pad(&self, vertical: bool) -> u16 {
+        let default = if vertical {
+            crate::icons::SECTION_CONTENT_PAD_NARROW
+        } else {
+            crate::icons::SECTION_CONTENT_PAD
+        };
+        let value = self.section_defaults.as_ref().and_then(|sd| {
+            if vertical {
+                sd.content_padding_narrow
+            } else {
+                sd.content_padding
+            }
+        });
+        value.map_or(default, |v| v.clamp(0, 16) as u16)
+    }
 }
 
 #[derive(Deserialize, serde::Serialize, Clone)]
@@ -1259,6 +1286,14 @@ pub fn validate_config(cfg: &Config) -> Vec<ConfigError> {
         err_one_of(&mut errors, &format!("{path}.border_type"), sd.border_type.as_deref(), &BORDER_TYPES);
         err_range(&mut errors, &format!("{path}.border_width"), sd.border_width, -1, 64);
         err_range(&mut errors, &format!("{path}.border_radius"), sd.border_radius, -1, 64);
+        err_range(&mut errors, &format!("{path}.content_padding"), sd.content_padding, 0, 16);
+        err_range(
+            &mut errors,
+            &format!("{path}.content_padding_narrow"),
+            sd.content_padding_narrow,
+            0,
+            16,
+        );
     }
     if let Some(n) = &p.notifications {
         let path = "panel.notifications";
@@ -2624,6 +2659,35 @@ mod tests {
         let empty = validate_config(&parse(r#"{"source":{"type":"static_text"}}"#));
         assert_eq!(empty.len(), 1, "{empty:?}");
         assert_eq!(empty[0].path, "panel.sections[0].sensors[0].source");
+    }
+
+    /// Section defaults: the two content insets are optional, default to
+    /// 4 / 2 and validate their 0..=16 range.
+    #[test]
+    fn section_content_padding_defaults_and_range() {
+        let load = |json: &str| {
+            serde_json::from_str::<Config>(json).expect("config must parse")
+        };
+        let default = load(r#"{"panel":{"sections":[]}}"#);
+        assert_eq!(default.panel.section_content_pad(false), 4);
+        assert_eq!(default.panel.section_content_pad(true), 2);
+        let custom = load(
+            r#"{"panel":{"sections":[],"section_defaults":{
+                "content_padding":0,"content_padding_narrow":16}}}"#,
+        );
+        assert_eq!(custom.panel.section_content_pad(false), 0);
+        assert_eq!(custom.panel.section_content_pad(true), 16);
+        let errors = validate_config(&load(
+            r#"{"panel":{"sections":[],"section_defaults":{
+                "content_padding":17,"content_padding_narrow":-1}}}"#,
+        ));
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors
+            .iter()
+            .any(|e| e.path == "panel.section_defaults.content_padding"));
+        assert!(errors
+            .iter()
+            .any(|e| e.path == "panel.section_defaults.content_padding_narrow"));
     }
 
     /// An unparsable colour, an unknown `border_type` and an out-of-range

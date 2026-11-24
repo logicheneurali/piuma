@@ -5,7 +5,7 @@ use iced::widget::{button, column, container, scrollable, text, Row};
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
 
 use crate::config;
-use crate::controls::{resolved_icon, sensor_icon_size, sensor_padding};
+use crate::controls::{resolved_icon, section_content_pad, sensor_icon_size, sensor_padding};
 use crate::icons;
 use crate::model::{canonical_type, source_label, PiumaConfig, Section, Sensor};
 use crate::state::{Message, PiumaSetup};
@@ -223,8 +223,7 @@ fn icon_size(cfg: &PiumaConfig, section: Option<&Section>, sensor: &Sensor) -> u
             } else {
                 cfg.thickness
             };
-            let auto =
-                icons::row_icon_target(thickness, u32::from(icons::SECTION_CONTENT_PAD), 0, 0);
+            let auto = icons::row_icon_target(thickness, section_content_pad(cfg, false), 0, 0);
             icons::icon_edge(cfg.icon_size, auto)
         }
     }

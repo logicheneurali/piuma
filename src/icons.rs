@@ -203,9 +203,9 @@ pub const SECTION_CONTENT_PAD_NARROW: u16 = 2;
 /// a vertically laid out section draws the title above its sensors, as
 /// text (font + 2) in a box padded `SECTION_CONTENT_PAD` on both sides.
 /// A horizontal layout or an empty title draws nothing on that axis.
-pub fn stacked_title_extra(layout: &str, name: &str, font: u32) -> u32 {
+pub fn stacked_title_extra(layout: &str, name: &str, font: u32, section_pad: u32) -> u32 {
     if layout == "vertical" && !name.is_empty() {
-        font + 2 + 2 * u32::from(SECTION_CONTENT_PAD)
+        font + 2 + 2 * section_pad
     } else {
         0
     }
@@ -370,9 +370,10 @@ mod tests {
     /// draw (font 14 → 14 + 2 + 2×4 of box).
     #[test]
     fn stacked_title_extra_only_for_named_vertical_sections() {
-        assert_eq!(stacked_title_extra("horizontal", "Side", 14), 0);
-        assert_eq!(stacked_title_extra("vertical", "", 14), 0);
-        assert_eq!(stacked_title_extra("vertical", "Side", 14), 24);
+        let pad = u32::from(SECTION_CONTENT_PAD);
+        assert_eq!(stacked_title_extra("horizontal", "Side", 14, pad), 0);
+        assert_eq!(stacked_title_extra("vertical", "", 14, pad), 0);
+        assert_eq!(stacked_title_extra("vertical", "Side", 14, pad), 24);
     }
 
     /// Whole slots with their gaps, never zero, saturated at `u16`.

@@ -8,7 +8,7 @@ use iced::Task;
 use crate::autostart;
 use crate::config;
 use crate::icons;
-use crate::controls::{border_live, content_scroll_id, scroll_target, section_name_id, sensor_card_id, sensor_name_id, sorted_rules};
+use crate::controls::{border_live, content_scroll_id, scroll_target, section_content_pad, section_name_id, sensor_card_id, sensor_name_id, sorted_rules};
 use crate::modal::{Modal, RuleDraft};
 use crate::view_wallpaper::wallpaper_set;
 use crate::model::*;
@@ -87,7 +87,7 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
             state.config.icon_size = (!auto).then(|| {
                 u32::from(icons::row_icon_target(
                     state.config.thickness,
-                    u32::from(icons::SECTION_CONTENT_PAD),
+                    section_content_pad(&state.config, false),
                     0,
                     0,
                 ))
@@ -424,6 +424,10 @@ fn update_inner(state: &mut PiumaSetup, message: Message) -> Task<Message> {
             match field.as_str() {
                 "border_width" => d.border_width = (value >= 0).then_some(value),
                 "border_radius" => d.border_radius = (value >= 0).then_some(value),
+                "content_padding" => d.content_padding = Some(value.clamp(0, 16)),
+                "content_padding_narrow" => {
+                    d.content_padding_narrow = Some(value.clamp(0, 16))
+                }
                 _ => {}
             }
         }

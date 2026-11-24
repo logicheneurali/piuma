@@ -588,6 +588,24 @@ fn roadmap_keys_roundtrip() {
         .expect("piuma must accept the saved config (pre-save validation)");
 }
 
+/// The section content insets roundtrip load→save and feed the preview's
+/// icon fit (the same values piuma resolves at runtime).
+#[test]
+fn section_content_padding_roundtrips() {
+    let json = r#"{"panel":{"section_defaults":{"content_padding":7,
+        "content_padding_narrow":1},"sections":[]}}"#;
+    let mut state = fixture();
+    state.load_from_json(json).expect("config must load");
+    assert_eq!(state.config.section_defaults.content_padding, Some(7));
+    assert_eq!(state.config.section_defaults.content_padding_narrow, Some(1));
+    assert_eq!(section_content_pad(&state.config, false), 7);
+    assert_eq!(section_content_pad(&state.config, true), 1);
+    let saved = state.serialize().expect("serialize must succeed");
+    let out: JsonValue = serde_json::from_str(&saved).expect("saved JSON must parse");
+    assert_eq!(out["panel"]["section_defaults"]["content_padding"], 7);
+    assert_eq!(out["panel"]["section_defaults"]["content_padding_narrow"], 1);
+}
+
 /// The roadmap N1 keys (`panel.icon_theme` and the per-sensor `icon`)
 /// roundtrip load→save with their values, and the result still parses
 /// as piuma's own schema.

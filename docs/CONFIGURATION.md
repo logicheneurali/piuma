@@ -28,7 +28,9 @@ Example configuration:
       "border_color": "#444466",
       "border_width": 1,
       "border_radius": 6,
-      "border_type": "full"
+      "border_type": "full",
+      "content_padding": 4,
+      "content_padding_narrow": 2
     },
     "sections": [
       {
@@ -224,8 +226,8 @@ three layers; ANSI colours and syntax highlighting are deliberately
 left alone so command output and code stay readable.
 
 Numeric style fields — `border_width`, `border_width_hover`, `border_radius`
-and `padding` (on sensors, on sections, and on `panel.sensor_defaults` /
-`panel.section_defaults`) use the range `-1..=N`:
+and `padding` (on sensors and on `panel.sensor_defaults`) use the range
+`-1..=N`:
 
 - `-1` = **disabled**: the item does not override that field; the value
   comes from the panel defaults block (built-in fallback if absent there
@@ -246,6 +248,13 @@ section value when set, otherwise the defaults, the panel
 `border_color` fully transparent (`#rrggbbaa` with alpha `00`) draws no
 border at all: the border ring would otherwise punch a transparent
 groove through the background.
+
+`panel.section_defaults` also sets the content inset the view draws
+around a section's title and sensors: `content_padding` for a horizontal
+bar (default 4, range 0–16) and `content_padding_narrow` for a vertical
+one (default 2, range 0–16). The same values feed the automatic icon
+size, so a larger inset shrinks tray and sensor icons until they fit the
+row; the two sliders live in the setup's *Section Defaults* tab.
 
 `panel.section_defaults.respect_screen_edges: true` squares the section
 corners that sit flush with a screen edge (roadmap M3): the bar's

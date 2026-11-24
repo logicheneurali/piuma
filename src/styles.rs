@@ -157,7 +157,7 @@ pub(crate) fn resolve_styles(
                         .copied()
                         .unwrap_or(crate::geometry::IconRoom {
                             title_extra: 0,
-                            pad: icons::SECTION_CONTENT_PAD,
+                            pad: cfg.panel.section_content_pad(false),
                         });
                     let auto_size = icons::row_icon_target(
                         thickness,

@@ -96,6 +96,21 @@ pub(crate) fn icon_theme_of(cfg: &PiumaConfig) -> &str {
         .unwrap_or_else(|| icons::icon_theme())
 }
 
+/// The section content inset as the bar resolves it: `content_padding`
+/// on a horizontal bar, `content_padding_narrow` on a vertical one
+/// (4/2 when unset), clamped to the config's range.
+pub(crate) fn section_content_pad(cfg: &PiumaConfig, vertical: bool) -> u32 {
+    let (value, default) = if vertical {
+        (
+            cfg.section_defaults.content_padding_narrow,
+            icons::SECTION_CONTENT_PAD_NARROW,
+        )
+    } else {
+        (cfg.section_defaults.content_padding, icons::SECTION_CONTENT_PAD)
+    };
+    value.unwrap_or(i32::from(default)).clamp(0, 16) as u32
+}
+
 /// The sensor's effective padding on the bar's own chain: the sensor's
 /// value when enabled (-1 = unset), else `panel.sensor_defaults`, else 0.
 pub(crate) fn sensor_padding(cfg: &PiumaConfig, sensor: &Sensor) -> u32 {
@@ -110,8 +125,12 @@ pub(crate) fn sensor_padding(cfg: &PiumaConfig, sensor: &Sensor) -> u32 {
 /// would not show what the bar draws.
 pub(crate) fn sensor_icon_size(cfg: &PiumaConfig, section: &Section, _sensor: &Sensor) -> u16 {
     let layout = section.layout.as_deref().unwrap_or("horizontal");
-    let title_extra =
-        icons::stacked_title_extra(layout, section.name.as_deref().unwrap_or(""), cfg.font_size);
+    let title_extra = icons::stacked_title_extra(
+        layout,
+        section.name.as_deref().unwrap_or(""),
+        cfg.font_size,
+        section_content_pad(cfg, false),
+    );
     let thickness = if cfg.thickness == 0 {
         config::DEFAULT_HEIGHT
     } else {
@@ -122,7 +141,7 @@ pub(crate) fn sensor_icon_size(cfg: &PiumaConfig, section: &Section, _sensor: &S
     // `panel.icon_size`, when set, overrides that fit (never past it).
     let auto = icons::row_icon_target(
         thickness,
-        u32::from(icons::SECTION_CONTENT_PAD),
+        section_content_pad(cfg, false),
         title_extra,
         0,
     );

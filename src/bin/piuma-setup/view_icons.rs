@@ -4,7 +4,10 @@
 use iced::widget::{column, text, toggler, Row, Slider};
 use iced::{Element, Length};
 
-use crate::controls::{form_grid, icon_theme_options, invalid_under, theme_cell, SYSTEM_ICON_THEME};
+use crate::controls::{
+    form_grid, icon_theme_options, invalid_under, section_content_pad, theme_cell,
+    SYSTEM_ICON_THEME,
+};
 use crate::icons;
 use crate::state::{Message, PiumaSetup};
 use crate::style::*;
@@ -17,7 +20,7 @@ pub(crate) fn icons_settings(state: &PiumaSetup) -> Element<'_, Message> {
     // title — what the slider label starts from when auto is turned off.
     let auto_px = icons::row_icon_target(
         state.config.thickness,
-        u32::from(icons::SECTION_CONTENT_PAD),
+        section_content_pad(&state.config, false),
         0,
         0,
     );

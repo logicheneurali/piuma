@@ -980,6 +980,22 @@ pub(crate) fn section_defaults_view(state: &PiumaSetup) -> Element<'_, Message> 
                 .into(),
                 state.field_err("panel.section_defaults.border_type"),
             )),
+            ("Padding with horizontal layout", slider_control_over(
+                0i32..=16,
+                d.content_padding.unwrap_or(i32::from(icons::SECTION_CONTENT_PAD)),
+                state.field_err("panel.section_defaults.content_padding"),
+                None,
+                |value| Message::SecDefaultsNumberChanged("content_padding".to_string(), value),
+                None,
+            )),
+            ("Padding with vertical layout", slider_control_over(
+                0i32..=16,
+                d.content_padding_narrow.unwrap_or(i32::from(icons::SECTION_CONTENT_PAD_NARROW)),
+                state.field_err("panel.section_defaults.content_padding_narrow"),
+                None,
+                |value| Message::SecDefaultsNumberChanged("content_padding_narrow".to_string(), value),
+                None,
+            )),
             // Roadmap M3: only sides NOT flush with a screen edge get the
             // rounded corners; the flag comes from these defaults alone.
             ("Screen Edges", toggler(d.respect_screen_edges.unwrap_or(false))

@@ -1374,6 +1374,8 @@ mod tests {
             border_width: None,
             border_radius: None,
             border_type: None,
+            content_padding: None,
+            content_padding_narrow: None,
             respect_screen_edges: None,
         });
         panel.sensor_defaults = Some(config::SensorDefaults {
@@ -1458,6 +1460,8 @@ mod tests {
             border_width: None,
             border_radius: None,
             border_type: None,
+            content_padding: None,
+            content_padding_narrow: None,
             respect_screen_edges: None,
         });
         let t = tones(&panel, None);
@@ -1692,6 +1696,8 @@ mod tests {
             border_width: Some(1),
             border_radius: None,
             border_type: None,
+            content_padding: None,
+            content_padding_narrow: None,
             respect_screen_edges: None,
         });
         let t = tones(&panel, None);

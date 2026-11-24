@@ -15,7 +15,6 @@ use crate::media_ui;
 use crate::fill_sections::FillSections;
 use crate::styles::panel_background;
 use crate::geometry::{panel_vertical, section_touch_for};
-use crate::icons::{SECTION_CONTENT_PAD, SECTION_CONTENT_PAD_NARROW};
 use crate::hover::sensor_box_id;
 use crate::popup_calendar::calendar_popup_view;
 use crate::popup_graph::graph_popup_view;
@@ -156,12 +155,9 @@ fn bar_view<'a>(
     // is the height for a horizontal panel and the width for a vertical one.
     let vertical = panel_vertical(&panel.config, layout.anchor.as_deref());
     // A side bar is narrow: spend less of its width on the content inset
-    // so the icons keep their size (styles.rs sizes them to match).
-    let content_pad = if vertical {
-        SECTION_CONTENT_PAD_NARROW
-    } else {
-        SECTION_CONTENT_PAD
-    };
+    // so the icons keep their size (styles.rs sizes them to match). Both
+    // values are configurable in the setup's Section Defaults.
+    let content_pad = panel.config.panel.section_content_pad(vertical);
 
     // Build sections.
     let mut section_elements: Vec<Element<'a, Message>> = Vec::new();

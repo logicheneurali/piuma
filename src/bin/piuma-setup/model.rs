@@ -481,6 +481,10 @@ pub struct SectionDefaults {
     pub border_width: Option<i32>,
     pub border_radius: Option<i32>,
     pub border_type: Option<String>,
+    /// Section content inset on a horizontal bar; absent = 4.
+    pub content_padding: Option<i32>,
+    /// Section content inset on a vertical bar; absent = 2.
+    pub content_padding_narrow: Option<i32>,
     /// Only sides NOT flush with a screen edge get rounded borders
     /// (roadmap M3); `None` (absent) = false.
     pub respect_screen_edges: Option<bool>,
@@ -906,7 +910,12 @@ impl PiumaSetup {
                 sec_map.insert(key.to_string(), JsonValue::String(v.clone()));
             }
         }
-        for (key, val) in [("border_width", &sd.border_width), ("border_radius", &sd.border_radius)] {
+        for (key, val) in [
+            ("border_width", &sd.border_width),
+            ("border_radius", &sd.border_radius),
+            ("content_padding", &sd.content_padding),
+            ("content_padding_narrow", &sd.content_padding_narrow),
+        ] {
             if let Some(v) = val {
                 sec_map.insert(key.to_string(), JsonValue::Number((*v).into()));
             }
@@ -1512,7 +1521,12 @@ impl PiumaSetup {
                     *field = Some(v.to_string());
                 }
             }
-            for (key, field) in [("border_width", &mut d.border_width), ("border_radius", &mut d.border_radius)] {
+            for (key, field) in [
+                ("border_width", &mut d.border_width),
+                ("border_radius", &mut d.border_radius),
+                ("content_padding", &mut d.content_padding),
+                ("content_padding_narrow", &mut d.content_padding_narrow),
+            ] {
                 // as_i64: -1 (disabled) must load too, as_u64 would drop it
                 if let Some(v) = obj.get(key).and_then(|v| v.as_i64()) {
                     *field = Some(v as i32);

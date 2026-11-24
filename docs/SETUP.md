@@ -35,6 +35,13 @@ dialog, `Enter` confirms the non-destructive ones. Closing the window or
 loading another file with unsaved edits asks first (save / discard /
 cancel), so an accidental click never drops work.
 
+The *Section Defaults* tab also carries the two content paddings
+(“Padding with horizontal layout” and “Padding with vertical layout”):
+the inset the bar spends inside every section, around its title and
+sensors, on a horizontal and a vertical bar respectively. They also
+drive the automatic icon size, so the preview always shows the same fit
+the bar will draw.
+
 Each section and sensor header also shows **▲/▼** buttons that move it
 up/down in the panel order (the arrow is disabled on the first/last item),
 a **Duplicate** button clones a section (sensors included) right below it.

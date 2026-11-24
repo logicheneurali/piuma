@@ -25,8 +25,9 @@ pub(crate) struct IconRoom {
 pub(crate) fn section_icon_room(config: &config::Config, font_size: u32) -> Vec<IconRoom> {
     let normal = IconRoom {
         title_extra: 0,
-        pad: icons::SECTION_CONTENT_PAD,
+        pad: config.panel.section_content_pad(false),
     };
+    let narrow = config.panel.section_content_pad(true);
     let mut rooms = vec![normal; config.panel.sections.len()];
     let titles = config.panel.section_title.unwrap_or(true);
     let mut on_horizontal = vec![false; config.panel.sections.len()];
@@ -42,16 +43,17 @@ pub(crate) fn section_icon_room(config: &config::Config, font_size: u32) -> Vec<
             }
             if vertical {
                 if !on_horizontal[index] {
-                    rooms[index].pad = icons::SECTION_CONTENT_PAD_NARROW;
+                    rooms[index].pad = narrow;
                 }
             } else {
                 on_horizontal[index] = true;
-                rooms[index].pad = icons::SECTION_CONTENT_PAD;
+                rooms[index].pad = normal.pad;
                 if titles {
                     rooms[index].title_extra = icons::stacked_title_extra(
                         section.layout.as_deref().unwrap_or("horizontal"),
                         &section.name,
                         font_size,
+                        u32::from(normal.pad),
                     );
                 }
             }
@@ -448,6 +450,29 @@ mod tests {
             leaf_radius([true, false, false, false], 10.0, false).top_right,
             0.0
         );
+    }
+
+    /// The content inset is a config value now, so the two setup sliders
+    /// drive both the view and the icon fit.
+    #[test]
+    fn section_padding_comes_from_the_config() {
+        let mut cfg = serde_json::from_str::<config::Config>(
+            r#"{"panel":{"font_size":11,"sections":[{"name":"top","sensors":[]}]},
+                "panels":[{"anchor":"top","sections":["top"]}]}"#,
+        )
+        .expect("test config");
+        cfg.panel.section_defaults = Some(config::SectionDefaults {
+            content_padding: Some(8),
+            content_padding_narrow: Some(1),
+            ..Default::default()
+        });
+        assert_eq!(section_icon_room(&cfg, 11)[0].pad, 8);
+        cfg.panels
+            .as_mut()
+            .and_then(|panels| panels.first_mut())
+            .expect("one panel")
+            .anchor = Some("left".to_string());
+        assert_eq!(section_icon_room(&cfg, 11)[0].pad, 1);
     }
 
     /// A stacked title shrinks icons only on a horizontal panel; a

@@ -4,7 +4,6 @@
 use std::time::{Instant, SystemTime};
 
 use crate::styles::restyle;
-use crate::icons::SECTION_CONTENT_PAD;
 use crate::popup_calendar::reap_abandoned_calendar;
 use crate::popup_graph::reap_abandoned_popup;
 use crate::popup_notifications::sync_popup;
@@ -519,7 +518,7 @@ pub(crate) fn update_icon_targets(panel: &Panel) {
             .copied()
             .unwrap_or(crate::geometry::IconRoom {
                 title_extra: 0,
-                pad: SECTION_CONTENT_PAD,
+                pad: panel.config.panel.section_content_pad(false),
             });
         for sensor in &section.sensors {
             if sensor.tray.is_none() && sensor.taskbar.is_none() {
