@@ -3157,7 +3157,7 @@ dependencies = [
 
 [[package]]
 name = "piuma"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "cosmic-text",
  "freedesktop-icons",
